@@ -51,6 +51,19 @@ install(TARGETS
   basic_slam_node
   DESTINATION lib/${PROJECT_NAME})
 
+install(PROGRAMS
+  scripts/odom_to_tf.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME odom_to_tf)
+
+install(PROGRAMS
+  scripts/odom_to_tf_noisy.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME odom_to_tf_noisy)
+
+install(DIRECTORY launch/
+  DESTINATION share/${PROJECT_NAME}/launch)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)
