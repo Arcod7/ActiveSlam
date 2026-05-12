@@ -1,0 +1,1 @@
+SLAM stack (GTSAM factor graph, ICP, etc.)
