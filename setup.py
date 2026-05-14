@@ -28,6 +28,7 @@ setup(
             'odom_to_tf_noisy = basic_slam.odom_to_tf_noisy:main',
             'odom_tf_sync     = basic_slam.odom_tf_sync:main',
             'depth_fix        = basic_slam.depth_fix:main',
+            'timestamp_debug  = basic_slam.timestamp_debug:main',
         ],
     },
 )

@@ -53,9 +53,8 @@ def generate_launch_description():
                 plugin='depth_image_proc::PointCloudXyzNode',
                 name='depth_to_cloud',
                 remappings=[
-                    ('image_rect',  '/sensor_msgs/image_depth_fixed'),
-                    ('camera_info', '/sensor_msgs/camera_info'),
-                    ('points',      '/cloud_in'),
+                    ('image_rect', '/depth_cam/image_rect'),
+                    ('points',     '/cloud_in'),
                 ],
             ),
         ],
