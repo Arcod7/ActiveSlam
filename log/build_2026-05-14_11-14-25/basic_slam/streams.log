@@ -1,0 +1,29 @@
+[0.341s] Invoking command in '/home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam': DEBUGINFOD_URLS=https://debuginfod.fedoraproject.org/ PYTHONPATH=/home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/build --no-deps symlink_data
+[0.484s] running develop
+[0.557s] running egg_info
+[0.558s] creating basic_slam.egg-info
+[0.564s] writing basic_slam.egg-info/PKG-INFO
+[0.564s] writing dependency_links to basic_slam.egg-info/dependency_links.txt
+[0.564s] writing entry points to basic_slam.egg-info/entry_points.txt
+[0.564s] writing requirements to basic_slam.egg-info/requires.txt
+[0.564s] writing top-level names to basic_slam.egg-info/top_level.txt
+[0.564s] writing manifest file 'basic_slam.egg-info/SOURCES.txt'
+[0.578s] reading manifest file 'basic_slam.egg-info/SOURCES.txt'
+[0.578s] writing manifest file 'basic_slam.egg-info/SOURCES.txt'
+[0.585s] running build_ext
+[0.585s] Creating /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/lib/python3.12/site-packages/basic-slam.egg-link (link to .)
+[0.585s] Installing odom_to_tf script to /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/lib/basic_slam
+[0.585s] Installing odom_to_tf_noisy script to /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/lib/basic_slam
+[0.586s] 
+[0.586s] Installed /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam
+[0.586s] running symlink_data
+[0.586s] creating /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/ament_index
+[0.586s] creating /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/ament_index/resource_index
+[0.586s] creating /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/ament_index/resource_index/packages
+[0.586s] symbolically linking /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/resource/basic_slam -> /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/ament_index/resource_index/packages
+[0.586s] symbolically linking /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/package.xml -> /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/basic_slam
+[0.586s] creating /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/basic_slam/launch
+[0.586s] symbolically linking /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/launch/step1_tf.launch.py -> /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/basic_slam/launch
+[0.586s] symbolically linking /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/launch/step2_pointcloud.launch.py -> /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/basic_slam/launch
+[0.586s] symbolically linking /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/launch/step3_octomap.launch.py -> /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/basic_slam/launch
+[0.603s] Invoked command in '/home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam' returned '0': DEBUGINFOD_URLS=https://debuginfod.fedoraproject.org/ PYTHONPATH=/home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/build --no-deps symlink_data

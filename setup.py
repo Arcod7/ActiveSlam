@@ -26,6 +26,8 @@ setup(
         'console_scripts': [
             'odom_to_tf       = basic_slam.odom_to_tf:main',
             'odom_to_tf_noisy = basic_slam.odom_to_tf_noisy:main',
+            'odom_tf_sync     = basic_slam.odom_tf_sync:main',
+            'depth_fix        = basic_slam.depth_fix:main',
         ],
     },
 )

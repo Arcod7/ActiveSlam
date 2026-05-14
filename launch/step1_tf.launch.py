@@ -38,8 +38,8 @@ def generate_launch_description():
 
     odom_to_tf = Node(
         package='basic_slam',
-        executable='odom_to_tf',
-        name='odom_to_tf',
+        executable='odom_tf_sync',
+        name='odom_tf_sync',
         output='screen',
     )
 

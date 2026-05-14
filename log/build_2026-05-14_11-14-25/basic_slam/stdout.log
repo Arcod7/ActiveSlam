@@ -1,0 +1,27 @@
+running develop
+running egg_info
+creating basic_slam.egg-info
+writing basic_slam.egg-info/PKG-INFO
+writing dependency_links to basic_slam.egg-info/dependency_links.txt
+writing entry points to basic_slam.egg-info/entry_points.txt
+writing requirements to basic_slam.egg-info/requires.txt
+writing top-level names to basic_slam.egg-info/top_level.txt
+writing manifest file 'basic_slam.egg-info/SOURCES.txt'
+reading manifest file 'basic_slam.egg-info/SOURCES.txt'
+writing manifest file 'basic_slam.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/lib/python3.12/site-packages/basic-slam.egg-link (link to .)
+Installing odom_to_tf script to /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/lib/basic_slam
+Installing odom_to_tf_noisy script to /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/lib/basic_slam
+
+Installed /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam
+running symlink_data
+creating /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/ament_index
+creating /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/ament_index/resource_index
+creating /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/ament_index/resource_index/packages
+symbolically linking /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/resource/basic_slam -> /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/ament_index/resource_index/packages
+symbolically linking /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/package.xml -> /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/basic_slam
+creating /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/basic_slam/launch
+symbolically linking /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/launch/step1_tf.launch.py -> /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/basic_slam/launch
+symbolically linking /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/launch/step2_pointcloud.launch.py -> /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/basic_slam/launch
+symbolically linking /home/antoine/delivery/slam_ws/src/basic_slam/build/basic_slam/launch/step3_octomap.launch.py -> /home/antoine/delivery/slam_ws/src/basic_slam/install/basic_slam/share/basic_slam/launch
