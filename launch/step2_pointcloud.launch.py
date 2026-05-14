@@ -4,12 +4,12 @@ Step 2 — Depth image → PointCloud2.
 Adds depth_image_proc::PointCloudXyzNode on top of Step 1.
 
   /sensor_msgs/image_depth  ──┐
-                               ├─ depth_image_proc ──► /cloud_in  (frame: Dcam)
+                               ├─ depth_image_proc ──► /cloud_in  (frame: bluerov2/Dcam)
   /sensor_msgs/camera_info  ──┘
 
 Test:
   ros2 topic echo /cloud_in --no-arr
-  Expected: header.frame_id = "Dcam", non-empty width/height
+  Expected: header.frame_id = "bluerov2/Dcam", width=256, height=64
 """
 import os
 from launch import LaunchDescription

@@ -6,7 +6,7 @@ Broadcasts two TFs from /StoneFish/Odometry:
 
 The noisy pose integrates body-frame deltas with velocity-proportional Gaussian
 noise, mimicking the drift a real DVL/IMU odometry would accumulate over time.
-Tune h_coef and yaw_coef to control drift rate.
+Tune H_COEF and YAW_COEF to control drift rate.
 """
 import numpy as np
 import rclpy
@@ -65,7 +65,6 @@ class OdomToTfNoisy(Node):
     def _callback(self, msg: Odometry):
         stamp = msg.header.stamp
 
-        # Always publish true TF
         t_true = TransformStamped()
         t_true.header.stamp = stamp
         t_true.header.frame_id = 'world_ned'
@@ -76,7 +75,6 @@ class OdomToTfNoisy(Node):
         t_true.transform.rotation = msg.pose.pose.orientation
         self._br.sendTransform(t_true)
 
-        # Initialise noisy state on first message
         if self._last is None:
             self._last = msg
             self._T_noisy = _odom_to_T(msg)
@@ -85,17 +83,14 @@ class OdomToTfNoisy(Node):
                          'world_ned', 'bluerov2/base_link/noisy'))
             return
 
-        # dt
         t0 = Time(seconds=self._last.header.stamp.sec,
                   nanoseconds=self._last.header.stamp.nanosec)
         t1 = Time(seconds=msg.header.stamp.sec,
                   nanoseconds=msg.header.stamp.nanosec)
         dt = max((t1 - t0).nanoseconds * 1e-9, 0.0)
 
-        # Body-frame delta
         T_delta = np.linalg.inv(_odom_to_T(self._last)) @ _odom_to_T(msg)
 
-        # Velocity-proportional noise
         vx = msg.twist.twist.linear.x
         vy = msg.twist.twist.linear.y
         wz = msg.twist.twist.angular.z

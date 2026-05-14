@@ -1,20 +1,30 @@
 """
-Step 1 — TF chain verification.
+Step 1 — TF chain.
 
 Starts:
-  - Stonefish simulator (bluerov2 + off_shore_station)
-  - odom_to_tf     : /StoneFish/Odometry → TF(world_ned → bluerov2/base_link)
-  - static TF      : bluerov2/base_link  → Dcam  (camera mount from .scn)
+  - Stonefish simulator  (bluerov2 + off_shore_station)
+  - odom_to_tf           : /StoneFish/Odometry → TF(world_ned → bluerov2/base_link)
+  - static camera TF     : bluerov2/base_link  → bluerov2/Dcam
 
-Test:
+World path is read from the STONEFISH_WORLD_DIR environment variable.
+Default: ~/delivery/slam_ws/src/world
+Override before launching:
+  export STONEFISH_WORLD_DIR=/path/to/world
+
+Verify with:
   ros2 run tf2_tools view_frames
-  Expected tree: world_ned → bluerov2/base_link → Dcam
+  Expected tree: world_ned → bluerov2/base_link → bluerov2/Dcam
 """
+import os
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
-WORLD_DATA = '/home/antoine/ros2_ws/src/world/data'
-SCENARIO   = '/home/antoine/ros2_ws/src/world/scnenario/waterlinked.scn'
+_WORLD_DIR  = os.environ.get(
+    'STONEFISH_WORLD_DIR',
+    os.path.expanduser('~/delivery/slam_ws/src/world'),
+)
+WORLD_DATA = os.path.join(_WORLD_DIR, 'data')
+SCENARIO   = os.path.join(_WORLD_DIR, 'scnenario', 'waterlinked.scn')
 
 
 def generate_launch_description():
@@ -43,7 +53,7 @@ def generate_launch_description():
             '--x', '0.2', '--y', '0.0', '--z', '0.3',
             '--roll', '1.571', '--pitch', '0.0', '--yaw', '1.571',
             '--frame-id', 'bluerov2/base_link',
-            '--child-frame-id', 'Dcam',
+            '--child-frame-id', 'bluerov2/Dcam',
         ],
     )
 
