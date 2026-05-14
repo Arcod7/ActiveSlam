@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-Measures the timestamp lag between Stonefish depth images and odometry.
+Measures the timestamp alignment between depth images and odometry.
 
-For each depth image, finds the most recent odometry stamp <= image stamp
-and logs:
-  - delta_ms : T_img - T_nearest_odom  (our estimate of GPU render latency)
-  - robot speed at that moment
-  - moving / static label
+For each depth image (raw from Stonefish, before depth_fix), finds the
+CLOSEST odometry stamp (signed delta) and also the nearest-before delta:
+
+  - delta_closest_ms : T_img - T_closest_odom  (signed, can be negative)
+  - delta_before_ms  : T_img - T_nearest_odom_before  (what depth_fix uses)
+
+Expected after the InternalUpdate fix:
+  - delta_closest  ≈ 0 ms  (both stamped in the same physics-thread loop)
+  - delta_before   ≈ 0..+10 ms  (0 if odom published just before capture,
+                                  up to +10 ms if odom fired just after)
+  - OLD behaviour was: delta_before ≈ +5 ms mean, max +12 ms
 
 Prints a rolling summary every 10 frames.
 
-Usage (after rebuild):
+Usage:
   ros2 run basic_slam timestamp_debug
-
-Or without rebuild:
-  python3 src/basic_slam/basic_slam/timestamp_debug.py
 """
 import collections
 import math
@@ -29,8 +32,10 @@ class TimestampDebug(Node):
     def __init__(self):
         super().__init__('timestamp_debug')
         self._odom_buffer: collections.deque = collections.deque(maxlen=200)
-        self._deltas_moving: list = []
-        self._deltas_static: list = []
+        self._closest_moving: list = []
+        self._closest_static: list = []
+        self._before_moving: list = []
+        self._before_static: list = []
         self._n = 0
 
         self.create_subscription(
@@ -47,34 +52,43 @@ class TimestampDebug(Node):
 
     def _depth_cb(self, msg: Image):
         if not self._odom_buffer:
-            self.get_logger().warn('no odometry yet — is /StoneFish/Odometry publishing?')
+            self.get_logger().warn('no odometry yet')
             return
 
         img_ns = _ns(msg.header.stamp)
 
-        # Most recent odometry stamp <= image stamp
-        best_stamp, best_speed, best_ns = None, 0.0, -1
+        # Nearest odom <= img (what depth_fix uses)
+        before_stamp, before_speed, before_ns = None, 0.0, -1
+        # Closest odom overall (signed delta check)
+        closest_stamp, closest_speed, closest_dist = None, 0.0, float('inf')
+
         for stamp, speed in self._odom_buffer:
             s_ns = _ns(stamp)
-            if s_ns <= img_ns and s_ns > best_ns:
-                best_stamp, best_speed, best_ns = stamp, speed, s_ns
+            if s_ns <= img_ns and s_ns > before_ns:
+                before_stamp, before_speed, before_ns = stamp, speed, s_ns
+            dist = abs(img_ns - s_ns)
+            if dist < closest_dist:
+                closest_stamp, closest_speed, closest_dist = stamp, speed, dist
 
-        if best_stamp is None:
-            self.get_logger().warn('all odometry stamps are AFTER the image stamp — clock issue?')
-            return
-
-        delta_ms = (img_ns - best_ns) / 1e6
-        moving = best_speed > 0.02
+        moving = (before_speed if before_stamp else closest_speed) > 0.02
         self._n += 1
 
-        if moving:
-            self._deltas_moving.append(delta_ms)
+        if before_stamp is not None:
+            delta_before = (img_ns - before_ns) / 1e6
+            (self._before_moving if moving else self._before_static).append(delta_before)
         else:
-            self._deltas_static.append(delta_ms)
+            delta_before = float('nan')
+
+        if closest_stamp is not None:
+            delta_closest = (img_ns - _ns(closest_stamp)) / 1e6
+            (self._closest_moving if moving else self._closest_static).append(delta_closest)
+        else:
+            delta_closest = float('nan')
 
         self.get_logger().info(
-            f'[{self._n:4d}]  delta={delta_ms:8.2f} ms  '
-            f'speed={best_speed:.3f} m/s  {"MOVING" if moving else "static"}'
+            f'[{self._n:4d}]  closest={delta_closest:+8.2f} ms  '
+            f'before={delta_before:+8.2f} ms  '
+            f'speed={closest_speed:.3f} m/s  {"MOVING" if moving else "static"}'
         )
 
         if self._n % 10 == 0:
@@ -82,17 +96,24 @@ class TimestampDebug(Node):
 
     def _print_stats(self):
         lines = [f'========== STATS ({self._n} frames) ==========']
-        for label, data in [('static', self._deltas_static), ('moving', self._deltas_moving)]:
-            if not data:
+        lines.append('  [closest = signed delta to nearest odom; before = what depth_fix uses]')
+        for label, c_data, b_data in [
+            ('static', self._closest_static, self._before_static),
+            ('moving', self._closest_moving, self._before_moving),
+        ]:
+            if not c_data:
                 lines.append(f'  {label}: no data yet')
                 continue
-            mean = sum(data) / len(data)
-            std  = math.sqrt(sum((x - mean)**2 for x in data) / len(data))
-            lines.append(
-                f'  {label:6s} ({len(data):3d} frames): '
-                f'mean={mean:7.2f} ms  std={std:6.2f} ms  '
-                f'min={min(data):7.2f}  max={max(data):7.2f}'
-            )
+            def fmt(data):
+                if not data:
+                    return 'no data'
+                mean = sum(data) / len(data)
+                std = math.sqrt(sum((x - mean)**2 for x in data) / len(data))
+                return (f'mean={mean:+7.2f} ms  std={std:5.2f} ms  '
+                        f'min={min(data):+7.2f}  max={max(data):+7.2f}')
+            lines.append(f'  {label:6s} ({len(c_data):3d} frames):')
+            lines.append(f'    closest: {fmt(c_data)}')
+            lines.append(f'    before:  {fmt(b_data)}')
         lines.append('==========================================')
         self.get_logger().info('\n'.join(lines))
 

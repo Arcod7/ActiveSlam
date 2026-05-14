@@ -67,6 +67,11 @@ class DepthFix(Node):
         best = self._best_odom_stamp(msg.header.stamp)
         if best is not None:
             fixed.header.stamp = best
+        else:
+            self.get_logger().warn(
+                f'no odom stamp <= image stamp {_to_ns(msg.header.stamp)} — '
+                'passing raw stamp through (TF lookup may fail)',
+                throttle_duration_sec=2.0)
         self._pub_image.publish(fixed)
 
     def _info_cb(self, msg: CameraInfo):

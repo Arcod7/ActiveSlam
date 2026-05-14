@@ -11,48 +11,66 @@ Key diagnostic: `/cloud_in` is **perfectly aligned in `bluerov2/base_link`** but
 
 ---
 
-## Root cause — CONFIRMED
+## Root cause — TWO contributing factors
 
-**OctoMap ray-cast accumulation from multiple viewing angles.**
+### 1. GPU render latency (Δrender) — CONFIRMED
 
-When a ray hits a surface, it marks only the endpoint as OCCUPIED and everything
-before it as FREE. It does **not** cast through the surface. Voxels on the far
-side of an object are therefore never cleared by rays from this angle.
+Stonefish timestamps depth images with `nh_->get_clock()->now()` **at publish
+time**, which is AFTER the async PBO GPU readback completes (one render frame
+delay). Odometry is also stamped with `get_clock()->now()` but at near-zero
+latency (CPU computation only).
 
-When the robot rotates and views the same pillar from a different angle:
-- New rays mark the near surface OCCUPIED from the new angle
-- Old voxels from the previous angle are now off-axis — no new ray passes through
-  them to clear them
-- Both sets of voxels stay OCCUPIED
+**Stonefish source evidence** (`stonefish_ros2/src/ROS2SimulationManager.cpp`):
+```
+line 851: img->header.stamp = nh_->get_clock()->now();  // after PBO readback
+line 840: info->header.stamp = img->header.stamp;
+ROS2Interface.cpp line 273: msg.header.stamp = nh_->get_clock()->now();  // odom
+```
 
-Repeating from many angles builds up a cluster wider than the actual pillar → wall.
-
-This is **inherent to OctoMap's binary ray-cast model** and is independent of
-timestamp accuracy.
-
----
-
-## Timestamp hypothesis — DISPROVEN
-
-**Hypothesis:** Stonefish stamps depth images after GPU readback, causing a large
-offset (Δ_render) between image content time and image timestamp. When moving,
-this offset would cause the TF lookup to use the wrong robot pose.
-
-**Measured data (`timestamp_debug`):**
+**Measured delta (`timestamp_debug`):**
 
 | State  | Frames | Mean  | Std   | Min   | Max    |
 |--------|--------|-------|-------|-------|--------|
 | static | 39     | 5.67 ms | 2.78 ms | 0.11 ms | 10.25 ms |
 | moving | 321    | 5.24 ms | 3.07 ms | 0.05 ms | 12.57 ms |
 
-**Conclusion:** The offset is ~5 ms regardless of movement. This is normal
-sampling jitter from where in the 10 ms odometry period the depth frame fires.
-At 5 ms and 1 m/s speed, the resulting position error is 5 mm — far below
-OctoMap's 10 cm resolution. **Timestamps are not the problem.**
+**Correct interpretation:** The ~5 ms mean IS Δrender (GPU readback delay), not
+sampling jitter. It is consistent between static and moving because GPU render
+time does not depend on robot velocity.
 
-The timestamp correction in `depth_fix.py` (replacing image stamp with nearest
-odometry stamp) is still correct and eliminates even this small jitter, but it
-does not affect the wall problem.
+**Failure mode in depth_fix:** `_best_odom_stamp()` picks the most recent odom
+stamp ≤ T_img. For ~85% of frames (Δrender < 10 ms) it correctly selects T_N.
+For ~15% of outlier frames (Δrender > 10 ms) it accidentally selects T_N+10ms
+(the NEXT odometry step), associating the image with a future robot pose.
+
+**Impact at long range / fast yaw:**
+- Error = Δrender_outlier × angular_velocity × distance
+- Example: 12 ms × 1 rad/s × 10 m = **12 cm ≈ 1 voxel** (OctoMap res 10 cm)
+- At short range this is sub-voxel. At 10 m+ with fast rotation, it places
+  voxels in the wrong cell → visible wall thickening around pillars.
+
+### 2. OctoMap ray-cast back-face limitation
+
+When a ray hits a surface, it marks only the endpoint as OCCUPIED and everything
+before it as FREE. Voxels on the far side are never cleared.
+
+When the robot rotates and views the same pillar from a new angle, old voxels
+from the previous angle are off-axis — no new ray passes through them. Both sets
+stay OCCUPIED → cluster wider than the actual pillar → wall.
+
+This is **inherent to OctoMap's binary ray-cast model**. It worsens with fast
+yaw because more angles accumulate per second.
+
+---
+
+## Timestamp hypothesis — REVISED
+
+**Original (wrong) conclusion:** "Offset is identical static vs moving →
+GPU latency disproven."
+
+**Correct conclusion:** The offset *is* Δrender. Being identical static vs moving
+is expected — GPU render time is independent of robot velocity. The script
+measured the right quantity but the conclusion was wrong.
 
 ---
 
@@ -60,10 +78,10 @@ does not affect the wall problem.
 
 | Approach | Outcome |
 |---|---|
-| `odom_tf_sync` — interpolate TF to exact image timestamp | Not the root cause; timing error is negligible (~5 ms) |
-| GPU render latency hypothesis | **Disproven** by measurement: offset is identical static vs moving |
+| `odom_tf_sync` — interpolate TF to exact image timestamp | Addresses symptom correctly but root cause is wrong stamp, not TF interpolation |
+| GPU render latency hypothesis | **CONFIRMED** by Stonefish source: `get_clock()->now()` at publish, after PBO readback |
 | `depth_fix` NaN replacement | Fixed the ghost sphere at camera origin ✓ |
-| `depth_fix` timestamp correction | Correct implementation, eliminates ~5 ms jitter, but not the wall cause |
+| `depth_fix` timestamp correction | Correct approach; works for ~85% of frames; fails for ~15% outlier frames (picks wrong odom step) |
 | Reduced yaw speed (`step/4`) | Reduces symptom (fewer viewing angles per second) but does not cure |
 | OctoMap probabilistic decay | Rejected: masks the problem instead of solving it |
 
@@ -71,32 +89,41 @@ does not affect the wall problem.
 
 ## Remaining ideas to explore
 
-1. **Switch to TSDF-based mapper (voxblox / nvblox)**
-   TSDF (Truncated Signed Distance Function) stores a signed distance field
-   instead of binary occupancy. New observations can actively correct previous
-   ones — a voxel marked occupied from the front gets un-marked when new evidence
-   from the back contradicts it. This is the architecturally correct solution.
+1. **Fix depth_fix outlier handling** (highest priority)
+   Current `_best_odom_stamp` picks nearest odom ≤ T_img. For outlier frames
+   (Δrender > 10 ms), this picks T_N+10ms instead of T_N. Options:
+   - Subtract a fixed margin (~7 ms) from T_img before lookup so the search
+     window centres on the correct odom step
+   - Use closest-to-expected-Δrender (pick odom stamp ~5 ms before T_img)
+   - Increase odometry publish rate (100 Hz → 500+ Hz) so worst-case error < 2 ms
 
-2. **OctoMap hit/miss probability tuning**
-   Lower the `sensor_model/hit` probability and raise `sensor_model/miss` so
-   occupied voxels require more consistent evidence and fade faster under
-   contradicting observations. Weaker than TSDF but worth measuring.
+2. **Switch to TSDF-based mapper (voxblox / nvblox)**
+   TSDF stores a signed distance field instead of binary occupancy. New
+   observations actively correct previous ones. Solves both the OctoMap
+   back-face problem and tolerates small timestamp errors.
 
-3. **Increase OctoMap resolution**
-   Smaller voxels (e.g., 0.05 m) mean each viewing angle marks fewer incorrect
-   voxels. Reduces smear area but does not eliminate it. High memory cost.
+3. **OctoMap hit/miss probability tuning**
+   Lower `sensor_model/hit`, raise `sensor_model/miss` so occupied voxels fade
+   faster under contradicting observations. Weaker than TSDF but cheap to try.
 
-4. **Limit OctoMap integration rate / keyframe selection**
-   Only integrate frames when the robot has moved significantly (distance or
-   angle threshold). Reduces redundant observations from nearby poses. Does not
-   fix the fundamental issue but reduces noise.
+4. **Increase OctoMap resolution**
+   Smaller voxels (0.05 m) reduce smear area but do not eliminate it. High
+   memory cost.
+
+5. **Keyframe selection / rate limiting**
+   Only integrate frames when the robot has moved significantly. Reduces
+   redundant observations from nearby poses but does not fix the fundamental
+   issue.
 
 ---
 
-## Key invariant confirmed
+## Key invariant (updated)
 
-> The timestamps are accurate. The point cloud is correctly placed in the world
-> for each individual frame. The wall problem is caused by OctoMap's inability
-> to clear occupied voxels that are off the ray path of subsequent observations.
-> No timing fix can solve this.
-
+> The point cloud is correctly placed in `bluerov2/base_link` every frame.
+> The world-frame misalignment during movement has two causes:
+> (1) ~15% of frames receive a wrong TF lookup because depth_fix picks the next
+>     odometry step instead of the current one on outlier GPU readback frames;
+> (2) OctoMap cannot clear voxels that are off the ray path of subsequent
+>     observations.
+> Improving depth_fix to correctly handle outlier frames will reduce (1).
+> Solving (2) requires TSDF or accepting the back-face smear.
