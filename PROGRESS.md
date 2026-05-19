@@ -11,43 +11,58 @@ Key diagnostic: `/cloud_in` is **perfectly aligned in `bluerov2/base_link`** but
 
 ---
 
-## Root cause — TWO contributing factors
+## Root cause — THREE contributing factors
 
-### 1. GPU render latency (Δrender) — CONFIRMED
+### 1. GPU render latency (Δrender) — FIXED in Stonefish (fix3 + addendum)
 
-Stonefish timestamps depth images with `nh_->get_clock()->now()` **at publish
-time**, which is AFTER the async PBO GPU readback completes (one render frame
-delay). Odometry is also stamped with `get_clock()->now()` but at near-zero
-latency (CPU computation only).
+**Original bug**: Stonefish stamped depth images with `nh_->get_clock()->now()` at
+publish time (after async PBO GPU readback). Odometry is stamped at near-zero
+latency. Δrender ≈ 5 ms mean, up to 12 ms peak.
 
-**Stonefish source evidence** (`stonefish_ros2/src/ROS2SimulationManager.cpp`):
+**Fix3 (phase 1)**: Added `captureTime_` double-buffer in `OpenGLDepthCamera`.
+`pendingCaptureTime_` was captured in `UpdateTransform()` on the **GL thread**,
+frozen to `captureTime_` in `DrawLDR()`, exposed via `getCaptureTime()` /
+`getLastCaptureTime()`.
+
+**Fix3 addendum (phase 2 — this session)**: Found a remaining race: the GL thread
+called `getSimulationTime(true)` in `UpdateTransform()`, which could return a
+*later* physics step's time while the pose still belonged to step N. At 100 Hz
+physics / ~60 Hz render, this introduced up to 10–20 ms timestamp error — enough
+for 1–2 voxels at 10 m range, 0.8 rad/s.
+
+**Final fix**: `DepthCamera::SetupCamera()` on the **physics thread** now snapshots
+`getSimulationTime(true)` and writes it to `glCamera->tempCaptureTime_` via
+`SetPendingCaptureTime()` — same double-buffer pattern as `tempEye/dir/up`. The GL
+thread then copies `tempCaptureTime_ → pendingCaptureTime_` without querying the
+clock itself. Timestamp and pose are always from the same physics step.
+
+**Also fixed**: `stonefish_ros2/ROS2SimulationManager.cpp` was calling
+`cam->getLastCaptureTimeNs()` (fix1 wall-clock API) — an undefined symbol against
+our installed fix3 library. Updated to:
+```cpp
+double captureTimeS = (double)cam->getLastCaptureTime();
+img->header.stamp = captureTimeS > 0.0
+    ? rclcpp::Time(static_cast<int64_t>(captureTimeS * 1e9))
+    : nh_->get_clock()->now();
 ```
-line 851: img->header.stamp = nh_->get_clock()->now();  // after PBO readback
-line 840: info->header.stamp = img->header.stamp;
-ROS2Interface.cpp line 273: msg.header.stamp = nh_->get_clock()->now();  // odom
+
+**Data flow after all fixes:**
+```
+physics thread:
+  SetupCamera(P_N) + SetPendingCaptureTime(T_N)  ← tempEye/dir/up + tempCaptureTime_
+
+GL thread UpdateTransform():
+  pendingCaptureTime_ = tempCaptureTime_           ← no clock query, no race
+  eye/dir/up = tempEye/dir/up
+
+GL thread DrawLDR() — reads P_N pixels to PBO:
+  captureTime_ = pendingCaptureTime_               ← T_N frozen with P_N pixels
+
+GL thread UpdateTransform() next cycle — NewDataReady:
+  lastCaptureTime_ = getCaptureTime() = T_N        ← delivered with P_N frame ✓
 ```
 
-**Measured delta (`timestamp_debug`):**
-
-| State  | Frames | Mean  | Std   | Min   | Max    |
-|--------|--------|-------|-------|-------|--------|
-| static | 39     | 5.67 ms | 2.78 ms | 0.11 ms | 10.25 ms |
-| moving | 321    | 5.24 ms | 3.07 ms | 0.05 ms | 12.57 ms |
-
-**Correct interpretation:** The ~5 ms mean IS Δrender (GPU readback delay), not
-sampling jitter. It is consistent between static and moving because GPU render
-time does not depend on robot velocity.
-
-**Failure mode in depth_fix:** `_best_odom_stamp()` picks the most recent odom
-stamp ≤ T_img. For ~85% of frames (Δrender < 10 ms) it correctly selects T_N.
-For ~15% of outlier frames (Δrender > 10 ms) it accidentally selects T_N+10ms
-(the NEXT odometry step), associating the image with a future robot pose.
-
-**Impact at long range / fast yaw:**
-- Error = Δrender_outlier × angular_velocity × distance
-- Example: 12 ms × 1 rad/s × 10 m = **12 cm ≈ 1 voxel** (OctoMap res 10 cm)
-- At short range this is sub-voxel. At 10 m+ with fast rotation, it places
-  voxels in the wrong cell → visible wall thickening around pillars.
+---
 
 ### 2. OctoMap ray-cast back-face limitation
 
@@ -61,16 +76,39 @@ stay OCCUPIED → cluster wider than the actual pillar → wall.
 This is **inherent to OctoMap's binary ray-cast model**. It worsens with fast
 yaw because more angles accumulate per second.
 
+At 0.8 rad/s with 10 cm voxels, each degree of rotation accumulates independent
+voxels from the new viewing angle that old rays never clear.
+
+### 3. Simulation speed drift (minor)
+
+`getSimulationTime(true)` = `simTime + epochOffset` where `epochOffset` is set at
+simulation START using wall clock. If Stonefish runs faster or slower than 1× real
+time, `getSimulationTime(true)` drifts from `nh_->get_clock()->now()`. This means
+the depth image stamp and odometry stamp are in slightly different time domains.
+
+**Impact**: Small (typically < 1 ms at 1× speed). `depth_fix._best_odom_stamp()`
+tolerates this since it picks the nearest odom stamp ≤ img_stamp.
+
 ---
 
-## Timestamp hypothesis — REVISED
+## Timestamp flow summary (current state)
 
-**Original (wrong) conclusion:** "Offset is identical static vs moving →
-GPU latency disproven."
+| Message | Stamp source | After fix |
+|---|---|---|
+| Odometry | `get_clock()->now()` at publish | Unchanged (wall-clock accurate) |
+| TF (world_ned→base_link) | `get_clock()->now()` at physics step | Unchanged |
+| Depth image | `getLastCaptureTime()` → `getSimulationTime(true)` at **physics-thread SetupCamera** | ✓ Fixed — same step as odom |
+| CameraInfo | Copied from depth image stamp | ✓ Fixed transitively |
 
-**Correct conclusion:** The offset *is* Δrender. Being identical static vs moving
-is expected — GPU render time is independent of robot velocity. The script
-measured the right quantity but the conclusion was wrong.
+---
+
+## depth_fix.py status
+
+- **NaN replacement**: Still needed — Stonefish writes 0 for no-return pixels.
+- **Timestamp correction**: Still useful as a safety net. With correct Stonefish
+  stamps, `_best_odom_stamp()` should now pick the exact same-step odom (Δ < 1 ms)
+  rather than correcting a ~5 ms error. Leaving it in place adds no harm and
+  protects against edge cases.
 
 ---
 
@@ -81,21 +119,20 @@ measured the right quantity but the conclusion was wrong.
 | `odom_tf_sync` — interpolate TF to exact image timestamp | Addresses symptom correctly but root cause is wrong stamp, not TF interpolation |
 | GPU render latency hypothesis | **CONFIRMED** by Stonefish source: `get_clock()->now()` at publish, after PBO readback |
 | `depth_fix` NaN replacement | Fixed the ghost sphere at camera origin ✓ |
-| `depth_fix` timestamp correction | Correct approach; works for ~85% of frames; fails for ~15% outlier frames (picks wrong odom step) |
+| `depth_fix` timestamp correction | Correct approach; safety net after Stonefish fix |
 | Reduced yaw speed (`step/4`) | Reduces symptom (fewer viewing angles per second) but does not cure |
 | OctoMap probabilistic decay | Rejected: masks the problem instead of solving it |
+| GL-thread `getSimulationTime()` | **FOUND & FIXED**: race introduced 1–2 step timing error |
+| stonefish_ros2 undefined `getLastCaptureTimeNs` | **FOUND & FIXED**: was causing silent runtime crash in depth callback |
 
 ---
 
 ## Remaining ideas to explore
 
-1. **Fix depth_fix outlier handling** (highest priority)
-   Current `_best_odom_stamp` picks nearest odom ≤ T_img. For outlier frames
-   (Δrender > 10 ms), this picks T_N+10ms instead of T_N. Options:
-   - Subtract a fixed margin (~7 ms) from T_img before lookup so the search
-     window centres on the correct odom step
-   - Use closest-to-expected-Δrender (pick odom stamp ~5 ms before T_img)
-   - Increase odometry publish rate (100 Hz → 500+ Hz) so worst-case error < 2 ms
+1. **Verify residual after Stonefish fix3 addendum** (highest priority)
+   After rebuilding with the physics-thread snapshot fix, re-run the 0.8 rad/s
+   test. If displacement drops to 0–1 voxel, the fix is effective. If 1 voxel
+   remains, it is likely the OctoMap back-face limitation (not a timing problem).
 
 2. **Switch to TSDF-based mapper (voxblox / nvblox)**
    TSDF stores a signed distance field instead of binary occupancy. New
@@ -120,10 +157,8 @@ measured the right quantity but the conclusion was wrong.
 ## Key invariant (updated)
 
 > The point cloud is correctly placed in `bluerov2/base_link` every frame.
-> The world-frame misalignment during movement has two causes:
-> (1) ~15% of frames receive a wrong TF lookup because depth_fix picks the next
->     odometry step instead of the current one on outlier GPU readback frames;
-> (2) OctoMap cannot clear voxels that are off the ray path of subsequent
->     observations.
-> Improving depth_fix to correctly handle outlier frames will reduce (1).
-> Solving (2) requires TSDF or accepting the back-face smear.
+> After the Stonefish fix3 + addendum, depth image timestamps should match
+> their physics-step odometry to within ~1 ms.
+> Any remaining world-frame misalignment during fast yaw is attributable to
+> OctoMap's ray-cast back-face limitation — a fundamental model limitation,
+> not a timestamp issue.
