@@ -24,7 +24,7 @@ def generate_launch_description():
     step1 = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
-                get_package_share_directory('basic_slam'),
+                get_package_share_directory('stonefish_groundtruth_mapping'),
                 'launch', 'step1_tf.launch.py'
             )
         )

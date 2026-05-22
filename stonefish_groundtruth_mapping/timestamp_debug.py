@@ -17,7 +17,7 @@ Expected after the InternalUpdate fix:
 Prints a rolling summary every 10 frames.
 
 Usage:
-  ros2 run basic_slam timestamp_debug
+  ros2 run stonefish_groundtruth_mapping timestamp_debug
 """
 import collections
 import math

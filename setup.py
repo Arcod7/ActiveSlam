@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'basic_slam'
+package_name = 'stonefish_groundtruth_mapping'
 
 setup(
     name=package_name,
@@ -24,10 +24,10 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'odom_to_tf       = basic_slam.odom_to_tf:main',
-            'odom_to_tf_noisy = basic_slam.odom_to_tf_noisy:main',
-            'odom_tf_sync     = basic_slam.odom_tf_sync:main',
-            'timestamp_debug  = basic_slam.timestamp_debug:main',
+            'odom_to_tf       = stonefish_groundtruth_mapping.odom_to_tf:main',
+            'odom_to_tf_noisy = stonefish_groundtruth_mapping.odom_to_tf_noisy:main',
+            'odom_tf_sync     = stonefish_groundtruth_mapping.odom_tf_sync:main',
+            'timestamp_debug  = stonefish_groundtruth_mapping.timestamp_debug:main',
         ],
     },
 )
