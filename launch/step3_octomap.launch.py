@@ -39,8 +39,9 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'frame_id':               'world_ned',
-            'resolution':             0.1,        # 10 cm voxels
+            'resolution':             0.2,        # 20 cm voxels
             'sensor_model/max_range': 15.0,       # matches Dcam depth_max in .scn
+            'latch':                  True,
         }],
         remappings=[
             ('cloud_in', '/cloud_in'),
