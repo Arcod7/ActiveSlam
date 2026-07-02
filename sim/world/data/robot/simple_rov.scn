@@ -1,0 +1,170 @@
+<?xml version="1.0"?>
+<scenario>
+    <looks>
+        <look name="rov_body" rgb="1.0 0.6 0.0" roughness="0.3"/>
+        <look name="rov_prop" rgb="0.2 0.2 0.8" roughness="0.3"/>
+    </looks>
+
+    <!-- Simple box ROV: neutrally buoyant, 6 thrusters, forward-mounted depth camera.
+         Robot name kept as "bluerov2" so all ROS2 topics remain identical. -->
+    <robot name="bluerov2" fixed="false" self_collisions="false">
+        <base_link name="base_link" type="compound" physics="submerged">
+
+            <!-- Main body: buoyant box, mass slightly below displaced water (15.5 kg) -->
+            <external_part name="Body" type="box" physics="submerged" buoyant="true">
+                <dimensions xyz="0.4 0.25 0.15"/>
+                <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
+                <material name="Neutral"/>
+                <look name="rov_body"/>
+                <mass value="14.5"/>
+                <compound_transform rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0"/>
+            </external_part>
+
+            <!-- Keel weight: non-buoyant, placed low (positive z = down in NED) for stability -->
+            <internal_part name="Keel" type="sphere" physics="submerged" buoyant="false">
+                <dimensions radius="0.01"/>
+                <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
+                <material name="Steel"/>
+                <look name="rov_body"/>
+                <mass value="1.0"/>
+                <compound_transform rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.075"/>
+            </internal_part>
+
+        </base_link>
+
+        <!-- Thruster 0: Front-Right horizontal (45 deg) -->
+        <actuator name="FrontRight" type="thruster">
+            <link name="base_link"/>
+            <origin xyz="0.15 0.1 0.0" rpy="0 0 -0.7853981634"/>
+            <specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
+            <propeller diameter="0.076" right="true">
+                <mesh filename="obj/cw.obj" scale="1.0"/>
+                <material name="Neutral"/>
+                <look name="rov_prop"/>
+            </propeller>
+            <rotor_dynamics type="zero_order"/>
+            <thrust_model type="fluid_dynamics">
+                <thrust_coeff forward="1.5" reverse="1.0"/>
+                <torque_coeff value="0.016"/>
+            </thrust_model>
+        </actuator>
+
+        <!-- Thruster 1: Front-Left horizontal (45 deg) -->
+        <actuator name="FrontLeft" type="thruster">
+            <link name="base_link"/>
+            <origin xyz="0.15 -0.1 0.0" rpy="0 0 0.7853981634"/>
+            <specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
+            <propeller diameter="0.076" right="true">
+                <mesh filename="obj/ccw.obj" scale="1.0"/>
+                <material name="Neutral"/>
+                <look name="rov_prop"/>
+            </propeller>
+            <rotor_dynamics type="zero_order"/>
+            <thrust_model type="fluid_dynamics">
+                <thrust_coeff forward="1.5" reverse="1.0"/>
+                <torque_coeff value="0.016"/>
+            </thrust_model>
+        </actuator>
+
+        <!-- Thruster 2: Back-Right horizontal (45 deg) -->
+        <actuator name="BackRight" type="thruster">
+            <link name="base_link"/>
+            <origin xyz="-0.15 0.1 0.0" rpy="0 0 -2.3561944902"/>
+            <specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
+            <propeller diameter="0.076" right="true">
+                <mesh filename="obj/cw.obj" scale="1.0"/>
+                <material name="Neutral"/>
+                <look name="rov_prop"/>
+            </propeller>
+            <rotor_dynamics type="zero_order"/>
+            <thrust_model type="fluid_dynamics">
+                <thrust_coeff forward="1.5" reverse="1.0"/>
+                <torque_coeff value="0.016"/>
+            </thrust_model>
+        </actuator>
+
+        <!-- Thruster 3: Back-Left horizontal (45 deg) -->
+        <actuator name="BackLeft" type="thruster">
+            <link name="base_link"/>
+            <origin xyz="-0.15 -0.1 0.0" rpy="0 0 2.3561944902"/>
+            <specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
+            <propeller diameter="0.076" right="true">
+                <mesh filename="obj/ccw.obj" scale="1.0"/>
+                <material name="Neutral"/>
+                <look name="rov_prop"/>
+            </propeller>
+            <rotor_dynamics type="zero_order"/>
+            <thrust_model type="fluid_dynamics">
+                <thrust_coeff forward="1.5" reverse="1.0"/>
+                <torque_coeff value="0.016"/>
+            </thrust_model>
+        </actuator>
+
+        <!-- Thruster 4: Vertical Front (forward = downward in NED) -->
+        <actuator name="VertFront" type="thruster">
+            <link name="base_link"/>
+            <origin xyz="0.12 0.0 0.0" rpy="0 -1.5707963268 0"/>
+            <specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
+            <propeller diameter="0.076" right="true">
+                <mesh filename="obj/cw.obj" scale="1.0"/>
+                <material name="Neutral"/>
+                <look name="rov_prop"/>
+            </propeller>
+            <rotor_dynamics type="zero_order"/>
+            <thrust_model type="fluid_dynamics">
+                <thrust_coeff forward="1.5" reverse="1.0"/>
+                <torque_coeff value="0.016"/>
+            </thrust_model>
+        </actuator>
+
+        <!-- Thruster 5: Vertical Back (forward = downward in NED) -->
+        <actuator name="VertBack" type="thruster">
+            <link name="base_link"/>
+            <origin xyz="-0.12 0.0 0.0" rpy="0 -1.5707963268 0"/>
+            <specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
+            <propeller diameter="0.076" right="true">
+                <mesh filename="obj/ccw.obj" scale="1.0"/>
+                <material name="Neutral"/>
+                <look name="rov_prop"/>
+            </propeller>
+            <rotor_dynamics type="zero_order"/>
+            <thrust_model type="fluid_dynamics">
+                <thrust_coeff forward="1.5" reverse="1.0"/>
+                <torque_coeff value="0.016"/>
+            </thrust_model>
+        </actuator>
+
+        <sensor name="odometry" type="odometry" rate="100.0">
+            <link name="base_link"/>
+            <origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0"/>
+            <ros_publisher topic="/StoneFish/Odometry"/>
+        </sensor>
+
+        <!--
+            Mimicking Water Linked Sonar 3D-15 (1.2 MHz mode, 15m range)
+            - resolution_x: 90° H-FOV / 0.35° beam spacing = 257 pixels
+            - resolution_y: 40° V-FOV / 0.60° beam spacing = 67 pixels
+
+            /!\ This 257x67 grid assumes the decoupled vertical FOV patch is applied
+            to the Stonefish engine.
+        -->
+        <sensor name="Dcam" rate="5.0" type="depthcamera">
+            <specs
+                resolution_x="257"
+                resolution_y="67"
+                horizontal_fov="90.0"
+                vertical_fov="40.0"
+                depth_min="0.2"
+                depth_max="15.0"
+            />
+            <origin rpy="1.571 0.0 1.571" xyz="0.2 0.0 0.3"/>
+            <link name="base_link"/>
+            <ros_publisher topic="/sensor_msgs"/>
+        </sensor>
+
+        <world_transform xyz="0 0 8" rpy="0 0 0"/>
+
+        <ros_subscriber thrusters="/bluerov2/controller/thruster_setpoints_sim"/>
+        <ros_publisher thrusters="/bluerov2/controller/thruster_state"/>
+    </robot>
+</scenario>
