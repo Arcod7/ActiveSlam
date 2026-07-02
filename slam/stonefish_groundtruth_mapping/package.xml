@@ -20,6 +20,7 @@
   <exec_depend>depth_image_proc</exec_depend>
   <exec_depend>octomap_server</exec_depend>
   <exec_depend>frontier_slam</exec_depend>  <!-- tsdf.launch.py launches tsdf_mapper -->
+  <exec_depend>world</exec_depend>  <!-- tf.launch.py resolves the scenario via this package's share dir -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

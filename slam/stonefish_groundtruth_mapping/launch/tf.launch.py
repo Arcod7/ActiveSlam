@@ -7,9 +7,11 @@ Starts:
   - static camera TF     : bluerov2/base_link  → bluerov2/Dcam
 
 World path is read from the STONEFISH_WORLD_DIR environment variable.
-Default: <repo root>/sim/world, resolved relative to this launch file (works
-with `colcon build --symlink-install`, this project's documented build
-command, regardless of where the repo is cloned).
+Default: the installed `world` package's share directory (reliable
+regardless of symlink-install vs. copy-install — colcon doesn't guarantee
+every data_files entry becomes a symlink on every rebuild, so resolving
+via __file__ is not safe; get_package_share_directory() is what
+ament_index is for).
 Override before launching:
   export STONEFISH_WORLD_DIR=/path/to/world
 
@@ -20,14 +22,9 @@ Verify with:
 import os
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from ament_index_python.packages import get_package_share_directory
 
-# realpath() follows the symlink-install link back to the source file, so
-# this resolves correctly even though colcon runs launch files from install/.
-_THIS_DIR = os.path.dirname(os.path.realpath(__file__))
-_DEFAULT_WORLD_DIR = os.path.normpath(
-    os.path.join(_THIS_DIR, '..', '..', '..', 'sim', 'world')
-)
-_WORLD_DIR  = os.environ.get('STONEFISH_WORLD_DIR', _DEFAULT_WORLD_DIR)
+_WORLD_DIR = os.environ.get('STONEFISH_WORLD_DIR', get_package_share_directory('world'))
 WORLD_DATA = os.path.join(_WORLD_DIR, 'data')
 SCENARIO   = os.path.join(_WORLD_DIR, 'scnenario', 'waterlinked.scn')
 
