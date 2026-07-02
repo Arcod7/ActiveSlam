@@ -9,10 +9,12 @@ Panels:
         - /Sonar3D1/Topic1
         - /Octomap1/Topic1
         - /Octomap1/Namespaces1
+        - /Odometry1
         - /Odometry1/Shape1
         - /Frontiers1/Namespaces1
         - /Path1
-        - /OccupancyGrid1/Status1
+        - /OccupancyGrid1
+        - /OccupancyGrid2
       Splitter Ratio: 0.5721455216407776
     Tree Height: 1108
   - Class: rviz_common/Selection
@@ -68,10 +70,10 @@ Visualization Manager:
         Value: /sensor_msgs/image_depth
       Value: false
       Visibility:
-        "": true
         DepthCamera: true
         Frontiers: true
         Grid: true
+        OccupancyGrid: true
         Octomap: true
         OctomapPoints: true
         Odometry: true
@@ -129,17 +131,17 @@ Visualization Manager:
         Value: /sensor_msgs/image_depth
       Value: true
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
+      Enabled: false
       Name: Octomap
       Namespaces:
-        map: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /occupied_cells_vis_array
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -149,8 +151,8 @@ Visualization Manager:
       Axis: Z
       Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
-      Color: 255; 255; 255
-      Color Transformer: Intensity
+      Color: 16; 65; 158
+      Color Transformer: FlatColor
       Decay Time: 0
       Enabled: true
       Invert Rainbow: false
@@ -162,8 +164,8 @@ Visualization Manager:
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 3
-      Size (m): 0.009999999776482582
-      Style: Flat Squares
+      Size (m): 0.10000000149011612
+      Style: Boxes
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -191,18 +193,18 @@ Visualization Manager:
           Value: true
         Value: true
       Enabled: true
-      Keep: 10
+      Keep: 1
       Name: Odometry
       Position Tolerance: 0.10000000149011612
       Shape:
         Alpha: 1
         Axes Length: 1
         Axes Radius: 0.10000000149011612
-        Color: 46; 194; 126
-        Head Length: 0.30000001192092896
-        Head Radius: 0.10000000149011612
+        Color: 240; 124; 32
+        Head Length: 0.25
+        Head Radius: 0.15000000596046448
         Shaft Length: 0.20000000298023224
-        Shaft Radius: 0.05000000074505806
+        Shaft Radius: 0.07999999821186066
         Value: Arrow
       Topic:
         Depth: 5
@@ -216,7 +218,7 @@ Visualization Manager:
       Axes Length: 1
       Axes Radius: 0.10000000149011612
       Class: rviz_default_plugins/Pose
-      Color: 255; 25; 0
+      Color: 245; 194; 40
       Enabled: true
       Head Length: 0.30000001192092896
       Head Radius: 0.10000000149011612
@@ -238,7 +240,6 @@ Visualization Manager:
       Namespaces:
         frontiers: true
         goal: true
-        goal_arrow: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -264,7 +265,7 @@ Visualization Manager:
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
-      Color: 25; 255; 0
+      Color: 38; 174; 96
       Enabled: true
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
@@ -291,9 +292,9 @@ Visualization Manager:
       Value: true
     - Class: octomap_rviz_plugins/OccupancyGrid
       Enabled: true
-      Max. Height Display: inf
+      Max. Height Display: 3.4028234663852886e+38
       Max. Octree Depth: 16
-      Min. Height Display: -inf
+      Min. Height Display: -3.4028234663852886e+38
       Name: OccupancyGrid
       Topic:
         Depth: 5
@@ -303,14 +304,14 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /octomap_binary
       Value: true
-      Voxel Alpha: 0.019999999552965164
-      Voxel Coloring: Z-Axis
+      Voxel Alpha: 0.009999999776482582
+      Voxel Coloring: Cell Color
       Voxel Rendering: Free Voxels
     - Class: octomap_rviz_plugins/OccupancyGrid
       Enabled: false
-      Max. Height Display: inf
+      Max. Height Display: 3.4028234663852886e+38
       Max. Octree Depth: 16
-      Min. Height Display: -inf
+      Min. Height Display: -3.4028234663852886e+38
       Name: OccupancyGrid
       Topic:
         Depth: 5
@@ -369,25 +370,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 41.69511032104492
+      Distance: 38.0816650390625
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 3.505934000015259
-        Y: 1.4432060718536377
-        Z: 8.161126136779785
+        X: 4.582081317901611
+        Y: 0.8542405366897583
+        Z: 10.230504035949707
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: true
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5264564156532288
+      Pitch: 0.9047966599464417
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 2.8885183334350586
+      Yaw: 2.443509340286255
     Saved: ~
 Window Geometry:
   Camera:
@@ -410,4 +411,4 @@ Window Geometry:
     collapsed: true
   Width: 2512
   X: 22
-  Y: 34
+  Y: 64

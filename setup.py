@@ -22,6 +22,7 @@ setup(
         'console_scripts': [
             'frontier_extractor  = frontier_slam.frontier_extractor:main',
             'waypoint_controller = frontier_slam.waypoint_controller:main',
+            'tsdf_mapper         = frontier_slam.tsdf_mapper:main',
         ],
     },
 )

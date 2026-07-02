@@ -15,6 +15,17 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from frontier_slam.path_planner import CostGrid, PAD_CELLS
 
+# --- Poster colour palette (RGB 0-1) -- keep in sync with the poster legend ---
+#   Occupied 0.063,0.255,0.620 (blue, set on the OctoMap display in frontier.rviz)
+#   Path     set on the Path display in frontier.rviz   |  Background dark (kept)
+C_FRONTIER = (0.000, 0.659, 0.757)   # teal-cyan
+C_GOAL     = (0.961, 0.761, 0.157)   # amber
+C_OCCUPIED = (16,  65,  158)         # blue   (debug-image, 0-255)
+C_FREE     = (245, 245, 245)         # near-white
+C_UNKNOWN  = (208, 217, 238)         # light blue
+C_PATH     = (38,  174, 96)          # green
+C_GOAL255  = (245, 194, 40)          # amber  (debug-image, 0-255)
+
 
 class FrontierVisualizer:
     def __init__(self, node):
@@ -26,45 +37,23 @@ class FrontierVisualizer:
     # ------------------------------------------------------------------
     def publish_markers(self, clusters, gx: float, gy: float,
                         robot_pos: np.ndarray) -> None:
-        """Publish frontier spheres and active-goal arrow as a RViz MarkerArray."""
+        """Publish frontier arrows (pointing into the unknown) and the goal as a MarkerArray."""
         now      = self._node.get_clock().now().to_msg()
         lifetime = Duration(sec=3)
         gz       = float(robot_pos[2])
         markers  = MarkerArray()
 
         for i, c in enumerate(clusters):
-            markers.markers.append(_sphere(
+            markers.markers.append(_arrow(
                 ns='frontiers', mid=i, x=c.wx, y=c.wy, z=gz,
-                scale=0.4, rgba=(0.0, 1.0, 1.0, 0.6),
+                dx=c.dx, dy=c.dy, length=0.6, rgba=(*C_FRONTIER, 0.9),
                 stamp=now, lifetime=lifetime,
             ))
         markers.markers.append(_sphere(
             ns='goal', mid=0, x=gx, y=gy, z=gz,
-            scale=0.8, rgba=(1.0, 0.0, 0.0, 0.9),
+            scale=0.8, rgba=(*C_GOAL, 0.95),
             stamp=now, lifetime=lifetime,
         ))
-
-        dx, dy = gx - robot_pos[0], gy - robot_pos[1]
-        dist   = math.hypot(dx, dy)
-        if dist > 0.5:
-            arrow_len = min(2.0, dist * 0.8)
-            ux, uy    = dx / dist, dy / dist
-            arrow = Marker()
-            arrow.header.stamp    = now
-            arrow.header.frame_id = 'world_ned'
-            arrow.ns      = 'goal_arrow'
-            arrow.id      = 0
-            arrow.type    = Marker.ARROW
-            arrow.action  = Marker.ADD
-            arrow.points  = [
-                Point(x=gx - ux * arrow_len, y=gy - uy * arrow_len, z=gz),
-                Point(x=gx, y=gy, z=gz),
-            ]
-            arrow.scale.x = 0.15   # shaft diameter
-            arrow.scale.y = 0.35   # head diameter
-            arrow.color   = ColorRGBA(r=1.0, g=0.5, b=0.0, a=0.9)
-            arrow.lifetime = lifetime
-            markers.markers.append(arrow)
 
         self._viz_pub.publish(markers)
 
@@ -108,9 +97,9 @@ class FrontierVisualizer:
         raw = (cg.raw if (cg is not None and cg.raw.shape == (h, w))
                else np.asarray(grid_msg.data, dtype=np.int8).reshape(h, w))
         img = np.zeros((h, w, 3), dtype=np.uint8)
-        img[raw == -1]  = (80,  80,  80)   # unknown
-        img[raw == 0]   = (210, 210, 210)  # free
-        img[raw == 100] = (20,  20,  20)   # occupied
+        img[raw == -1]  = C_UNKNOWN        # unknown  (light blue)
+        img[raw == 0]   = C_FREE           # free     (near white)
+        img[raw == 100] = C_OCCUPIED       # occupied (blue)
 
         if cg is not None and cg.raw.shape == (h, w):
             p = PAD_CELLS
@@ -121,15 +110,15 @@ class FrontierVisualizer:
         if path:
             pts = [(int((wy - oy) / res), int((wx - ox) / res)) for wx, wy in path]
             for i in range(len(pts) - 1):
-                _draw_line(img, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], (0, 220, 0))
+                _draw_line(img, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], C_PATH)
 
         if goal_xy is not None:
             gc = int((goal_xy[0] - ox) / res)
             gr = int((goal_xy[1] - oy) / res)
             if 0 <= gr < h and 0 <= gc < w:
                 for d in range(-4, 5):
-                    if 0 <= gr + d < h: img[gr + d, gc] = (220, 50, 50)
-                    if 0 <= gc + d < w: img[gr, gc + d] = (220, 50, 50)
+                    if 0 <= gr + d < h: img[gr + d, gc] = C_GOAL255
+                    if 0 <= gc + d < w: img[gr, gc + d] = C_GOAL255
 
         rc  = int((robot_pos[0] - ox) / res)
         rr  = int((robot_pos[1] - oy) / res)
@@ -168,6 +157,26 @@ class FrontierVisualizer:
 
 # ------------------------------------------------------------------
 # Module-level helpers — no node state
+
+def _arrow(*, ns, mid, x, y, z, dx, dy, length, rgba, stamp, lifetime) -> Marker:
+    """ARROW marker from (x,y) pointing along (dx,dy) for `length` metres."""
+    m = Marker()
+    m.header.stamp    = stamp
+    m.header.frame_id = 'world_ned'
+    m.ns     = ns
+    m.id     = mid
+    m.type   = Marker.ARROW
+    m.action = Marker.ADD
+    m.points = [
+        Point(x=x,            y=y,            z=z),
+        Point(x=x + dx * length, y=y + dy * length, z=z),
+    ]
+    m.scale.x = 0.12   # shaft diameter
+    m.scale.y = 0.28   # head diameter
+    m.color   = ColorRGBA(r=rgba[0], g=rgba[1], b=rgba[2], a=rgba[3])
+    m.lifetime = lifetime
+    return m
+
 
 def _sphere(*, ns, mid, x, y, z, scale, rgba, stamp, lifetime) -> Marker:
     m = Marker()

@@ -1399,3 +1399,66 @@ visualisation concerns (RViz markers, inflated-map overlay, debug image) into a 
   `Duration`, `Point`, `Image`, `ColorRGBA`, `Marker`, `MarkerArray`, `PAD_CELLS`.
 
 **Observed impact**: 🔲 Not yet run in a session.
+
+---
+
+## Change 47 — Align RViz/debug colours with the poster legend
+
+**Date**: 2026-05-28  
+**Files**:
+- `slam_ws/src/frontier_slam/frontier_slam/visualizer.py`
+- `slam_ws/src/frontier_slam/frontier.rviz`
+
+**Objective**: make the live RViz view and the debug image use the same colour palette
+as the IEEE-OES poster's shared legend, so the poster schematic and the screenshot read
+as one visual language.
+
+**Palette** (single source of truth, defined as `C_*` constants at the top of `visualizer.py`):
+- Occupied `16,65,158` blue · Frontier `0,168,193` teal-cyan · Path `38,174,96` green ·
+  Goal `245,194,40` amber · Robot `240,124,32` orange · Free near-white · Unknown light blue.
+
+**Changed** (`visualizer.py`):
+- Frontier spheres `(0,1,1)` → `C_FRONTIER` (teal-cyan); goal sphere `(1,0,0)` red → `C_GOAL` (amber).
+- Debug image: occupied → blue, free → near-white, unknown → light blue, path → green, goal → amber.
+
+**Removed** (`visualizer.py`):
+- The `goal_arrow` `Marker.ARROW` block (the stray orange arrow) and its now-unused
+  `geometry_msgs/Point` import. Frontier/goal direction is conveyed by the markers alone.
+
+**Changed** (`frontier.rviz`):
+- Odometry (robot, `/StoneFish/Odometry`) arrow `46,194,126` → `240,124,32` orange.
+- Pose (`/goal_pose`) `255,25,0` red → `245,194,40` amber. Path `25,255,0` → `38,174,96` green.
+- Dropped the dead `goal_arrow` namespace from the Frontiers MarkerArray display.
+- **Flat-blue occupied voxels**: the `OctomapPoints` PointCloud2 (`/octomap_point_cloud_centers`)
+  switched to `Color Transformer: FlatColor`, `Color 16,65,158`, `Style: Boxes`, `Size 0.1 m`
+  (= octomap resolution). The two `octomap_rviz_plugins/OccupancyGrid` displays are **disabled**:
+  a plain `OcTree` has no per-voxel colour, so their "Cell Color" mode errors with
+  "can't extract cell color". Re-enable only with a ColorOcTree.
+
+**Note**: Background left at the RViz default dark `48,48,48`.
+
+**Observed impact**: 🔲 Requires `colcon build` + reloading `frontier.rviz` to take effect.
+
+---
+
+## Change 48 — Frontier markers: cyan arrows pointing into the unknown
+
+**Date**: 2026-05-28  
+**Files**:
+- `slam_ws/src/frontier_slam/frontier_slam/frontier_detection.py`
+- `slam_ws/src/frontier_slam/frontier_slam/visualizer.py`
+
+**Objective**: replace the frontier **spheres** in RViz with **cyan arrows** that point toward
+the unknown space each frontier borders (matches the poster legend/schematic).
+
+**Changed** (`frontier_detection.py`):
+- `Cluster` gains `dx, dy` — a unit vector toward the unknown, computed per cluster as
+  (centroid of bordering unknown cells − cluster centroid), normalised. `col→world x`,
+  `row→world y` (same mapping as `wx/wy`).
+
+**Changed** (`visualizer.py`):
+- New `_arrow(...)` helper (ARROW marker from a point along `(dx,dy)` for `length` m).
+- `publish_markers` now emits frontier arrows (`C_FRONTIER` cyan, 0.8 m) instead of spheres;
+  goal stays an amber sphere. Re-added the `geometry_msgs/Point` import.
+
+**Observed impact**: 🔲 Not yet run; needs the node relaunched (symlink-install, no rebuild).
