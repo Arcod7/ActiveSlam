@@ -1,0 +1,103 @@
+From aa2b6673c3562f53172600e45128857190f0ea57 Mon Sep 17 00:00:00 2001
+From: Arcod7 <antoine.esman@epitech.eu>
+Date: Wed, 3 Jun 2026 16:53:29 +0100
+Subject: [PATCH 1/2] feat: set vertical fov for depth camera
+
+---
+ Library/include/sensors/vision/DepthCamera.h |  7 ++++++-
+ Library/src/core/ScenarioParser.cpp          |  5 ++++-
+ Library/src/sensors/vision/DepthCamera.cpp   | 10 ++++++++--
+ 3 files changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/Library/include/sensors/vision/DepthCamera.h b/Library/include/sensors/vision/DepthCamera.h
+index 919f807..e47967a 100644
+--- a/Library/include/sensors/vision/DepthCamera.h
++++ b/Library/include/sensors/vision/DepthCamera.h
+@@ -47,9 +47,10 @@ namespace sf
+          \param minDepth the minimum measured depth [m]
+          \param maxDepth the maximum measured depth [m]
+          \param frequency the sampling frequency of the sensor [Hz] (-1 if updated every simulation step)
++         \param vFOVDeg the vertical field of view [deg] (-1 means derived from resolution aspect ratio)
+          */
+         DepthCamera(std::string uniqueName, unsigned int resolutionX, unsigned int resolutionY, Scalar hFOVDeg,
+-                    Scalar minDepth, Scalar maxDepth, Scalar frequency = Scalar(-1));
++                    Scalar minDepth, Scalar maxDepth, Scalar frequency = Scalar(-1), Scalar vFOVDeg = Scalar(-1));
+        
+         //! A destructor.
+         ~DepthCamera();
+@@ -88,6 +89,9 @@ namespace sf
+ 
+         //! A method returning the depth range of the camera.
+         glm::vec2 getDepthRange() const;
++
++        //! A method returning the vertical field of view of the camera [deg] (-1 if derived from aspect ratio).
++        Scalar getVerticalFOV() const;
+         
+         //! A method returning the pointer to the image data.
+         /*!
+@@ -108,6 +112,7 @@ namespace sf
+         OpenGLDepthCamera* glCamera;
+         GLfloat* imageData;
+         glm::vec2 depthRange;
++        Scalar fovV;
+         GLfloat noiseStdDev;
+         std::function<void(DepthCamera*)> newDataCallback;
+     };
+diff --git a/Library/src/core/ScenarioParser.cpp b/Library/src/core/ScenarioParser.cpp
+index e3ec211..bc8cba1 100644
+--- a/Library/src/core/ScenarioParser.cpp
++++ b/Library/src/core/ScenarioParser.cpp
+@@ -4042,7 +4042,10 @@ Sensor* ScenarioParser::ParseSensor(XMLElement* element, const std::string& name
+             return nullptr;
+         }
+         
+-        DepthCamera* dcam = new DepthCamera(sensorName, resX, resY, hFov, depthMin, depthMax, rate);
++        Scalar vFov(-1);
++        item->QueryAttribute("vertical_fov", &vFov);
++
++        DepthCamera* dcam = new DepthCamera(sensorName, resX, resY, hFov, depthMin, depthMax, rate, vFov);
+ 
+         //Optional noise definition
+         if((item = element->FirstChildElement("noise")) != nullptr)    
+diff --git a/Library/src/sensors/vision/DepthCamera.cpp b/Library/src/sensors/vision/DepthCamera.cpp
+index 2b6d35e..faf9ae3 100644
+--- a/Library/src/sensors/vision/DepthCamera.cpp
++++ b/Library/src/sensors/vision/DepthCamera.cpp
+@@ -33,11 +33,12 @@
+ namespace sf
+ {
+ 
+-DepthCamera::DepthCamera(std::string uniqueName, unsigned int resolutionX, unsigned int resolutionY, Scalar hFOVDeg, Scalar minDepth, Scalar maxDepth, Scalar frequency)
++DepthCamera::DepthCamera(std::string uniqueName, unsigned int resolutionX, unsigned int resolutionY, Scalar hFOVDeg, Scalar minDepth, Scalar maxDepth, Scalar frequency, Scalar vFOVDeg)
+     : Camera(uniqueName, resolutionX, resolutionY, hFOVDeg, frequency)
+ {
+     depthRange.x = minDepth < Scalar(0.01) ? 0.01f : (GLfloat)minDepth;
+     depthRange.y = maxDepth > Scalar(0.01) ? (GLfloat)maxDepth : 1.f;
++    fovV = vFOVDeg;
+     noiseStdDev = 0.f;
+     newDataCallback = nullptr;
+     imageData = nullptr;
+@@ -68,6 +69,11 @@ glm::vec2 DepthCamera::getDepthRange() const
+ {
+     return depthRange;
+ }
++
++Scalar DepthCamera::getVerticalFOV() const
++{
++    return fovV;
++}
+     
+ VisionSensorType DepthCamera::getVisionSensorType() const
+ {
+@@ -81,7 +87,7 @@ OpenGLView* DepthCamera::getOpenGLView() const
+ 
+ void DepthCamera::InitGraphics()
+ {
+-    glCamera = new OpenGLDepthCamera(glm::vec3(0,0,0), glm::vec3(0,0,1.f), glm::vec3(0,-1.f,0), 0, 0, resX, resY, (GLfloat)fovH, depthRange.x, depthRange.y, freq < Scalar(0));
++    glCamera = new OpenGLDepthCamera(glm::vec3(0,0,0), glm::vec3(0,0,1.f), glm::vec3(0,-1.f,0), 0, 0, resX, resY, (GLfloat)fovH, depthRange.x, depthRange.y, freq < Scalar(0), false, (GLfloat)fovV);
+     glCamera->setNoise(noiseStdDev);
+     glCamera->setCamera(this);
+     UpdateTransform();
+-- 
+2.54.0
+

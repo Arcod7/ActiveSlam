@@ -1,0 +1,325 @@
+From 6a286891b4e89b72889a9addc84c88e41531861f Mon Sep 17 00:00:00 2001
+From: Arcod7 <antoine.esman@epitech.eu>
+Date: Mon, 15 Jun 2026 14:21:03 +0100
+Subject: [PATCH 2/2] feat: snapshot camera timestamps on the physics thread
+ for ground truth
+
+---
+ Library/include/graphics/OpenGLView.h             |  9 +++++++++
+ Library/include/sensors/vision/Camera.h           |  3 +++
+ Library/src/graphics/OpenGLDepthCamera.cpp        |  2 ++
+ Library/src/graphics/OpenGLEventBasedCamera.cpp   |  2 ++
+ Library/src/graphics/OpenGLFLS.cpp                |  1 +
+ Library/src/graphics/OpenGLMSIS.cpp               |  1 +
+ Library/src/graphics/OpenGLOpticalFlowCamera.cpp  |  2 ++
+ Library/src/graphics/OpenGLRealCamera.cpp         |  2 ++
+ Library/src/graphics/OpenGLSSS.cpp                |  3 ++-
+ Library/src/graphics/OpenGLSegmentationCamera.cpp |  2 ++
+ Library/src/graphics/OpenGLSonar.cpp              |  1 +
+ Library/src/graphics/OpenGLThermalCamera.cpp      |  2 ++
+ Library/src/graphics/OpenGLView.cpp               | 11 +++++++++++
+ Library/src/sensors/vision/Camera.cpp             | 12 ++++++++++++
+ Library/src/sensors/vision/Multibeam2.cpp         |  2 ++
+ 15 files changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/Library/include/graphics/OpenGLView.h b/Library/include/graphics/OpenGLView.h
+index 3cb69e3..380c632 100644
+--- a/Library/include/graphics/OpenGLView.h
++++ b/Library/include/graphics/OpenGLView.h
+@@ -130,6 +130,12 @@ namespace sf
+         //! A method saying if the view works in continuous update mode.
+         bool isContinuous();
+ 
++        //! A method to set the simulation time [s] when the pose is committed.
++        void SetPendingCaptureTime(double t);
++
++        //! A method returning the simulation time [s] of the last captured frame.
++        double getCaptureTime() const;
++
+         //! A method extracting frustium planes from the view-projection matrix.
+         /*!
+          \param frustum a pointer to the 6 frustum planes
+@@ -145,6 +151,9 @@ namespace sf
+         GLuint renderFBO;
+         bool enabled;
+         bool continuous;
++        double tempCaptureTime_;    //physics thread writes, GL thread reads
++        double pendingCaptureTime_; //GL thread only
++        double captureTime_;        //GL thread only
+         ViewUBO viewUBOData;
+     };
+ }
+diff --git a/Library/include/sensors/vision/Camera.h b/Library/include/sensors/vision/Camera.h
+index 4f253b3..21a80ab 100644
+--- a/Library/include/sensors/vision/Camera.h
++++ b/Library/include/sensors/vision/Camera.h
+@@ -102,6 +102,9 @@ namespace sf
+          \return pointer to the image data buffer
+          */
+         virtual void* getImageDataPointer(unsigned int index = 0) = 0;
++
++        //! A method returning the simulation time [s] of the last captured frame.
++        Scalar getLastCaptureTime() const;
+         
+     protected:
+         Scalar fovH;
+diff --git a/Library/src/graphics/OpenGLDepthCamera.cpp b/Library/src/graphics/OpenGLDepthCamera.cpp
+index 8716424..886fe86 100644
+--- a/Library/src/graphics/OpenGLDepthCamera.cpp
++++ b/Library/src/graphics/OpenGLDepthCamera.cpp
+@@ -138,6 +138,7 @@ void OpenGLDepthCamera::SetupCamera(glm::vec3 _eye, glm::vec3 _dir, glm::vec3 _u
+ 
+ void OpenGLDepthCamera::UpdateTransform()
+ {
++    pendingCaptureTime_ = tempCaptureTime_;
+     eye = tempEye;
+     dir = tempDir;
+     up = tempUp;
+@@ -349,6 +350,7 @@ void OpenGLDepthCamera::DrawLDR(GLuint destinationFBO, bool updated)
+         glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_FLOAT, NULL);
+         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+         OpenGLState::UnbindTexture(TEX_POSTPROCESS1);
++        captureTime_ = pendingCaptureTime_;
+         newData = true;
+     }
+ }
+diff --git a/Library/src/graphics/OpenGLEventBasedCamera.cpp b/Library/src/graphics/OpenGLEventBasedCamera.cpp
+index eb4a66c..f91a160 100644
+--- a/Library/src/graphics/OpenGLEventBasedCamera.cpp
++++ b/Library/src/graphics/OpenGLEventBasedCamera.cpp
+@@ -178,6 +178,7 @@ void OpenGLEventBasedCamera::SetupCamera(glm::vec3 _eye, glm::vec3 _dir, glm::ve
+ 
+ void OpenGLEventBasedCamera::UpdateTransform()
+ {
++    pendingCaptureTime_ = tempCaptureTime_;
+     eye = tempEye;
+     dir = tempDir;
+     up = tempUp;
+@@ -329,6 +330,7 @@ void OpenGLEventBasedCamera::DrawLDR(GLuint destinationFBO, bool updated)
+         glGetTexImage(GL_TEXTURE_2D, 0, GL_RG_INTEGER, GL_INT, NULL);
+         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+         OpenGLState::UnbindTexture(TEX_POSTPROCESS1);
++        captureTime_ = pendingCaptureTime_;
+         newData = true;
+     }
+ }
+diff --git a/Library/src/graphics/OpenGLFLS.cpp b/Library/src/graphics/OpenGLFLS.cpp
+index 8b51dd0..d5fcc79 100644
+--- a/Library/src/graphics/OpenGLFLS.cpp
++++ b/Library/src/graphics/OpenGLFLS.cpp
+@@ -504,6 +504,7 @@ void OpenGLFLS::DrawLDR(GLuint destinationFBO, bool updated)
+         glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+         OpenGLState::UnbindTexture(TEX_POSTPROCESS1);
++        captureTime_ = pendingCaptureTime_;
+         newData_ = true;
+     }
+ }
+diff --git a/Library/src/graphics/OpenGLMSIS.cpp b/Library/src/graphics/OpenGLMSIS.cpp
+index cac2bd2..bf53542 100644
+--- a/Library/src/graphics/OpenGLMSIS.cpp
++++ b/Library/src/graphics/OpenGLMSIS.cpp
+@@ -491,6 +491,7 @@ void OpenGLMSIS::DrawLDR(GLuint destinationFBO, bool updated)
+         glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+         OpenGLState::UnbindTexture(TEX_POSTPROCESS1);
++        captureTime_ = pendingCaptureTime_;
+         newData_ = true;
+     }
+ }
+diff --git a/Library/src/graphics/OpenGLOpticalFlowCamera.cpp b/Library/src/graphics/OpenGLOpticalFlowCamera.cpp
+index 7d344cd..30d645e 100644
+--- a/Library/src/graphics/OpenGLOpticalFlowCamera.cpp
++++ b/Library/src/graphics/OpenGLOpticalFlowCamera.cpp
+@@ -137,6 +137,7 @@ void OpenGLOpticalFlowCamera::SetupCamera(glm::vec3 _eye, glm::vec3 _dir, glm::v
+ 
+ void OpenGLOpticalFlowCamera::UpdateTransform()
+ {
++    pendingCaptureTime_ = tempCaptureTime_;
+     eye = tempEye;
+     dir = tempDir;
+     up = tempUp;
+@@ -367,6 +368,7 @@ void OpenGLOpticalFlowCamera::DrawLDR(GLuint destinationFBO, bool updated)
+         glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+         OpenGLState::UnbindTexture(TEX_POSTPROCESS1);
++        captureTime_ = pendingCaptureTime_;
+         newData = true;
+     }
+ }
+diff --git a/Library/src/graphics/OpenGLRealCamera.cpp b/Library/src/graphics/OpenGLRealCamera.cpp
+index 5acacfc..83cc359 100644
+--- a/Library/src/graphics/OpenGLRealCamera.cpp
++++ b/Library/src/graphics/OpenGLRealCamera.cpp
+@@ -132,6 +132,7 @@ void OpenGLRealCamera::SetupCamera(glm::vec3 _eye, glm::vec3 _dir, glm::vec3 _up
+ 
+ void OpenGLRealCamera::UpdateTransform()
+ {
++    pendingCaptureTime_ = tempCaptureTime_;
+     eye = tempEye;
+     dir = tempDir;
+     up = tempUp;
+@@ -187,6 +188,7 @@ void OpenGLRealCamera::DrawLDR(GLuint destinationFBO, bool updated)
+         glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+         OpenGLState::UnbindTexture(TEX_POSTPROCESS1);
++        captureTime_ = pendingCaptureTime_;
+         newData = true;
+     }
+     
+diff --git a/Library/src/graphics/OpenGLSSS.cpp b/Library/src/graphics/OpenGLSSS.cpp
+index 6d275e8..6574e9e 100644
+--- a/Library/src/graphics/OpenGLSSS.cpp
++++ b/Library/src/graphics/OpenGLSSS.cpp
+@@ -493,8 +493,9 @@ void OpenGLSSS::DrawLDR(GLuint destinationFBO, bool updated)
+         glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+         OpenGLState::UnbindTexture(TEX_POSTPROCESS1);
++        captureTime_ = pendingCaptureTime_;
+         newData_ = true;
+     }
+ }
+-   
++
+ }
+diff --git a/Library/src/graphics/OpenGLSegmentationCamera.cpp b/Library/src/graphics/OpenGLSegmentationCamera.cpp
+index 15e77d2..cff8ac7 100644
+--- a/Library/src/graphics/OpenGLSegmentationCamera.cpp
++++ b/Library/src/graphics/OpenGLSegmentationCamera.cpp
+@@ -136,6 +136,7 @@ void OpenGLSegmentationCamera::SetupCamera(glm::vec3 _eye, glm::vec3 _dir, glm::
+ 
+ void OpenGLSegmentationCamera::UpdateTransform()
+ {
++    pendingCaptureTime_ = tempCaptureTime_;
+     eye = tempEye;
+     dir = tempDir;
+     up = tempUp;
+@@ -341,6 +342,7 @@ void OpenGLSegmentationCamera::DrawLDR(GLuint destinationFBO, bool updated)
+         glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+         OpenGLState::UnbindTexture(TEX_POSTPROCESS1);
++        captureTime_ = pendingCaptureTime_;
+         newData = true;
+     }
+ }
+diff --git a/Library/src/graphics/OpenGLSonar.cpp b/Library/src/graphics/OpenGLSonar.cpp
+index 100aafb..5bb2832 100644
+--- a/Library/src/graphics/OpenGLSonar.cpp
++++ b/Library/src/graphics/OpenGLSonar.cpp
+@@ -79,6 +79,7 @@ void OpenGLSonar::SetupSonar(glm::vec3 _eye, glm::vec3 _dir, glm::vec3 _up)
+ 
+ void OpenGLSonar::UpdateTransform()
+ {
++    pendingCaptureTime_ = tempCaptureTime_;
+     eye_ = tempEye_;
+     dir_ = tempDir_;
+     up_ = tempUp_;
+diff --git a/Library/src/graphics/OpenGLThermalCamera.cpp b/Library/src/graphics/OpenGLThermalCamera.cpp
+index e779eac..290e502 100644
+--- a/Library/src/graphics/OpenGLThermalCamera.cpp
++++ b/Library/src/graphics/OpenGLThermalCamera.cpp
+@@ -132,6 +132,7 @@ void OpenGLThermalCamera::SetupCamera(glm::vec3 _eye, glm::vec3 _dir, glm::vec3
+ 
+ void OpenGLThermalCamera::UpdateTransform()
+ {
++    pendingCaptureTime_ = tempCaptureTime_;
+     eye = tempEye;
+     dir = tempDir;
+     up = tempUp;
+@@ -328,6 +329,7 @@ void OpenGLThermalCamera::DrawLDR(GLuint destinationFBO, bool updated)
+         glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+         OpenGLState::UnbindTexture(TEX_POSTPROCESS1);
++        captureTime_ = pendingCaptureTime_;
+         newData = true;
+     }
+ }
+diff --git a/Library/src/graphics/OpenGLView.cpp b/Library/src/graphics/OpenGLView.cpp
+index 27a1c15..0a763a4 100644
+--- a/Library/src/graphics/OpenGLView.cpp
++++ b/Library/src/graphics/OpenGLView.cpp
+@@ -38,6 +38,7 @@ OpenGLView::OpenGLView(GLint x, GLint y, GLint width, GLint height)
+     viewportHeight = height + height % 2;
+     enabled = true;
+ 	continuous = false;
++    tempCaptureTime_ = 0.0; pendingCaptureTime_ = 0.0; captureTime_ = 0.0;
+     viewUBOData.VP = glm::mat4(1.f);
+     viewUBOData.eye = glm::vec3(0.f);
+     ExtractFrustumFromVP(viewUBOData.frustum, viewUBOData.VP);
+@@ -72,6 +73,16 @@ bool OpenGLView::isContinuous()
+ 	return continuous;
+ }
+ 
++void OpenGLView::SetPendingCaptureTime(double t)
++{
++    tempCaptureTime_ = t;
++}
++
++double OpenGLView::getCaptureTime() const
++{
++    return captureTime_;
++}
++
+ void OpenGLView::SetViewport()
+ {
+     OpenGLState::Viewport(0, 0, viewportWidth, viewportHeight);
+diff --git a/Library/src/sensors/vision/Camera.cpp b/Library/src/sensors/vision/Camera.cpp
+index 82a3b9a..0a5b827 100644
+--- a/Library/src/sensors/vision/Camera.cpp
++++ b/Library/src/sensors/vision/Camera.cpp
+@@ -26,6 +26,9 @@
+ #include "sensors/vision/Camera.h"
+ 
+ #include "entities/SolidEntity.h"
++#include "graphics/OpenGLView.h"
++#include "core/GraphicalSimulationApp.h"
++#include "core/SimulationManager.h"
+ 
+ namespace sf
+ {
+@@ -69,6 +72,12 @@ bool Camera::getDisplayOnScreen(unsigned int& x, unsigned int& y, float& scale)
+     return screen;
+ }
+ 
++Scalar Camera::getLastCaptureTime() const
++{
++    OpenGLView* v = getOpenGLView();
++    return v ? Scalar(v->getCaptureTime()) : Scalar(0);
++}
++
+ void Camera::UpdateTransform()
+ {
+     Transform cameraTransform = getSensorFrame();
+@@ -76,6 +85,9 @@ void Camera::UpdateTransform()
+     Vector3 direction = cameraTransform.getBasis().getColumn(2); //Z
+     Vector3 cameraUp = -cameraTransform.getBasis().getColumn(1); //-Y
+     SetupCamera(eyePosition, direction, cameraUp);
++    OpenGLView* v = getOpenGLView();
++    if(v) v->SetPendingCaptureTime(
++        (double)SimulationApp::getApp()->getSimulationManager()->getSimulationTime(true));
+ }
+ 
+ std::vector<Renderable> Camera::Render()
+diff --git a/Library/src/sensors/vision/Multibeam2.cpp b/Library/src/sensors/vision/Multibeam2.cpp
+index 1d96f36..e8999ad 100644
+--- a/Library/src/sensors/vision/Multibeam2.cpp
++++ b/Library/src/sensors/vision/Multibeam2.cpp
+@@ -26,6 +26,7 @@
+ #include "sensors/vision/Multibeam2.h"
+ 
+ #include "core/GraphicalSimulationApp.h"
++#include "core/SimulationManager.h"
+ #include "graphics/OpenGLPipeline.h"
+ #include "graphics/OpenGLContent.h"
+ #include "graphics/OpenGLDepthCamera.h"
+@@ -204,6 +205,7 @@ void Multibeam2::SetupCamera(size_t index, const Vector3& eye, const Vector3& di
+     glm::vec3 dir_ = glm::vec3((GLfloat)dir.x(), (GLfloat)dir.y(), (GLfloat)dir.z());
+     glm::vec3 up_ = glm::vec3((GLfloat)up.x(), (GLfloat)up.y(), (GLfloat)up.z());
+     cameras[index].cam->SetupCamera(eye_, dir_, up_);
++    cameras[index].cam->SetPendingCaptureTime((double)SimulationApp::getApp()->getSimulationManager()->getSimulationTime(true));
+ }
+     
+ void Multibeam2::InstallNewDataHandler(std::function<void(Multibeam2*)> callback)
+-- 
+2.54.0
+
