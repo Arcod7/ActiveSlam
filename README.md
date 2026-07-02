@@ -40,9 +40,12 @@ mkdir -p ~/ros_ws/src && cd ~/ros_ws/src
 git clone git@github.com:Arcod7/ActiveSlam.git
 cd ~/ros_ws
 rosdep install --from-paths src -i -y
+pip install -r src/ActiveSlam/requirements.txt
 colcon build --symlink-install
 source install/setup.zsh
 ```
+
+Full details (including if `rosdep` isn't already set up): [`docs/INSTALL.md`](docs/INSTALL.md).
 
 **Not on Ubuntu?** ROS 2 Jazzy targets Ubuntu 24.04. On another Linux distro,
 a container tool like [distrobox](https://github.com/89luca89/distrobox) is

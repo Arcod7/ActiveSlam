@@ -1,0 +1,5 @@
+# Python dependencies not covered by rosdep (ROS packages come from rosdep instead).
+# Verified working versions (aarch64, ROS2 Jazzy container, 2026-07-02):
+numpy>=1.26
+scipy>=1.11
+vdbfusion==0.1.6

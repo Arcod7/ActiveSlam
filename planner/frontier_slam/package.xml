@@ -16,8 +16,10 @@
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>tf2_ros</depend>
+  <depend>python3-numpy</depend>
+  <depend>python3-scipy</depend>
 
-  <!-- python3-scipy required: pip install scipy  or  apt install python3-scipy -->
+  <!-- vdbfusion (tsdf_mapper only) has no rosdep key: pip install -r requirements.txt -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
