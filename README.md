@@ -43,6 +43,12 @@ colcon build --symlink-install
 source install/setup.zsh
 ```
 
+**Not on Ubuntu?** ROS 2 Jazzy targets Ubuntu 24.04. On another Linux distro,
+a container tool like [distrobox](https://github.com/89luca89/distrobox) is
+one way to get an Ubuntu 24.04 userspace for it — this is a host-OS detail,
+not part of the build above; everything from `colcon build` onward is the
+same once you have a Jazzy environment.
+
 ## Run
 
 No single bring-up command yet — that's in progress
