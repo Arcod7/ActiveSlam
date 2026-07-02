@@ -52,13 +52,13 @@ same once you have a Jazzy environment.
 ## Run
 
 No single bring-up command yet — that's in progress
-([`docs/ROADMAP.md`](docs/ROADMAP.md), Sprint 1). For now, three steps
-launch the sim + mapping stack, then pick an operator mode:
+([`docs/ROADMAP.md`](docs/ROADMAP.md), Sprint 1). For now, `step1`/`step2`/`step3`
+each **include** the one before it (step3 = step1 + step2 + OctoMap) — run
+**only one**, the level you need, not all three:
 
 ```bash
-ros2 launch stonefish_groundtruth_mapping step1_tf.launch.py          # Stonefish + TF chain
-ros2 launch stonefish_groundtruth_mapping step2_pointcloud.launch.py  # + depth → point cloud
-ros2 launch stonefish_groundtruth_mapping step3_octomap.launch.py     # + OctoMap
+ros2 launch stonefish_groundtruth_mapping step3_octomap.launch.py    # Stonefish + TF + point cloud + OctoMap
+# (step2_pointcloud.launch.py or step1_tf.launch.py instead, if you don't need the map layer)
 
 # then, in another terminal:
 ros2 run launch_tools my_keyboard                    # teleop
