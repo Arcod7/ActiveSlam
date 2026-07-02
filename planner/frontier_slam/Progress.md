@@ -1616,3 +1616,68 @@ once to clear stale discovery-graph entries for already-dead nodes.
 updated). Not yet verified: `rviz:=true` path with an actual person looking at the screen — no
 visual channel available in this session, only that RViz starts without logging errors and
 the underlying topics carry correct data.
+
+---
+
+## Change 52 — Fix world-path resolution; diagnose RViz crash on Apple Silicon
+
+**Date**: 2026-07-02
+**Files**: new `sim/world/{package.xml,setup.py,resource/world}`; `slam/stonefish_groundtruth_mapping/launch/tf.launch.py`; `slam/stonefish_groundtruth_mapping/package.xml`.
+
+**Objective**: Antoine ran `colcon build` (no `--symlink-install` mentioned) + `ros2 launch
+bringup demo.launch.py` in his own terminal and hit two real bugs neither B0a's testing nor
+Gate 1 caught, since both always used `rviz:=false` / a workspace built once, freshly, in one
+shot.
+
+**Bug 1 — Stonefish "structures didn't load" (real, now fixed):**
+```
+Scenario parser: Loading scenario from '.../install/stonefish_groundtruth_mapping/sim/world/scnenario/waterlinked.scn'.
+Scenario parser: File not found!
+```
+Root cause: Change 51's `tf.launch.py` computed its `STONEFISH_WORLD_DIR` default by walking
+up from `os.path.realpath(__file__)`, assuming colcon's `--symlink-install` always makes the
+installed launch file a symlink back to source. Checking his (shared) install directory
+showed why that's false: `step1_tf.launch.py` etc. survived as **stale orphaned symlinks**
+pointing at `build/` paths from *before* the Ch51 rename (colcon doesn't prune removed
+`data_files` entries — an incremental rebuild after renaming files just adds the new ones
+alongside the old), while the *renamed* files (`tf.launch.py` etc.) were installed as **plain
+copies**, not symlinks. `realpath()` on a plain copy resolves to itself, at the install path —
+computing a `sim/world` location that only exists relative to the *source* tree.
+
+Fixed by not depending on symlink-vs-copy behavior at all: `sim/world` is now a minimal
+`ament_python` package (`package.xml` + `setup.py` with glob-based `data_files`, since the
+~313 MB mesh data is gitignored and may or may not be present at build time) so `tf.launch.py`
+resolves it via `get_package_share_directory('world')` instead — the mechanism
+`ament_index` exists for, reliable regardless of how colcon happens to install a given file.
+
+**Verified**: fresh local clone (`git clone` of the local repo, not yet pushed) into a
+scratch workspace, mesh data copied in per the README's documented manual step, clean
+`colcon build --symlink-install` — 6/6 packages (previously 5, `world` wasn't discovered
+before it had a `package.xml`). Scenario loads and meshes load correctly, no more
+"File not found!".
+
+**Operational gotcha this surfaces**: renaming files in a `data_files` list needs a **clean**
+rebuild (`rm -rf build install`, not just `colcon build` again) to avoid stale orphaned
+installs. Worth remembering for any future launch-file reorganisation.
+
+**Bug 2 — RViz crash (diagnosed, not fixable from here):**
+```
+rviz::RenderSystem: error creating render window: RenderingAPIException: Invalid parentWindowHandle
+Unable to create the rendering window after 100 tries
+terminate called after throwing an instance of 'std::runtime_error'
+```
+Checked the display stack: `QT_QPA_PLATFORM=xcb` (already correctly forcing X11, ruling out a
+Wayland-vs-X11 mismatch), `xdpyinfo`/`glxinfo` both respond fine, `direct rendering: Yes`. The
+renderer is **zink Vulkan over Apple's M1 Max GPU via the Asahi "Honeykrisp" driver** — Mesa's
+OpenGL-over-Vulkan translation layer, used because Apple Silicon has no native Mesa OpenGL
+driver. Stonefish creates its GL context fine (simpler/direct path); RViz's Ogre3D backend
+does a more demanding GLX window-embedding call (`GLXWindow::create` with a parent window
+handle, for compositing the render viewport into a Qt widget) that zink/Honeykrisp apparently
+doesn't support correctly yet. This reads as a driver/hardware-stack limitation specific to
+Apple Silicon + Asahi Linux, not a bug in `demo.launch.py` or the RViz config — nothing in
+this repo's code is positioned to fix it.
+
+**Observed impact**: ✅ Bug 1 fixed and verified end-to-end from a fresh clone. Bug 2 is an
+open, likely-unfixable-from-here environment limitation on this specific machine — `rviz:=false`
+is the reliable path on Apple Silicon/Asahi until Mesa's zink/Honeykrisp driver matures, or
+until proven otherwise by someone actually able to see the screen.
