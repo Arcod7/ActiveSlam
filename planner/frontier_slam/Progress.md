@@ -1567,3 +1567,52 @@ demo.
 
 **Observed impact**: ✅ Gate 1 passed. Cleared to proceed with Gate 2 (fresh-clone install
 test) and, once that passes, delete `slam_ws` / `stonefish_original`.
+
+---
+
+## Change 51 — bringup package: unified demo.launch.py
+
+**Date**: 2026-07-02
+**Files**: new `bringup/` package; renamed `stonefish_groundtruth_mapping/launch/step{1,2,3}_*`
+→ `tf`/`pointcloud`/`octomap.launch.py`; new `tsdf.launch.py`; `frontier_slam.launch.py`
+docstring path fix.
+
+**Objective**: one command to bring up the flagship demo — Stonefish + TF + point cloud +
+mapper + operator mode + RViz — with `mode:=teleop|frontier` and `mapper:=octomap|tsdf` as
+independent switches, per the Sprint 1 plan.
+
+**Changed**:
+- Flattened `step1_tf`/`step2_pointcloud`/`step3_octomap` → `tf`/`pointcloud`/`octomap.launch.py`
+  (same cascade structure, just named for what they do instead of their position in a
+  numbered sequence). Added a parallel `tsdf.launch.py` (pointcloud + `tsdf_mapper` instead of
+  `octomap_server`).
+- New `bringup` package: `demo.launch.py` (`mode`, `mapper`, `rviz` launch arguments) +
+  `demo.rviz` (extends `frontier_slam/frontier.rviz` with two TSDF displays — PointCloud2 on
+  `/tsdf/surface_cloud`, MarkerArray on `/tsdf/voxels` — both disabled by default since
+  `octomap` is the default mapper).
+- **`mode:=teleop` cannot bundle `keyboard_control` as a launch `Node` action** —
+  `termios.tcgetattr(sys.stdin)` needs a real TTY, which `ros2 launch` doesn't give child
+  processes (confirmed: `termios.error: (25, 'Inappropriate ioctl for device')`, process dies
+  immediately). Standard ROS2 limitation, not fixable from this side. `mode:=teleop` instead
+  logs a reminder to run `ros2 run launch_tools my_keyboard` in another terminal.
+
+**Verified** (each run cleanly, all expected nodes up, no errors beyond the known benign
+Stonefish shader-link warnings):
+- `demo.launch.py` (defaults: teleop + octomap) — sim + mapper come up, teleop reminder logs.
+- `demo.launch.py mode:=frontier` — `frontier_extractor` + `waypoint_controller` join cleanly.
+- `demo.launch.py mapper:=tsdf` — **first ever end-to-end run of `tsdf_mapper.py`** (untracked
+  WIP until Change 49): integrates real point clouds (12–13k pts/scan), publishes a surface
+  (3743 pts) and voxel view (6909 markers). One transient `TF unavailable
+  (ExtrapolationException)` warning at cold start, then normal — not a bug, just the TF buffer
+  not having data yet on the very first callback.
+
+**Found and fixed along the way**: forgot `static_transform_publisher` and
+`component_container` (depth_proc) processes in the Gate 1 cleanup — only killed
+`stonefish_simulator`/`odom_tf_sync`/`octomap_server`, leaving 3 orphaned processes each from
+the earlier step1/2/3 testing. Cleaned up; `ros2 daemon stop && ros2 daemon start` was needed
+once to clear stale discovery-graph entries for already-dead nodes.
+
+**Observed impact**: ✅ `demo.launch.py` is the new documented entry point (README, `~/delivery/CLAUDE.md`
+updated). Not yet verified: `rviz:=true` path with an actual person looking at the screen — no
+visual channel available in this session, only that RViz starts without logging errors and
+the underlying topics carry correct data.
