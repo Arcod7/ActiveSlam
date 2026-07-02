@@ -20,6 +20,7 @@ teleoperated or exploring autonomously via frontier detection.
 
 | Package | Role |
 |---|---|
+| [`bringup`](bringup) | Unified `demo.launch.py` (mode + mapper switches) and the demo RViz config |
 | [`sim/world`](sim/world) | Stonefish scenario: BlueROV2 model, environment meshes, `.scn` config |
 | [`sim/stonefish_ros2`](sim/stonefish_ros2) | ROS 2 bridge to the simulator (patched fork) |
 | [`slam/stonefish_groundtruth_mapping`](slam/stonefish_groundtruth_mapping) | TF chain, depth image → point cloud, OctoMap/TSDF mapping |
@@ -51,20 +52,35 @@ same once you have a Jazzy environment.
 
 ## Run
 
-No single bring-up command yet — that's in progress
-([`docs/ROADMAP.md`](docs/ROADMAP.md), Sprint 1). For now, `step1`/`step2`/`step3`
-each **include** the one before it (step3 = step1 + step2 + OctoMap) — run
-**only one**, the level you need, not all three:
+One command brings up Stonefish + TF + point cloud + mapper + RViz:
 
 ```bash
-ros2 launch stonefish_groundtruth_mapping step3_octomap.launch.py    # Stonefish + TF + point cloud + OctoMap
-# (step2_pointcloud.launch.py or step1_tf.launch.py instead, if you don't need the map layer)
-
-# then, in another terminal:
-ros2 run launch_tools my_keyboard                    # teleop
-# or
-ros2 launch frontier_slam frontier_slam.launch.py    # autonomous frontier exploration
+ros2 launch bringup demo.launch.py
 ```
+
+Two independent switches, each defaulting to the first value:
+
+```bash
+ros2 launch bringup demo.launch.py mode:=teleop|frontier      # operator mode
+ros2 launch bringup demo.launch.py mapper:=octomap|tsdf       # map backend
+ros2 launch bringup demo.launch.py rviz:=false                # headless
+```
+
+`mode:=teleop` (the default) brings up sim+mapper and prints a reminder to
+run teleop yourself in another terminal:
+
+```bash
+ros2 run launch_tools my_keyboard
+```
+
+(Raw keyboard input needs a real terminal — `ros2 launch` can't hand one to
+a launched node, so this can't be bundled into the single command above.
+`mode:=frontier` doesn't have this problem and launches fully inside
+`demo.launch.py`.)
 
 Override the world path with `export STONEFISH_WORLD_DIR=/path/to/sim/world`
 if not running from the default checkout location.
+
+Individual pieces are still directly launchable if you don't want the whole
+stack — see [`slam/stonefish_groundtruth_mapping/launch/`](slam/stonefish_groundtruth_mapping/launch)
+(`tf` → `pointcloud` → `octomap`/`tsdf`, each including the one before it).
