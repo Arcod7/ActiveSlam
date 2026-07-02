@@ -27,18 +27,18 @@ The simulation uses a Stonefish depth camera to approximate the
 | Parameter | Real sonar | Simulation |
 |---|---|---|
 | Horizontal FOV | 90° | 90° |
-| Vertical FOV | 40° | ~22.5° (aspect-ratio limited) |
+| Vertical FOV | 40° | 40° (wired through as of Ch45) |
 | Max range | 15 m | 15 m |
 | Min range | 20 cm | 20 cm |
-| H angular resolution | 0.85° → ~106 beams | 128 px (0.70°/px) |
-| V angular resolution | 1.60° → ~25 beams | 32 px |
+| H angular resolution | 0.85° → ~106 beams | 257 px (0.35°/px) |
+| V angular resolution | 1.60° → ~25 beams | 67 px (0.60°/px) |
 | Update rate | 5 Hz | 5 Hz |
 
 Depth camera config in the `.scn` file:
 ```xml
 <sensor name="Dcam" rate="5.0" type="depthcamera">
-    <specs resolution_x="128" resolution_y="32"
-           horizontal_fov="90.0"
+    <specs resolution_x="257" resolution_y="67"
+           horizontal_fov="90.0" vertical_fov="40.0"
            depth_min="0.2" depth_max="15.0"/>
     ...
 </sensor>
@@ -119,13 +119,13 @@ frontier_slam/
 
 ```bash
 distrobox enter ros2-jazzy
-cd ~/delivery/slam_ws
+cd ~/delivery/ros_ws
 colcon build --symlink-install
 source install/setup.zsh
 ros2 launch frontier_slam frontier_slam.launch.py
 ```
 
-The simulation must be running first (steps 1–3 from `CLAUDE.md`).
+The simulation must be running first — see the ActiveSlam repo root README for the full bring-up sequence (Stonefish + TF chain + point cloud + mapper).
 
 ## Session logs
 
@@ -156,5 +156,6 @@ See `FutureWork.md` for detailed notes on each step.
 
 ## Reference
 
-> Suresh, S., Yogamani, S., & Ganesan, K. (2020). *Active SLAM using 3D Submap Saliency
-> for Underwater Volumetric Exploration*. IEEE ICRA 2020.
+> Suresh, S., Sodhi, P., Mangelson, J. G., Wettergreen, D., & Kaess, M. (2020). *Active
+> SLAM using 3D Submap Saliency for Underwater Volumetric Exploration*. IEEE International
+> Conference on Robotics and Automation (ICRA), Paris, France.
