@@ -7,7 +7,7 @@ Starts:
   - static camera TF     : bluerov2/base_link  → bluerov2/Dcam
 
 World path is read from the STONEFISH_WORLD_DIR environment variable.
-Default: ~/delivery/slam_ws/src/world
+Default: ~/delivery/ros_ws/src/ActiveSlam/sim/world
 Override before launching:
   export STONEFISH_WORLD_DIR=/path/to/world
 
@@ -21,7 +21,7 @@ from launch_ros.actions import Node
 
 _WORLD_DIR  = os.environ.get(
     'STONEFISH_WORLD_DIR',
-    os.path.expanduser('~/delivery/slam_ws/src/world'),
+    os.path.expanduser('~/delivery/ros_ws/src/ActiveSlam/sim/world'),
 )
 WORLD_DATA = os.path.join(_WORLD_DIR, 'data')
 SCENARIO   = os.path.join(_WORLD_DIR, 'scnenario', 'waterlinked.scn')
