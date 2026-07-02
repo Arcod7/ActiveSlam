@@ -119,7 +119,7 @@ frontier_slam/
 
 ```bash
 distrobox enter ros2-jazzy
-cd ~/delivery/ros_ws
+cd <path-to-your-colcon-workspace>   # the workspace that has this repo under src/
 colcon build --symlink-install
 source install/setup.zsh
 ros2 launch frontier_slam frontier_slam.launch.py

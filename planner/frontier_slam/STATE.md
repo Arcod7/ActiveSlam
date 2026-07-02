@@ -1,6 +1,6 @@
 # frontier_slam — Current State
 
-Mutable snapshot. Overwrite, never append. Last updated: 2026-05-22.
+Mutable snapshot. Overwrite, never append. Last updated: 2026-07-02.
 
 Change log → `Progress.md` | Session findings → `Sessions.md`
 

@@ -1462,3 +1462,65 @@ the unknown space each frontier borders (matches the poster legend/schematic).
   goal stays an amber sphere. Re-added the `geometry_msgs/Point` import.
 
 **Observed impact**: 🔲 Not yet run; needs the node relaunched (symlink-install, no rebuild).
+
+---
+
+## Change 49 — Repo migration: slam_ws → ActiveSlam monorepo
+
+**Date**: 2026-07-02
+**Files**: repo-wide (path changes only, no logic changes)
+
+**Objective**: consolidate five independent git repos
+(`frontier_slam`, `stonefish_groundtruth_mapping`, `stonefish_ros2`, `launch_tools`, `world`,
+previously under `slam_ws/src/`) into one public monorepo, `ActiveSlam`, ahead of the
+dissertation deadline. `ActiveSlam` is now the main repository; the colcon workspace lives
+separately at `~/delivery/ros_ws` (standard ROS2 convention — repo holds packages, workspace
+is a disposable local wrapper, never committed).
+
+**Changed**:
+- `frontier_slam` → `ActiveSlam/planner/frontier_slam/` (git history preserved, manual
+  merge-subtree recipe — `git subtree` porcelain isn't installed on this machine, so used
+  `git fetch` + `git merge -s ours --no-commit --allow-unrelated-histories` +
+  `git read-tree --prefix=... -u` + `git commit` instead).
+- `stonefish_groundtruth_mapping` → `ActiveSlam/slam/stonefish_groundtruth_mapping/` (history
+  preserved, same recipe). `STONEFISH_WORLD_DIR` default in `step1_tf.launch.py` updated to
+  the new `sim/world` path.
+- `stonefish_ros2` (patched fork, `dev` branch) → `ActiveSlam/sim/stonefish_ros2/` (history
+  preserved).
+- `launch_tools` → `ActiveSlam/tools/launch_tools/` (history preserved). Untracked a
+  previously-committed `__pycache__/keyboard_control.cpython-312.pyc`; added `.gitignore`.
+- `world` → `ActiveSlam/sim/world/` — **copied as plain files, history NOT preserved**. The
+  source repo's `.git` is 85 MB packed / ~313 MB of mesh data on disk (`shipwreck.obj` alone
+  is 289 MB); importing its full history would permanently bake those blobs into
+  `ActiveSlam`'s `.git`, well past GitHub's 100 MB single-file limit, even after gitignoring
+  the directory going forward. Only the 6 small tracked files (`.scn` configs, one texture,
+  `run.sh`) were copied and committed; `data/obj/*.obj|.mtl` are gitignored but physically
+  present on disk (needed to run the sim). See `sim/world/data/README.md`.
+- Stonefish's 3 patch commits (vertical-FOV depth camera, physics-thread capture timestamps)
+  exported as `.patch` files in `sim/stonefish_patches/`, with upstream URL + base SHA
+  (`09208f9`, `patrykcieslak/stonefish`) documented — the patched fork itself stays outside
+  the repo (~250 MB C++ checkout).
+- `ROADMAP.md` copied (not moved) from `ActiveSlam-Resources` into `docs/ROADMAP.md` — the
+  repo's own living copy going forward; the source is untouched.
+- New root `README.md`: project framing, package table, install, current manual 3-step run
+  sequence (no unified demo launch file yet — that's Sprint 1).
+- Fixed stale content while migrating: `frontier_slam/README.md`'s sensor table still
+  described the pre-Ch45 fallback (128×32, ~22.5° vFOV from aspect ratio) instead of the
+  wired-through WaterLinked 3D-15 spec (257×67, 40° vFOV); its build instructions pointed at
+  `slam_ws`; its citation had wrong author names/venue detail for the Suresh et al. paper
+  (corrected against the actual PDF: Suresh, Sodhi, Mangelson, Wettergreen, Kaess, ICRA 2020,
+  Paris).
+- Root `~/delivery/CLAUDE.md` written — directory map + build/run quickstart + deadlines +
+  doc conventions, for AI sessions working anywhere under `~/delivery` (outside the public
+  repo, since `ActiveSlam` carries a strict no-AI-mentions rule).
+
+**Not yet done** (handed off, not run by this session — see `~/.claude/plans/have-a-look-at-shimmering-pizza.md`):
+- Deleting `stonefish_original` (257 MB redundant pristine copy) and the old `slam_ws`
+  workspace (kept until the new `ros_ws` build + a full sim run are verified).
+- Removing the 4 placeholder `content.txt` files left over from the original `ActiveSlam`
+  skeleton (`eval/`, `planner/`, `sim/`, `slam/`).
+- `colcon build` verification from `ros_ws` and the fresh-clone install test (Gates 1–2).
+
+**Observed impact**: 🔲 Not yet built or run from the new workspace layout — Gate 1 (colcon
+build + manual 3-step launch + RViz map) is the next step before anything here is considered
+verified.
