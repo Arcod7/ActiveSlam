@@ -1524,3 +1524,46 @@ is a disposable local wrapper, never committed).
 **Observed impact**: 🔲 Not yet built or run from the new workspace layout — Gate 1 (colcon
 build + manual 3-step launch + RViz map) is the next step before anything here is considered
 verified.
+
+---
+
+## Change 50 — Gate 1: build + end-to-end pipeline verification from ros_ws
+
+**Date**: 2026-07-02
+**Files**: none (verification only, one doc fix below)
+
+**Objective**: confirm the Change 49 migration didn't break anything before deleting
+`slam_ws`/`stonefish_original` — `colcon build` from the new workspace, then exercise the
+actual sense→map loop rather than just checking the code compiles.
+
+**Verified** (inside the `ros2-jazzy` distrobox container):
+- `colcon build --symlink-install` from `~/delivery/ros_ws`: 4/4 packages, clean (only
+  benign C++17/C++14 ABI-change compiler notes from `stonefish_ros2`, no errors).
+- `stonefish_simulator` loads all meshes from the new `sim/world/data/obj/` path
+  successfully (confirms the plain-copy, non-history-preserved import for `world` didn't
+  lose or corrupt anything).
+- `/cloud_in` publishes real depth data at ~5 Hz (matches sensor spec).
+- Direct thruster commands (`ros2 topic pub` to `/bluerov2/controller/thruster_setpoints_sim`,
+  bypassing the teleop node to test the sim interface directly) produce real robot motion —
+  confirmed via a proper `rclpy` subscriber sampling `/StoneFish/Odometry` over 3 s (position
+  changed measurably), not a single `ros2 topic echo` snapshot, which turned out to be
+  unreliable here (dropped/stale messages, see below).
+- `/projected_map` grows with movement: 2368/5698 known cells before, 7031/15748 after ~15 s
+  of forward motion.
+- `ros2 launch frontier_slam frontier_slam.launch.py` produces valid, sane session CSVs
+  (position, cluster counts climbing 132→133→137) in the new `planner/frontier_slam/logs/`
+  location.
+
+**Found and fixed**: the `step1_tf` → `step2_pointcloud` → `step3_octomap` launch files each
+`IncludeLaunchDescription` the previous one (step3 = step1 + step2 + octomap_server), so
+they **cascade** — running all three in separate terminals (as the README instructed) spawns
+three independent `stonefish_simulator` processes all publishing on the same topics. Docs
+fixed to say "run only the one level you need" (README.md, `~/delivery/CLAUDE.md`).
+
+**Not verified**: actual RViz rendering — no visual/display channel available in this
+session to confirm the map/frontier markers render correctly, only that the underlying
+topics carry correct data. Antoine should eyeball RViz once before trusting this for the
+demo.
+
+**Observed impact**: ✅ Gate 1 passed. Cleared to proceed with Gate 2 (fresh-clone install
+test) and, once that passes, delete `slam_ws` / `stonefish_original`.
