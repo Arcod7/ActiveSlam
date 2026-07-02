@@ -1660,24 +1660,18 @@ before it had a `package.xml`). Scenario loads and meshes load correctly, no mor
 rebuild (`rm -rf build install`, not just `colcon build` again) to avoid stale orphaned
 installs. Worth remembering for any future launch-file reorganisation.
 
-**Bug 2 — RViz crash (diagnosed, not fixable from here):**
+**Bug 2 — RViz crash (FIXED: `QT_QPA_PLATFORM=xcb` not actually set in Antoine's shell):**
 ```
 rviz::RenderSystem: error creating render window: RenderingAPIException: Invalid parentWindowHandle
 Unable to create the rendering window after 100 tries
 terminate called after throwing an instance of 'std::runtime_error'
 ```
-Checked the display stack: `QT_QPA_PLATFORM=xcb` (already correctly forcing X11, ruling out a
-Wayland-vs-X11 mismatch), `xdpyinfo`/`glxinfo` both respond fine, `direct rendering: Yes`. The
-renderer is **zink Vulkan over Apple's M1 Max GPU via the Asahi "Honeykrisp" driver** — Mesa's
-OpenGL-over-Vulkan translation layer, used because Apple Silicon has no native Mesa OpenGL
-driver. Stonefish creates its GL context fine (simpler/direct path); RViz's Ogre3D backend
-does a more demanding GLX window-embedding call (`GLXWindow::create` with a parent window
-handle, for compositing the render viewport into a Qt widget) that zink/Honeykrisp apparently
-doesn't support correctly yet. This reads as a driver/hardware-stack limitation specific to
-Apple Silicon + Asahi Linux, not a bug in `demo.launch.py` or the RViz config — nothing in
-this repo's code is positioned to fix it.
+Renderer is zink Vulkan over Apple's M1 Max GPU via the Asahi "Honeykrisp" driver (no native
+Mesa OpenGL on Apple Silicon) — my diagnostic check inside a `distrobox enter` session showed
+`QT_QPA_PLATFORM=xcb` already set and assumed it was correctly forcing X11 in the real launch
+too, but that was this session's probe environment, not Antoine's actual interactive shell —
+it wasn't set there. **Fix confirmed working**: `export QT_QPA_PLATFORM=xcb` added to
+`~/.zshrc`. With it set, `demo.launch.py` (teleop + octomap, `rviz:=true`) runs correctly —
+Stonefish, RViz, and the octomap build all confirmed working by Antoine directly.
 
-**Observed impact**: ✅ Bug 1 fixed and verified end-to-end from a fresh clone. Bug 2 is an
-open, likely-unfixable-from-here environment limitation on this specific machine — `rviz:=false`
-is the reliable path on Apple Silicon/Asahi until Mesa's zink/Honeykrisp driver matures, or
-until proven otherwise by someone actually able to see the screen.
+**Observed impact**: ✅ Both bugs fixed and confirmed working end to end.
