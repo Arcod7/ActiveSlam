@@ -1,7 +1,5 @@
 """
-Step 3 — OctoMap ground-truth map.
-
-Adds octomap_server on top of Step 2.
+Full OctoMap mapping stack: Stonefish + TF + point cloud + octomap_server.
 
   /cloud_in  (PointCloud2, frame: bluerov2/Dcam)
   TF chain:  world_ned → bluerov2/base_link → bluerov2/Dcam
@@ -23,11 +21,11 @@ from ament_index_python.packages import get_package_share_directory
 
 
 def generate_launch_description():
-    step2 = IncludeLaunchDescription(
+    pointcloud = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
                 get_package_share_directory('stonefish_groundtruth_mapping'),
-                'launch', 'step2_pointcloud.launch.py',
+                'launch', 'pointcloud.launch.py',
             )
         )
     )
@@ -48,4 +46,4 @@ def generate_launch_description():
         ],
     )
 
-    return LaunchDescription([step2, octomap])
+    return LaunchDescription([pointcloud, octomap])

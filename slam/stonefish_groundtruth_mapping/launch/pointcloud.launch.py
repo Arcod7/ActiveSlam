@@ -1,5 +1,5 @@
 """
-Step 2 — Depth image → PointCloud2.
+Depth image → PointCloud2 (includes tf.launch.py: Stonefish + TF chain).
 
   /sensor_msgs/image_depth  ──► depth_image_proc ──► /cloud_in
   /sensor_msgs/camera_info  ──►┘
@@ -21,11 +21,11 @@ from ament_index_python.packages import get_package_share_directory
 
 
 def generate_launch_description():
-    step1 = IncludeLaunchDescription(
+    tf_chain = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
                 get_package_share_directory('stonefish_groundtruth_mapping'),
-                'launch', 'step1_tf.launch.py'
+                'launch', 'tf.launch.py'
             )
         )
     )
@@ -49,4 +49,4 @@ def generate_launch_description():
         output='screen',
     )
 
-    return LaunchDescription([step1, depth_to_cloud])
+    return LaunchDescription([tf_chain, depth_to_cloud])

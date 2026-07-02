@@ -2,7 +2,7 @@
 Frontier-based exploration.
 
 Prerequisites (must already be running):
-  ros2 launch stonefish_groundtruth_mapping step3_octomap.launch.py
+  ros2 launch stonefish_groundtruth_mapping octomap.launch.py
 
 This adds:
   - frontier_extractor : /projected_map → /frontier_slam/goal + /frontier_slam/path

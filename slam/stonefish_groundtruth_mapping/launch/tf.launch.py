@@ -1,5 +1,5 @@
 """
-Step 1 — TF chain.
+Stonefish + TF chain.
 
 Starts:
   - Stonefish simulator  (bluerov2 + off_shore_station)

@@ -10,9 +10,10 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', [
-            'launch/step1_tf.launch.py',
-            'launch/step2_pointcloud.launch.py',
-            'launch/step3_octomap.launch.py',
+            'launch/tf.launch.py',
+            'launch/pointcloud.launch.py',
+            'launch/octomap.launch.py',
+            'launch/tsdf.launch.py',
         ]),
     ],
     install_requires=['setuptools'],

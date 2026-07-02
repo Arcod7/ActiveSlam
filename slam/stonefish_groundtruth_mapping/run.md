@@ -2,7 +2,7 @@ Visualise point cloud with rviz:
 
 ```bash
 # 1. Run the point cloud publisher
-ros2 launch stonefish_groundtruth_mapping step2_pointcloud.launch.py
+ros2 launch stonefish_groundtruth_mapping pointcloud.launch.py
 
 # 2. In another terminal, run rviz
 rviz2
@@ -15,8 +15,8 @@ ros2 run launch_tools my_keyboard
 Octomap:
 
 ```bash
-# 1. Run the octomap server, step1(odom to tf) and step2 (depth to point cloud)
-ros2 launch stonefish_groundtruth_mapping step3_octomap.launch.py
+# 1. Run the full stack: Stonefish + TF + point cloud + octomap_server
+ros2 launch stonefish_groundtruth_mapping octomap.launch.py
 
 # 2. In another terminal, run rviz
 rviz2
