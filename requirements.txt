@@ -2,6 +2,8 @@
 # Verified working versions (aarch64, ROS2 Jazzy container, 2026-07-02):
 numpy>=1.26
 scipy>=1.11
+gtsam==4.2.1
+small-gicp
 
 # vdbfusion (mapper:=tsdf only) is NOT installable via this file: PyPI only ships wheels up
 # to cp310, on x86_64 only — no wheel exists for Python 3.11/3.12 (Ubuntu 24.04's default) on
