@@ -1694,3 +1694,20 @@ Stonefish, RViz, and the octomap build all confirmed working by Antoine directly
 - README.md / INSTALL.md: `colcon build --symlink-install` → `colcon build --symlink-install --cmake-args -Wno-dev`, silencing CMake dev-mode warnings (`CMP0144`/`CMP0074`) that PCL's own cmake modules trigger — noise from upstream PCL, not this project.
 
 **Observed impact**: ✅ `colcon build --symlink-install --cmake-args -Wno-dev` now produces zero stderr across all 6 packages (verified via isolated rebuild of `stonefish_ros2`, the only package that previously had output).
+
+## Change 55 — Implement Wall-normal tracking motion controller
+
+**Date**: 2026-07-03
+**Files**: `frontier_slam/control_utils.py`, `frontier_slam/wall_follower.py`, `launch/wall_follow.launch.py`, `bringup/launch/demo.launch.py`, `setup.py`
+
+**Objective**: Enable the ROV to lock onto the nearest TSDF surface and strafe along it at a fixed standoff distance.
+
+**What changed**:
+- Added `sway` command support to `control_utils.py` and modified `mix_thrusters` to map it to the 6-thruster layout (strafing sideway using the 4 horizontal thrusters).
+- Created `wall_follower.py`, a new node that listens to `/tsdf/surface_normals_cloud` (published by `tsdf_mapper.py`), computes distance to the nearest wall, and aligns the ROV heading perpendicular to the wall normal while strafing.
+- Created `wall_follow.launch.py` to start the wall follower node.
+- Updated `demo.launch.py` to introduce the `motion` launch argument. Users can run `ros2 launch bringup demo.launch.py motion:=wallfollow mapper:=tsdf` to engage the wall follower. (Using `motion` distinct from the operator `mode` argument).
+- Updated `setup.py` to register the new node and launch file.
+- Added closed-loop kinematic tests verifying the controller's convergence.
+
+**Observed impact**: ✅ The WallFollower successfully tracks the wall at a set standoff distance while orienting towards it and maintaining continuous movement along the tangent.
