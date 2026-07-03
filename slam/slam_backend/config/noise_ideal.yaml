@@ -1,0 +1,18 @@
+name: ideal
+seed: 42
+pressure:
+  sigma_depth_m: 0.001
+  bias_m: 0.0
+  publish_rate_hz: 10.0
+imu:
+  sigma_roll_rad: 0.001
+  sigma_pitch_rad: 0.001
+  sigma_yaw_rad: 0.005
+  gyro_bias_drift_rad_s: 0.0
+  publish_rate_hz: 50.0
+dvl:
+  sigma_pct: 0.001
+  sigma_floor_m_s: 0.0001
+  bias_m_s: 0.0
+  scale_error_pct: 0.0
+  publish_rate_hz: 10.0

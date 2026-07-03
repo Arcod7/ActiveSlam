@@ -2,4 +2,7 @@
 
 ## Parameters
 
-Currently unconfigured. Once we add `noise_profiles.py` and the sensor models, we'll list the active configuration here.
+### Noise Profiles (`slam/slam_backend/config/`)
+- `noise_ideal.yaml`: Ideal configuration with near-perfect sensors.
+- `noise_realistic.yaml`: Realistic configuration matching Bar30 and Pathfinder DVL.
+- `noise_degraded.yaml`: Degraded configuration representing turbid water and magnetic interference.
