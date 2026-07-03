@@ -1,13 +1,17 @@
-"""Stateless helpers for the waypoint controller.
+"""Stateless helpers for the motion controllers.
 
 Thruster mixing convention (BlueROV2 vectored, NED body frame, scn-file order):
   Index  Name        Formula
-  0      FrontRight   surge - yaw
-  1      FrontLeft    surge + yaw
-  2      BackRight   -surge + yaw
-  3      BackLeft    -surge - yaw
+  0      FrontRight   surge - sway - yaw
+  1      FrontLeft    surge + sway + yaw
+  2      BackRight   -surge - sway + yaw
+  3      BackLeft    -surge + sway - yaw
   4      VertFront    heave   (negative = upward thrust in Stonefish)
   5      VertBack     heave
+
+Sway sign: positive = starboard (strafe right), matching teleop's E key.
+Verified against simple_rov.scn geometry: the four 45° horizontal thrusters
+at [-s, +s, -s, +s] sum to a pure +Y (East-when-facing-North) body force.
 
 A note on the heave sign:
   In NED the Z axis points DOWN. Positive heave pushes the robot further down.
@@ -30,19 +34,21 @@ def wrap_angle(a: float) -> float:
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 
-def mix_thrusters(surge: float, yaw: float, heave: float) -> list:
-    """Map (surge, yaw, heave) body-frame commands to 6 BlueROV2 thrusters.
+def mix_thrusters(surge: float, yaw: float, heave: float, sway: float = 0.0) -> list:
+    """Map (surge, yaw, heave, sway) body-frame commands to 6 BlueROV2 thrusters.
 
     Output values are normalised so the peak magnitude never exceeds 1.0 — this
-    preserves the requested surge/yaw ratio when commands would otherwise clip.
+    preserves the requested command ratios when they would otherwise clip.
+    Positive sway = starboard (strafe right); defaults to 0 so existing
+    surge/yaw/heave call sites are unchanged.
     """
     raw = [
-        surge - yaw,    # 0 FrontRight
-        surge + yaw,    # 1 FrontLeft
-       -surge + yaw,    # 2 BackRight
-       -surge - yaw,    # 3 BackLeft
-        heave,          # 4 VertFront
-        heave,          # 5 VertBack
+        surge - sway - yaw,    # 0 FrontRight
+        surge + sway + yaw,    # 1 FrontLeft
+       -surge - sway + yaw,    # 2 BackRight
+       -surge + sway - yaw,    # 3 BackLeft
+        heave,                 # 4 VertFront
+        heave,                 # 5 VertBack
     ]
     peak = max(abs(v) for v in raw)
     if peak > 1.0:

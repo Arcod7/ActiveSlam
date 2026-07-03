@@ -14,8 +14,12 @@ Subscribed topics:
   /cloud_in        (sensor_msgs/PointCloud2)  depth camera point cloud
 
 Published topics:
-  /tsdf/surface_cloud    (sensor_msgs/PointCloud2)   marching-cubes surface
-  /tsdf/surface_normals  (visualization_msgs/MarkerArray)  sampled normals
+  /tsdf/surface_cloud          (sensor_msgs/PointCloud2)   marching-cubes surface
+  /tsdf/surface_normals        (visualization_msgs/MarkerArray)  sampled normals (RViz)
+  /tsdf/surface_normals_cloud  (sensor_msgs/PointCloud2)
+                                 fields x y z normal_x normal_y normal_z —
+                                 the same sampled points + normals in machine-
+                                 readable form, consumed by wall_follower
   /tsdf/voxels           (visualization_msgs/MarkerArray)
                            CUBE_LIST per weight bucket:
                              size  ∝ weight  (log-scale, 10 buckets, 0.1×–1.0× voxel)
@@ -96,6 +100,8 @@ class TSDFMapper(Node):
 
         self._cloud_pub   = self.create_publisher(PointCloud2, '/tsdf/surface_cloud',   1)
         self._normals_pub = self.create_publisher(MarkerArray, '/tsdf/surface_normals',  1)
+        self._normals_cloud_pub = self.create_publisher(
+            PointCloud2, '/tsdf/surface_normals_cloud', 1)
         self._voxels_pub  = self.create_publisher(MarkerArray, '/tsdf/voxels',           1)
 
         self.create_timer(1.0 / self.PUBLISH_HZ,   self._publish_surface)
@@ -185,6 +191,10 @@ class TSDFMapper(Node):
         sampled = verts[::self._normal_every]
         normals  = _compute_normals_vdb(self._volume.tsdf, sampled, self._voxel_size)
         self._normals_pub.publish(_normals_markers(sampled, normals, header))
+
+        valid = ~np.isnan(normals).any(axis=1)
+        self._normals_cloud_pub.publish(
+            _make_normals_cloud(header, sampled[valid], normals[valid]))
 
         self.get_logger().info(f'Surface: {len(verts)} pts', throttle_duration_sec=5.0)
 
@@ -406,6 +416,32 @@ def _make_pointcloud2(header: Header, points: np.ndarray) -> PointCloud2:
         PointField(name='z', offset=8,  datatype=PointField.FLOAT32, count=1),
     ]
     msg.data = points.astype(np.float32).tobytes() if len(points) > 0 else b''
+    return msg
+
+
+def _make_normals_cloud(header: Header, points: np.ndarray,
+                        normals: np.ndarray) -> PointCloud2:
+    """PointCloud2 with x,y,z + normal_x,normal_y,normal_z (PCL field naming)."""
+    msg              = PointCloud2()
+    msg.header       = header
+    msg.height       = 1
+    msg.width        = len(points)
+    msg.is_dense     = True
+    msg.is_bigendian = False
+    msg.point_step   = 24
+    msg.row_step     = 24 * len(points)
+    msg.fields       = [
+        PointField(name='x',        offset=0,  datatype=PointField.FLOAT32, count=1),
+        PointField(name='y',        offset=4,  datatype=PointField.FLOAT32, count=1),
+        PointField(name='z',        offset=8,  datatype=PointField.FLOAT32, count=1),
+        PointField(name='normal_x', offset=12, datatype=PointField.FLOAT32, count=1),
+        PointField(name='normal_y', offset=16, datatype=PointField.FLOAT32, count=1),
+        PointField(name='normal_z', offset=20, datatype=PointField.FLOAT32, count=1),
+    ]
+    if len(points) > 0:
+        msg.data = np.hstack([points, normals]).astype(np.float32).tobytes()
+    else:
+        msg.data = b''
     return msg
 
 

@@ -4,9 +4,11 @@ Full TSDF mapping stack: Stonefish + TF + point cloud + tsdf_mapper.
   /cloud_in  (PointCloud2, frame: bluerov2/Dcam)
   TF chain:  world_ned → bluerov2/base_link → bluerov2/Dcam
                 ↓
-         tsdf_mapper (VDBFusion) → /tsdf/surface_cloud    (marching-cubes surface)
-                                  → /tsdf/surface_normals  (sampled normals, MarkerArray)
-                                  → /tsdf/voxels           (weight/sign-coded MarkerArray)
+         tsdf_mapper (VDBFusion) → /tsdf/surface_cloud          (marching-cubes surface)
+                                  → /tsdf/surface_normals        (sampled normals, MarkerArray)
+                                  → /tsdf/surface_normals_cloud  (points+normals, PointCloud2 —
+                                                                  input for wall_follower)
+                                  → /tsdf/voxels                 (weight/sign-coded MarkerArray)
 
 Parallel structure to octomap.launch.py — same core, different map backend.
 """
