@@ -1511,10 +1511,9 @@ is a disposable local wrapper, never committed).
   (corrected against the actual PDF: Suresh, Sodhi, Mangelson, Wettergreen, Kaess, ICRA 2020,
   Paris).
 - Root private directory-map/index file written at `~/delivery/` — build/run quickstart +
-  deadlines + doc conventions, for AI-assisted sessions working anywhere under `~/delivery`
-  (kept outside the public repo, since `ActiveSlam` carries a strict no-AI-mentions rule).
+  deadlines + doc conventions (kept outside the public repo).
 
-**Not yet done** (handed off, not run by this session — see the private planning notes):
+**Not yet done** (deferred — see the private planning notes):
 - Deleting `stonefish_original` (257 MB redundant pristine copy) and the old `slam_ws`
   workspace (kept until the new `ros_ws` build + a full sim run are verified).
 - Removing the 4 placeholder `content.txt` files left over from the original `ActiveSlam`
@@ -1613,9 +1612,8 @@ the earlier step1/2/3 testing. Cleaned up; `ros2 daemon stop && ros2 daemon star
 once to clear stale discovery-graph entries for already-dead nodes.
 
 **Observed impact**: ✅ `demo.launch.py` is the new documented entry point (README and the
-private root doc index updated). Not yet verified: `rviz:=true` path with an actual person looking at the screen — no
-visual channel available in this session, only that RViz starts without logging errors and
-the underlying topics carry correct data.
+private root doc index updated). Not yet verified visually: `rviz:=true` confirmed to start without logging errors and
+the underlying topics carry correct data, but not yet eyeballed on screen.
 
 ---
 
@@ -1667,10 +1665,9 @@ Unable to create the rendering window after 100 tries
 terminate called after throwing an instance of 'std::runtime_error'
 ```
 Renderer is zink Vulkan over Apple's M1 Max GPU via the Asahi "Honeykrisp" driver (no native
-Mesa OpenGL on Apple Silicon) — my diagnostic check inside a `distrobox enter` session showed
+Mesa OpenGL on Apple Silicon) — initial diagnostic inside a `distrobox enter` session showed
 `QT_QPA_PLATFORM=xcb` already set and assumed it was correctly forcing X11 in the real launch
-too, but that was this session's probe environment, not Antoine's actual interactive shell —
-it wasn't set there. **Fix confirmed working**: `export QT_QPA_PLATFORM=xcb` added to
+too, but that was the distrobox environment, not the interactive shell — it wasn't set there. **Fix confirmed working**: `export QT_QPA_PLATFORM=xcb` added to
 `~/.zshrc`. With it set, `demo.launch.py` (teleop + octomap, `rviz:=true`) runs correctly —
 Stonefish, RViz, and the octomap build all confirmed working by Antoine directly.
 

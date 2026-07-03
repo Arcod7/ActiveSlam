@@ -1,6 +1,6 @@
 # Active SLAM — 1-Month Roadmap
 
-Working doc. Compacts the candidate improvements into a phased plan. Overwrite freely —
+Working doc. Organises proposed improvements into a phased plan. Overwrite freely —
 this is the *living plan*, not an append-only log (that's `frontier_slam/Progress.md`).
 
 ## North star (from the poster abstract)

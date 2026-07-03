@@ -1,13 +1,13 @@
 # ActiveSlam
 
-Active SLAM for underwater volumetric exploration, extending Suresh,
-Sodhi, Mangelson, Wettergreen & Kaess, *"Active SLAM using 3D Submap
-Saliency for Underwater Volumetric Exploration"* (IEEE ICRA 2020), along
-three axes: a wide-FoV 3D sonar (90°×40°) in place of their 29°×1°
-profiling sonar, FPFH submap descriptors in place of SHOT, and an
-OctoMap→TSDF map backend. Simulation-only (ROS 2 Jazzy + [Stonefish](https://github.com/patrykcieslak/stonefish)),
-BlueROV2. MSc dissertation project, Heriot-Watt University — supervisor
-Yvan Petillot, Ocean Systems Lab.
+Active SLAM for underwater volumetric exploration, extending Suresh, Sodhi, Mangelson, Wettergreen & Kaess, *"Active SLAM using 3D Submap Saliency for Underwater Volumetric Exploration"* (IEEE ICRA 2020), along three axes:
+- a wide-FoV 3D sonar (90°×40°) in place of their 29°×1° profiling sonar
+- FPFH submap descriptors in place of SHOT
+- OctoMap→TSDF map backend.
+
+Simulation-only (ROS 2 Jazzy + [Stonefish](https://github.com/patrykcieslak/stonefish)), BlueROV2.
+
+MSc dissertation project, Heriot-Watt University — supervisor Yvan Petillot, Ocean Systems Lab.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phased plan and current status.
 
