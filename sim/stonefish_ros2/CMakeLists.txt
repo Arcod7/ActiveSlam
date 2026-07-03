@@ -5,6 +5,13 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+if(CMAKE_COMPILER_IS_GNUCXX)
+  # aarch64 GCC 10+ emits ABI notes for std::pair<float,float>/<double,double>
+  # parameter passing from Stonefish's headers; purely informational, no
+  # behavior change since all consumers share this toolchain.
+  add_compile_options(-Wno-psabi)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 
 # find dependencies

@@ -7,8 +7,6 @@
   <maintainer email="ave4000@hw.ac.uk">arcod7</maintainer>
   <license>MIT</license>
 
-  <buildtool_depend>ament_python</buildtool_depend>
-
   <!-- Python nodes -->
   <depend>rclpy</depend>
   <depend>nav_msgs</depend>

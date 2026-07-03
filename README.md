@@ -40,8 +40,7 @@ mkdir -p ~/ros_ws/src && cd ~/ros_ws/src
 git clone git@github.com:Arcod7/ActiveSlam.git
 cd ~/ros_ws
 rosdep install --from-paths src -i -y
-pip install -r src/ActiveSlam/requirements.txt
-colcon build --symlink-install
+colcon build --symlink-install --cmake-args -Wno-dev
 source install/setup.zsh
 ```
 

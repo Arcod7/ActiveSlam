@@ -7,8 +7,6 @@
   <maintainer email="antoine.esman7@gmail.com">antoine</maintainer>
   <license>MIT</license>
 
-  <buildtool_depend>ament_python</buildtool_depend>
-
   <export>
     <build_type>ament_python</build_type>
   </export>

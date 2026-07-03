@@ -1672,3 +1672,25 @@ too, but that was the distrobox environment, not the interactive shell — it wa
 Stonefish, RViz, and the octomap build all confirmed working by Antoine directly.
 
 **Observed impact**: ✅ Both bugs fixed and confirmed working end to end.
+
+## Change 53 — Fix rosdep resolution: drop bogus `ament_python` buildtool dep, correct `pcl` key
+
+**Objective**: Make `rosdep install --from-paths src -i -y` exit cleanly instead of erroring on unresolvable keys.
+
+**What changed**:
+- Removed `<buildtool_depend>ament_python</buildtool_depend>` from `launch_tools`, `frontier_slam`, `stonefish_groundtruth_mapping`, and `world` package.xml files. The build type is already declared in the `<export>` block (which is what colcon reads); the `<buildtool_depend>` was dead metadata with no rosdep key. `bringup` already omitted it.
+- Changed `<depend>pcl</depend>` → `<depend>libpcl-all-dev</depend>` in `stonefish_ros2/package.xml` — `pcl` is not a valid rosdep key.
+- Removed the `pip install -r requirements.txt` step from README.md and INSTALL.md — `python3-numpy` and `python3-scipy` are proper rosdep keys already declared in `frontier_slam/package.xml`, and the system packages (numpy 1.26.4, scipy 1.11.4) satisfy the version constraints. The pip step was redundant.
+- Removed the "expect rosdep to error" section and PEP 668 workaround from INSTALL.md since rosdep now resolves cleanly.
+
+**Observed impact**: ✅ `rosdep install --from-paths src -i -y` completes with "All required rosdeps installed successfully".
+
+## Change 54 — Suppress build noise: CMake dev warnings and aarch64 psABI notes
+
+**Objective**: Get a clean `colcon build` with no stderr, after Change 53 fixed rosdep resolution.
+
+**What changed**:
+- `stonefish_ros2/CMakeLists.txt`: added `-Wno-psabi` alongside the existing `-Wall -Wextra -Wpedantic` for GCC. Suppresses GCC 10+'s aarch64-specific ABI notes for `std::pair<float,float>`/`std::pair<double,double>` parameter passing, triggered by Stonefish's own headers (`SimulationManager.h`, `ActuatorDynamics.h`, `Robot.h`). Purely informational (`note:`, not `warning:`) — no behavior change since all consumers share this toolchain.
+- README.md / INSTALL.md: `colcon build --symlink-install` → `colcon build --symlink-install --cmake-args -Wno-dev`, silencing CMake dev-mode warnings (`CMP0144`/`CMP0074`) that PCL's own cmake modules trigger — noise from upstream PCL, not this project.
+
+**Observed impact**: ✅ `colcon build --symlink-install --cmake-args -Wno-dev` now produces zero stderr across all 6 packages (verified via isolated rebuild of `stonefish_ros2`, the only package that previously had output).
