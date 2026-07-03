@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 eval/legacy_logs/
 sim/world/data/obj/
+repomix-output.xml

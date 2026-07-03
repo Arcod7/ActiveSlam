@@ -48,10 +48,56 @@ source install/setup.zsh
 
 `rosdep` resolves the ROS package dependencies declared in each package's
 `package.xml` (`depth_image_proc`, `octomap_server`, `rviz2`, `python3-numpy`,
-`python3-scipy`, ...). `requirements.txt` covers the one Python dependency
-`rosdep` doesn't know about: `vdbfusion` (used only by `tsdf_mapper`, the
-TSDF map backend — needed for `mapper:=tsdf`, not for the default `octomap`
-mapper).
+`python3-scipy`, ...). `requirements.txt` covers the Python dependencies
+`rosdep` doesn't know about (`numpy`, `scipy`; `vdbfusion` needs a separate
+step — see below).
+
+**Expect `rosdep install` to end with an error, and that's fine:**
+
+```
+ERROR: the following packages/stacks could not have their rosdep keys resolved
+to system dependencies:
+stonefish_groundtruth_mapping: Cannot locate rosdep definition for [ament_python]
+...
+stonefish_ros2: Cannot locate rosdep definition for [pcl]
+```
+
+`ament_python` has no rosdep key at all (it ships with the ROS distro itself,
+not as a separate system package) and bare `pcl` isn't a resolvable key either
+(`pcl_conversions`, which *is* resolvable, pulls in what's actually needed).
+Every real runtime dependency (`octomap-server`, `depth-image-proc`, `rviz2`,
+etc.) installs before rosdep reports this — the nonzero exit code and error
+block are noise, not a broken install.
+
+**`pip install -r requirements.txt` may refuse to run** on a stock Ubuntu
+24.04 with `error: externally-managed-environment` (PEP 668). Either add
+`--break-system-packages`, or use a virtualenv:
+
+```bash
+python3 -m venv ~/ros_ws/venv --system-site-packages
+source ~/ros_ws/venv/bin/activate
+pip install -r src/ActiveSlam/requirements.txt
+```
+
+(`--system-site-packages` is needed so the venv can still see `rclpy` and the
+other ROS Python packages installed system-wide.)
+
+**`vdbfusion` (needed only for `mapper:=tsdf`) isn't covered by
+`requirements.txt`.** PyPI only publishes wheels up to Python 3.10, x86_64
+only — there is no wheel for Python 3.11/3.12 (Ubuntu 24.04's default) on any
+architecture, so `pip install vdbfusion` fails everywhere on a fresh Jazzy
+setup. Build it from source instead:
+
+```bash
+git clone https://github.com/PRBonn/vdbfusion.git
+cd vdbfusion
+pip install .   # or --break-system-packages / inside the venv above
+```
+
+Follow [vdbfusion's own `INSTALL.md`](https://github.com/PRBonn/vdbfusion/blob/main/INSTALL.md)
+first if the build fails — it needs OpenVDB and a C++ toolchain, which aren't
+part of this project's own dependency list. Skip this entirely if you only
+plan to run the default `mapper:=octomap`.
 
 ## Verify
 

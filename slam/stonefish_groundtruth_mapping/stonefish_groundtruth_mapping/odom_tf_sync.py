@@ -23,7 +23,7 @@ def _to_sec(stamp) -> float:
 
 
 class OdomTfSync(Node):
-    _BUFFER_SIZE = 50  # 500 ms at 100 Hz
+    _BUFFER_SIZE = 500  # 5 s at 100 Hz
 
     def __init__(self):
         super().__init__('odom_tf_sync')
@@ -54,8 +54,17 @@ class OdomTfSync(Node):
 
         if after is None:
             pose = self._buf[-1].pose.pose          # image is ahead of buffer
+            self.get_logger().warn(
+                f'depth image {t_img - times[-1]:.3f}s ahead of odom buffer — '
+                'clamping to newest sample', throttle_duration_sec=2.0,
+            )
         elif after == 0:
             pose = self._buf[0].pose.pose           # image is behind buffer
+            self.get_logger().warn(
+                f'depth image {times[0] - t_img:.3f}s behind {self._BUFFER_SIZE}-entry '
+                'odom buffer — clamping to oldest sample (pose may be stale)',
+                throttle_duration_sec=2.0,
+            )
         else:
             o1, o2 = self._buf[after - 1], self._buf[after]
             t1, t2 = times[after - 1], times[after]

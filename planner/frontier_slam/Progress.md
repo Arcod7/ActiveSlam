@@ -1510,11 +1510,11 @@ is a disposable local wrapper, never committed).
   `slam_ws`; its citation had wrong author names/venue detail for the Suresh et al. paper
   (corrected against the actual PDF: Suresh, Sodhi, Mangelson, Wettergreen, Kaess, ICRA 2020,
   Paris).
-- Root `~/delivery/CLAUDE.md` written — directory map + build/run quickstart + deadlines +
-  doc conventions, for AI sessions working anywhere under `~/delivery` (outside the public
-  repo, since `ActiveSlam` carries a strict no-AI-mentions rule).
+- Root private directory-map/index file written at `~/delivery/` — build/run quickstart +
+  deadlines + doc conventions, for AI-assisted sessions working anywhere under `~/delivery`
+  (kept outside the public repo, since `ActiveSlam` carries a strict no-AI-mentions rule).
 
-**Not yet done** (handed off, not run by this session — see `~/.claude/plans/have-a-look-at-shimmering-pizza.md`):
+**Not yet done** (handed off, not run by this session — see the private planning notes):
 - Deleting `stonefish_original` (257 MB redundant pristine copy) and the old `slam_ws`
   workspace (kept until the new `ros_ws` build + a full sim run are verified).
 - Removing the 4 placeholder `content.txt` files left over from the original `ActiveSlam`
@@ -1558,7 +1558,7 @@ actual sense→map loop rather than just checking the code compiles.
 `IncludeLaunchDescription` the previous one (step3 = step1 + step2 + octomap_server), so
 they **cascade** — running all three in separate terminals (as the README instructed) spawns
 three independent `stonefish_simulator` processes all publishing on the same topics. Docs
-fixed to say "run only the one level you need" (README.md, `~/delivery/CLAUDE.md`).
+fixed to say "run only the one level you need" (README.md, the private root doc index).
 
 **Not verified**: actual RViz rendering — no visual/display channel available in this
 session to confirm the map/frontier markers render correctly, only that the underlying
@@ -1612,8 +1612,8 @@ Stonefish shader-link warnings):
 the earlier step1/2/3 testing. Cleaned up; `ros2 daemon stop && ros2 daemon start` was needed
 once to clear stale discovery-graph entries for already-dead nodes.
 
-**Observed impact**: ✅ `demo.launch.py` is the new documented entry point (README, `~/delivery/CLAUDE.md`
-updated). Not yet verified: `rviz:=true` path with an actual person looking at the screen — no
+**Observed impact**: ✅ `demo.launch.py` is the new documented entry point (README and the
+private root doc index updated). Not yet verified: `rviz:=true` path with an actual person looking at the screen — no
 visual channel available in this session, only that RViz starts without logging errors and
 the underlying topics carry correct data.
 

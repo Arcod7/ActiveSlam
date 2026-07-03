@@ -2,4 +2,7 @@
 # Verified working versions (aarch64, ROS2 Jazzy container, 2026-07-02):
 numpy>=1.26
 scipy>=1.11
-vdbfusion==0.1.6
+
+# vdbfusion (mapper:=tsdf only) is NOT installable via this file: PyPI only ships wheels up
+# to cp310, on x86_64 only — no wheel exists for Python 3.11/3.12 (Ubuntu 24.04's default) on
+# any architecture. Build from source instead — see docs/INSTALL.md.
