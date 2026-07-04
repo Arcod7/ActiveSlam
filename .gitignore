@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
 eval/legacy_logs/
+eval/runs/
 sim/world/data/obj/
 repomix-output.xml
