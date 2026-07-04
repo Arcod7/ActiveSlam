@@ -28,7 +28,6 @@ setup(
             'imu_sim      = slam_backend.sensor_models.imu_sim:main',
             'dvl_sim      = slam_backend.sensor_models.dvl_sim:main',
             'pose_graph   = slam_backend.pose_graph:main',
-            'scan_matcher = slam_backend.scan_matcher:main',
         ],
     },
 )
