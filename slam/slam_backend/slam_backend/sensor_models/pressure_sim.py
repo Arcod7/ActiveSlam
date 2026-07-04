@@ -9,8 +9,8 @@ import os
 from slam_backend.sensor_models.noise_profiles import load_noise_profile
 
 class PressureSimNode(Node):
-    def __init__(self):
-        super().__init__('pressure_sim')
+    def __init__(self, **kwargs):
+        super().__init__('pressure_sim', **kwargs)
         
         self.declare_parameter('noise_profile_path', '')
         yaml_path = self.get_parameter('noise_profile_path').value

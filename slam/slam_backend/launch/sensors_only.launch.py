@@ -36,10 +36,17 @@ def generate_launch_description():
         name='dvl_sim',
         parameters=[{'noise_profile_path': noise_file}]
     )
-    
+
+    dead_reckoning_node = Node(
+        package='slam_backend',
+        executable='dead_reckoning',
+        name='dead_reckoning',
+    )
+
     return LaunchDescription([
         noise_profile_arg,
         pressure_node,
         imu_node,
-        dvl_node
+        dvl_node,
+        dead_reckoning_node,
     ])

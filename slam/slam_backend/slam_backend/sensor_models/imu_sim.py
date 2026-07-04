@@ -10,8 +10,8 @@ from scipy.spatial.transform import Rotation
 from slam_backend.sensor_models.noise_profiles import load_noise_profile
 
 class IMUSimNode(Node):
-    def __init__(self):
-        super().__init__('imu_sim')
+    def __init__(self, **kwargs):
+        super().__init__('imu_sim', **kwargs)
         
         self.declare_parameter('noise_profile_path', '')
         yaml_path = self.get_parameter('noise_profile_path').value
