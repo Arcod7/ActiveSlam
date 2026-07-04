@@ -18,9 +18,16 @@ Override before launching:
 Verify with:
   ros2 run tf2_tools view_frames
   Expected tree: world_ned → bluerov2/base_link → bluerov2/Dcam
+
+use_gt_tf (default true): when false, skips odom_tf_sync so a different node
+(the SLAM pose graph — see bringup/launch/demo.launch.py slam:=slam) can be the
+sole broadcaster of world_ned -> bluerov2/base_link instead of ground truth.
 """
 import os
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
@@ -30,6 +37,12 @@ SCENARIO   = os.path.join(_WORLD_DIR, 'scnenario', 'waterlinked.scn')
 
 
 def generate_launch_description():
+    use_gt_tf_arg = DeclareLaunchArgument(
+        'use_gt_tf', default_value='true',
+        description='Broadcast world_ned -> bluerov2/base_link from ground truth. '
+                    'Set false when a SLAM pose graph broadcasts that frame instead.',
+    )
+
     stonefish = Node(
         package='stonefish_ros2',
         executable='stonefish_simulator',
@@ -43,6 +56,7 @@ def generate_launch_description():
         executable='odom_tf_sync',
         name='odom_tf_sync',
         output='screen',
+        condition=IfCondition(LaunchConfiguration('use_gt_tf')),
     )
 
     # Camera mount from bluerov2_unphy.scn:
@@ -59,4 +73,4 @@ def generate_launch_description():
         ],
     )
 
-    return LaunchDescription([stonefish, odom_to_tf, static_camera_tf])
+    return LaunchDescription([use_gt_tf_arg, stonefish, odom_to_tf, static_camera_tf])

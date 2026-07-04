@@ -24,10 +24,11 @@ another terminal — the standard pattern for ROS2 keyboard teleop.
 """
 import os
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
+from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
+                             LogInfo, SetLaunchConfiguration)
 from launch.conditions import IfCondition, LaunchConfigurationEquals
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
@@ -48,9 +49,31 @@ def generate_launch_description():
     rviz_arg = DeclareLaunchArgument(
         'rviz', default_value='true', description='Launch RViz with the demo view',
     )
+    slam_arg = DeclareLaunchArgument(
+        'slam', default_value='none', choices=['none', 'slam'],
+        description='Pose source: none (ground-truth TF) or slam (GTSAM pose-graph '
+                    'correcting simulated pressure/IMU/DVL dead reckoning)',
+    )
+    noise_profile_arg = DeclareLaunchArgument(
+        'noise_profile', default_value='realistic', choices=['ideal', 'realistic', 'degraded'],
+        description='Sensor noise profile for slam:=slam (ignored otherwise)',
+    )
+
+    # tf.launch.py (included further below via octomap/tsdf -> pointcloud -> tf)
+    # declares use_gt_tf with its own default of 'true'; DeclareLaunchArgument only
+    # applies a default when the configuration isn't already set, so setting it
+    # here — before those includes run — lets slam:=slam suppress the ground-truth
+    # broadcaster in favour of pose_graph.py without touching the three
+    # intermediate launch files in between.
+    set_use_gt_tf = SetLaunchConfiguration(
+        'use_gt_tf',
+        PythonExpression(["'false' if '", LaunchConfiguration('slam'), "' == 'slam' else 'true'"]),
+    )
 
     stonefish_gt_mapping_share = get_package_share_directory('stonefish_groundtruth_mapping')
     frontier_slam_share = get_package_share_directory('frontier_slam')
+    slam_backend_share = get_package_share_directory('slam_backend')
+    eval_tools_share = get_package_share_directory('eval_tools')
     bringup_share = get_package_share_directory('bringup')
 
     octomap_stack = IncludeLaunchDescription(
@@ -81,7 +104,37 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(frontier_slam_share, 'launch', 'frontier_slam.launch.py')
         ),
+        launch_arguments={
+            'odom_topic': PythonExpression(
+                ["'/slam/odometry' if '", LaunchConfiguration('slam'), "' == 'slam' "
+                 "else '/StoneFish/Odometry'"]),
+        }.items(),
         condition=LaunchConfigurationEquals('mode', 'frontier'),
+    )
+
+    slam_stack = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(slam_backend_share, 'launch', 'slam.launch.py')
+        ),
+        launch_arguments={'noise_profile': LaunchConfiguration('noise_profile')}.items(),
+        condition=LaunchConfigurationEquals('slam', 'slam'),
+    )
+
+    eval_stack = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(eval_tools_share, 'launch', 'eval.launch.py')
+        ),
+        condition=LaunchConfigurationEquals('slam', 'slam'),
+    )
+
+    slam_hint = LogInfo(
+        msg=[
+            'slam=slam: pose_graph.py is now the sole broadcaster of '
+            'world_ned -> bluerov2/base_link (odom_tf_sync is suppressed). '
+            'noise_profile=', LaunchConfiguration('noise_profile'),
+            ' — see eval/runs/<timestamp>/ for ATE/RPE logs.',
+        ],
+        condition=LaunchConfigurationEquals('slam', 'slam'),
     )
 
     wall_follow = IncludeLaunchDescription(
@@ -110,8 +163,10 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        mode_arg, motion_arg, mapper_arg, rviz_arg,
+        mode_arg, motion_arg, mapper_arg, rviz_arg, slam_arg, noise_profile_arg,
+        set_use_gt_tf,
         octomap_stack, tsdf_stack,
+        slam_stack, eval_stack, slam_hint,
         teleop_hint, frontier_exploration,
         wall_follow, wallfollow_hint,
         rviz,
