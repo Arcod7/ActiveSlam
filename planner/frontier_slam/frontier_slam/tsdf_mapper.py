@@ -61,7 +61,7 @@ class TSDFMapper(Node):
         self.declare_parameter('space_carving',    True)
         self.declare_parameter('min_weight',       2.0)
         self.declare_parameter('voxel_min_weight', 10.0)   # hide voxels observed fewer times
-        self.declare_parameter('voxel_min_solid_confidence', 0.95)  # see module docstring
+        self.declare_parameter('voxel_min_solid_confidence', 0.80)  # see module docstring
         self.declare_parameter('normal_every',     10)
         self.declare_parameter('max_voxels_viz',   40_000)
         self.declare_parameter('show_free_voxels', False)

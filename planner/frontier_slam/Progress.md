@@ -1775,3 +1775,25 @@ Since this view is already gated to confidently-solid, well-observed voxels
 **Observed impact**: ✅ Builds clean. Not yet re-verified visually in RViz on
 this machine (headless verification only, per Change 56) — worth eyeballing
 once RViz is run interactively.
+
+## Change 58 — Retune voxel_min_solid_confidence 0.95 → 0.80
+
+**Date**: 2026-07-05
+**Files**: `tsdf_mapper.py`
+
+**Objective**: Change 56's 0.95 default (`d <= -0.9*trunc`) is very strict at
+the default `trunc=0.6`, showing only voxels extremely close to fully
+saturated — after eyeballing the result, loosen the threshold to show more
+of the confidently-observed surface.
+
+**What changed**: `voxel_min_solid_confidence` default 0.95 → 0.80, which
+loosens the effective cutoff to `d <= -0.6*trunc` (was `-0.9*trunc`) — more
+near-surface voxels now clear the bar and get displayed. `_voxel_max_d`
+(derived from this parameter) updates automatically; no other logic changed.
+Supersedes the 0.95/-0.9·trunc numbers quoted in Change 56.
+
+**Observed impact**: ✅ Builds clean, live-verified against the real sim
+(`mapper:=tsdf`, 45 s): voxel/surface counts grow steadily as before
+(voxels 2130 → 4243 → 6651 → 6896, surface points climbing to 19598),
+confirming the looser threshold still passes real, growing voxel counts
+rather than flooding the map with noise.
