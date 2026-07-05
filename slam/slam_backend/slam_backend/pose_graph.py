@@ -272,8 +272,12 @@ class PoseGraphNode(Node):
         self._isam.update(graph, values)
         result_values = self._isam.calculateEstimate()
 
-        for kf in self._keyframes:
-            kf.T_world = result_values.atPose3(kf.symbol).matrix()
+        # Refreshes every existing keyframe's T_world against this update AND
+        # returns which ones shifted enough (>0.1 m / 0.05 rad) to warrant
+        # re-running loop-closure detection from their new position — must run
+        # unconditionally (not just when lc_factors fired) so poses stay
+        # current for path publishing/covariance viz/future proximity checks.
+        moved = self._find_moved_keyframes(result_values)
 
         kf_new = Keyframe(index=n, stamp=stamp, T_odom=T_odom,
                            T_world=result_values.atPose3(sym).matrix(),
@@ -284,7 +288,6 @@ class PoseGraphNode(Node):
         if lc_factors:
             self.get_logger().info(
                 f"Loop closure: node {n} <-> {[i for i, _, _ in lc_factors]}")
-            moved = self._find_moved_keyframes(result_values)
             if moved:
                 self._redetect_and_apply(moved)
 
@@ -343,6 +346,7 @@ class PoseGraphNode(Node):
         """Re-run loop-closure detection for keyframes that shifted after the
         last optimization, and fold any newly found closures back into iSAM2
         (roller pattern: graph.cpp:120-143)."""
+        self.get_logger().info(f"Re-detecting loop closures for moved keyframes {moved_indices}")
         lc_graph = gtsam.NonlinearFactorGraph()
         for idx in moved_indices:
             kf = self._keyframes[idx]
@@ -434,7 +438,7 @@ class PoseGraphNode(Node):
             m.points = points
             return m
 
-        odom_pts, seq_pts, lc_pts, rej_pts = [], [], [], []
+        odom_pts, lc_pts, rej_pts = [], [], []
         for i, kf in enumerate(self._keyframes):
             if i == 0:
                 continue
