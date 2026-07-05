@@ -17,7 +17,30 @@ takes priority over `mapper`):
   ellipsoids, and a drift arrow + live text HUD sourced from
   `eval_tools/benchmark.py`'s `/eval/markers` (`MarkerArray`) topic —
   `err`/`ATE`/`RPE` translation+rotation/keyframe count/loop-closure
-  count/D-optimality, refreshed on every `/slam/pose` update.
+  count/D-optimality, refreshed on every `/slam/pose` update. Also overlays
+  a second, ground-truth-only map (`GroundTruthMap` / `/gt/octomap_binary`,
+  enabled by default; `TSDFSurface_GroundTruth`/`TSDFVoxels_GroundTruth` for
+  `mapper:=tsdf`, disabled by default) against the belief map — see
+  "Ground-truth reference map" below.
+
+## Ground-truth reference map (`slam:=slam` only)
+
+`gt_map.launch.py` runs a second mapping stack fed from the exact simulator
+pose, in parallel with the SLAM-estimate map, so belief vs. reality can be
+visually compared. Only included under `slam:=slam` — under `slam:=none`
+the primary map already IS ground truth.
+
+TF can't hold two transforms for one frame at once, so it's a fully parallel
+chain, not a toggle on the existing one:
+```
+world_ned → bluerov2/base_link_gt → bluerov2/Dcam_gt      (always ground truth,
+                                                             odom_tf_sync --target_frame)
+/cloud_in → cloud_relabel → /gt/cloud_in                  (same sensor data,
+                                                             frame_id swapped)
+/gt/cloud_in → octomap_server (namespace=gt) | tsdf_mapper_gt (remapped)
+             → /gt/octomap_binary | /gt/tsdf/{surface_cloud,voxels}
+```
+Matches whichever backend `mapper:=` selected for the belief map.
 
 ## Architecture
 
@@ -90,10 +113,18 @@ ros2 launch slam_backend sensors_only.launch.py noise_profile:=degraded  # senso
   moved past the 5 m loop-closure radius) — loop closure is opportunistic-only, it never makes
   the robot revisit anything. One run, one unseeded noise draw (`realistic` uses `seed: -1`).
 - ✅ Regression check: `slam:=none` (default) unchanged, no SLAM nodes started, `odom_tf_sync` still the TF source
+- ✅ Ground-truth reference map (`gt_map.launch.py`): live-verified both `mapper:=octomap`
+  (`/gt/octomap_binary` ~24–28 Hz, `/gt/cloud_in` ~25 Hz) and `mapper:=tsdf`
+  (`tsdf_mapper_gt` voxel/surface counts growing steadily, unaffected by an
+  unrelated belief-side `imu_sim` crash — see known issues below). Not yet
+  visually confirmed in RViz (headless verification only, no GUI here).
 - 🔲 Not yet run: long-duration (10+ min) session; `evo_ape`/`evo_rpe` cross-check against the written TUM files; noise-profile comparison at statistical significance (multiple seeded runs per profile)
 - ⚠️ The synthetic square-loop test's "70% ATE reduction" (Progress.md Phase 6) is superseded
   by the real benchmark above — its dense, easily-overlapping synthetic point clouds make loop
   closure fire far more readily than real depth-camera data does. Use the 0.58 m figure, not 70%.
+- ⚠️ **Known issue, unrelated to any change above**: `slam_backend/sensor_models/imu_sim.py`
+  crashed once (`ValueError: scale < 0` in the gyro-bias-drift noise draw), implying `dt` went
+  negative — flaky, not reproduced every run. Not yet fixed.
 
 ## Not yet implemented (Week 3 prep only — see docs/SLAM_PLAN.md Part 11)
 

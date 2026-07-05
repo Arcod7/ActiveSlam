@@ -94,7 +94,10 @@ apply — see [`bringup/rviz/`](bringup/rviz)):
 - `slam:=slam`: ground truth (green) vs SLAM (blue) vs raw dead-reckoning (red)
   paths, a live drift arrow + text HUD (error/ATE/RPE/keyframes/loop
   closures/D-optimality, from `/eval/markers`), pose-graph edges, and
-  covariance ellipsoids.
+  covariance ellipsoids — plus a second map built from the exact simulator
+  pose (`/gt/...` topics) overlaid against the SLAM-estimate map, so you can
+  see where the belief map actually diverges from reality, not just how far
+  the path has drifted.
 
 `mode:=teleop` (the default) brings up sim+mapper and prints a reminder to
 run teleop yourself in another terminal:

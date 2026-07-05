@@ -246,3 +246,62 @@ noise_profile:=realistic` for 45 s against the real Stonefish sim: zero
 exceptions, loop closures firing as before, and `metrics.csv` shows 28
 successful `_slam_cb` calls — meaning `_publish_eval_markers` (and therefore
 the new drift-arrow/HUD code path) ran cleanly on every SLAM update.
+
+## Phase 14 — Ground-truth reference map (belief vs. reality comparison)
+
+**Date**: 2026-07-05
+**Files**: `slam/stonefish_groundtruth_mapping/stonefish_groundtruth_mapping/odom_tf_sync.py`,
+`slam/stonefish_groundtruth_mapping/stonefish_groundtruth_mapping/cloud_relabel.py` (new),
+`slam/stonefish_groundtruth_mapping/launch/gt_map.launch.py` (new),
+`slam/stonefish_groundtruth_mapping/{setup.py,package.xml}`,
+`bringup/launch/demo.launch.py`, `bringup/rviz/demo_slam.rviz`
+
+**Objective**: Under `slam:=slam`, `odom_tf_sync` (ground truth) is fully
+suppressed so `pose_graph.py` can be the sole broadcaster of
+`world_ned -> bluerov2/base_link` — meaning no ground-truth map was ever
+built during a SLAM run, only the drifting/estimated one. There was no way
+to see "what the robot believes" next to "what's actually there."
+
+**What changed**: TF can only hold one transform per frame at a time, so
+the fix isn't to re-enable `odom_tf_sync` onto `bluerov2/base_link` (that's
+`pose_graph.py`'s frame now) — it needs its own parallel chain:
+`world_ned -> bluerov2/base_link_gt -> bluerov2/Dcam_gt`, always fed from
+`/StoneFish/Odometry` regardless of the SLAM estimate. `odom_tf_sync.py`
+gained a `target_frame` parameter (default unchanged: `bluerov2/base_link`)
+so a second instance can broadcast onto `base_link_gt` instead of touching
+the node itself. A static `Dcam_gt` transform mirrors the existing camera
+mount offset.
+
+The depth camera's raw point cloud is identical either way (same simulated
+sensor, body-frame data) — only the pose used to place it in `world_ned`
+differs — so a new `cloud_relabel` node just republishes `/cloud_in` as
+`/gt/cloud_in` with `header.frame_id` swapped to `bluerov2/Dcam_gt`, no
+recomputation needed. `gt_map.launch.py` (included only when `slam:=slam`,
+since that's the only mode where belief and truth can actually diverge)
+then runs a second `octomap_server`/`tsdf_mapper` instance off that
+relabeled cloud, matching whichever backend `mapper:=` selected, with
+outputs under `/gt/...` (`octomap_server` via `namespace='gt'`; `tsdf_mapper`
+via explicit remaps since it hardcodes absolute topic names). `demo_slam.rviz`
+gained a `GroundTruthMap` `OccupancyGrid` display (enabled by default,
+opaque) plus disabled-by-default `TSDFSurface_GroundTruth`/
+`TSDFVoxels_GroundTruth` displays for the `mapper:=tsdf` case, overlaid
+against the existing belief-map displays.
+
+**Observed impact**: ✅ Builds clean. Live-verified both backends against
+the real Stonefish sim (`slam:=slam mode:=frontier noise_profile:=realistic`):
+`mapper:=octomap` (45 s) — `/gt/octomap_binary` publishing at ~24–28 Hz,
+`/gt/cloud_in` at ~25 Hz matching the raw depth-camera rate, zero exceptions.
+`mapper:=tsdf` (45 s) — `tsdf_mapper_gt` integrating and growing independently
+of the belief instance (voxels 2130 → 4243 → 6651 → 6896, surface points
+climbing to 19598), including staying healthy through an unrelated `imu_sim`
+crash that degraded the belief map's TF lookups — the ground-truth chain
+doesn't depend on any SLAM-side node, so it's unaffected by belief-side
+failures, which is exactly the point. Not yet visually confirmed in RViz on
+this machine (headless verification only, no GUI available here).
+
+⚠️ **Found, not fixed** (pre-existing, unrelated to this change):
+`slam_backend/sensor_models/imu_sim.py` crashed once with
+`ValueError: scale < 0` from `np.random.normal(0, gyro_bias_drift_rad_s * dt)`
+— only possible if `dt` goes negative (out-of-order/backward timestamps).
+Flaky, not reproduced on every run. Worth a `dt = max(dt, 0.0)` guard at
+some point, but out of scope here.
