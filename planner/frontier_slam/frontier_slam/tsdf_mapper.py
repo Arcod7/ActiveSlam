@@ -389,7 +389,17 @@ def _confidence_colormap(conf_norm: np.ndarray) -> np.ndarray:
     c[:, 0] = 1.0 - 0.9 * t     # red:   1.0 -> 0.1
     c[:, 1] = 0.55 + 0.35 * t   # green: 0.55 -> 0.9
     c[:, 2] = 0.2 * t           # blue:  0.0 -> 0.2
-    c[:, 3] = 0.85
+    # Opaque, not translucent: any alpha < 1 pushes the whole CUBE_LIST into
+    # OGRE's transparent render queue, which draws in insertion order rather
+    # than depth order — with thousands of cubes in one marker, overlapping
+    # ones then render in the wrong front/back order (the "everything
+    # overlays wrong" look). octomap_rviz_plugins sidesteps this the same
+    # way: its "Occupied Voxels" mode uses Voxel Alpha = 1 for exactly this
+    # reason (its near-invisible "Free Voxels" haze mode uses ~0.01, where
+    # the same sorting glitch is imperceptible). We already gate this view
+    # to confidently-solid, well-observed voxels, so there's no meaningful
+    # transparency information left to encode anyway.
+    c[:, 3] = 1.0
     return c
 
 
