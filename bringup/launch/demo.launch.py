@@ -17,7 +17,9 @@ only does something useful with mapper:=tsdf (a LogInfo reminds you at launch).
 
 RViz view is picked automatically (see rviz/demo*.rviz), slam:=slam taking priority:
   slam:=slam    -> demo_slam.rviz: GT vs SLAM vs dead-reckoning paths, a drift arrow
-                   + live error/ATE/RPE text HUD, graph edges, covariance ellipsoids
+                   + live error/ATE/RPE text HUD, graph edges, covariance ellipsoids,
+                   and a second ground-truth-only map (see gt_map.launch.py) overlaid
+                   against the belief map so map drift/distortion is visible directly
   mapper:=tsdf  -> demo_tsdf.rviz: TSDF surface/voxels instead of OctoMap displays
   otherwise     -> demo.rviz: unchanged base view
 
@@ -97,6 +99,18 @@ def generate_launch_description():
         condition=LaunchConfigurationEquals('mapper', 'tsdf'),
     )
 
+    # Second, parallel map built from the exact simulator pose (not the SLAM
+    # estimate) so belief vs. reality can be visually compared in RViz.
+    # Only meaningful once pose_graph.py can actually diverge from ground
+    # truth, i.e. slam:=slam — see gt_map.launch.py for why this needs its
+    # own TF chain rather than reusing bluerov2/base_link.
+    gt_map_stack = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(stonefish_gt_mapping_share, 'launch', 'gt_map.launch.py')
+        ),
+        condition=LaunchConfigurationEquals('slam', 'slam'),
+    )
+
     teleop_hint = LogInfo(
         msg=(
             "mode=teleop: sim + mapper are up. Run teleop yourself in another "
@@ -139,7 +153,9 @@ def generate_launch_description():
             'slam=slam: pose_graph.py is now the sole broadcaster of '
             'world_ned -> bluerov2/base_link (odom_tf_sync is suppressed). '
             'noise_profile=', LaunchConfiguration('noise_profile'),
-            ' — see eval/runs/<timestamp>/ for ATE/RPE logs.',
+            ' — see eval/runs/<timestamp>/ for ATE/RPE logs. A second, '
+            'ground-truth-only map is also running under /gt/... '
+            '(demo_slam.rviz overlays it against the belief map).',
         ],
         condition=LaunchConfigurationEquals('slam', 'slam'),
     )
@@ -188,7 +204,7 @@ def generate_launch_description():
     return LaunchDescription([
         mode_arg, motion_arg, mapper_arg, rviz_arg, slam_arg, noise_profile_arg,
         set_use_gt_tf,
-        octomap_stack, tsdf_stack,
+        octomap_stack, tsdf_stack, gt_map_stack,
         slam_stack, eval_stack, slam_hint,
         teleop_hint, frontier_exploration,
         wall_follow, wallfollow_hint,

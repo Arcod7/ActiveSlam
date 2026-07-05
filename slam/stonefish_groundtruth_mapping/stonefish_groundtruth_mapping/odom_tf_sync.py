@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """
-Broadcasts world_ned → bluerov2/base_link at the EXACT timestamp of each
+Broadcasts world_ned → <target_frame> at the EXACT timestamp of each
 depth image by interpolating between buffered odometry messages.
 
 octomap_server will always find a TF hit at the point-cloud timestamp with
 no interpolation or extrapolation on its end — eliminating pose drift during
 fast motion.
+
+target_frame (default 'bluerov2/base_link'): child frame to broadcast.
+Override to run a second, parallel instance broadcasting the same ground
+truth onto a different frame (see gt_map.launch.py, which uses this to keep
+a ground-truth TF chain alive under bluerov2/base_link_gt even while
+pose_graph.py owns bluerov2/base_link during slam:=slam).
 """
 import numpy as np
 import rclpy
@@ -27,6 +33,8 @@ class OdomTfSync(Node):
 
     def __init__(self):
         super().__init__('odom_tf_sync')
+        self.declare_parameter('target_frame', 'bluerov2/base_link')
+        self._target_frame = self.get_parameter('target_frame').value
         self._br  = tf2_ros.TransformBroadcaster(self)
         self._buf: list[Odometry] = []
 
@@ -34,7 +42,8 @@ class OdomTfSync(Node):
                                  self._odom_cb, 100)
         self.create_subscription(Image, '/sensor_msgs/image_depth',
                                  self._image_cb, qos_profile_sensor_data)
-        self.get_logger().info('odom_tf_sync started')
+        self.get_logger().info(
+            f'odom_tf_sync started (world_ned -> {self._target_frame})')
 
     # ── buffer incoming odometry ──────────────────────────────────────────
     def _odom_cb(self, msg: Odometry) -> None:
@@ -91,7 +100,7 @@ class OdomTfSync(Node):
         tf = TransformStamped()
         tf.header.stamp    = msg.header.stamp   # exact depth-image timestamp
         tf.header.frame_id = 'world_ned'
-        tf.child_frame_id  = 'bluerov2/base_link'
+        tf.child_frame_id  = self._target_frame
         tf.transform.translation.x = pose.position.x
         tf.transform.translation.y = pose.position.y
         tf.transform.translation.z = pose.position.z
