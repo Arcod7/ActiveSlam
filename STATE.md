@@ -1,6 +1,6 @@
 # ActiveSlam SLAM Backend — Current State
 
-Mutable snapshot. Overwrite, never append. Last updated: 2026-07-04.
+Mutable snapshot. Overwrite, never append. Last updated: 2026-07-05.
 
 Change log → `Progress.md`. Detailed design + as-built deltas → `docs/SLAM_PLAN.md`.
 
@@ -67,10 +67,18 @@ ros2 launch slam_backend sensors_only.launch.py noise_profile:=degraded  # senso
 
 - ✅ Sensor fusion chain (pressure+IMU+DVL→dead_reckoning): profile-dependent drift confirmed via standalone rclpy harness
 - ✅ `ScanMatcher` gating: correctly rejects a synthetic zero-overlap match despite `converged=True`
-- ✅ Pose graph + loop closure: synthetic square-loop test, 70% ATE reduction after loop closure
-- ✅ Full live run (`demo.launch.py slam:=slam mode:=frontier`, real Stonefish sim): all nodes start, loop closures fire on real depth-camera clouds, frontier exploration drives from SLAM-corrected odometry, zero exceptions over 45s
+- ✅ Pose graph + loop closure logic: synthetic square-loop test (wiring/logic sanity check only, not representative of real numbers — see caveat below)
+- ✅ **Real benchmark** (`demo.launch.py slam:=slam mode:=frontier noise_profile:=realistic`,
+  real Stonefish sim, 157s / 116 keyframes / 12 loop closures, zero exceptions): final
+  cumulative ATE **0.58 m**, peak instantaneous error 0.95 m, mean RPE (translation) 0.12 m.
+  All 12 closures fired in two early clusters; zero in the final ~63s (frontier exploration
+  moved past the 5 m loop-closure radius) — loop closure is opportunistic-only, it never makes
+  the robot revisit anything. One run, one unseeded noise draw (`realistic` uses `seed: -1`).
 - ✅ Regression check: `slam:=none` (default) unchanged, no SLAM nodes started, `odom_tf_sync` still the TF source
-- 🔲 Not yet run: long-duration (10+ min) session; `evo_ape`/`evo_rpe` cross-check against the written TUM files; noise-profile comparison at statistical significance (multiple seeded runs)
+- 🔲 Not yet run: long-duration (10+ min) session; `evo_ape`/`evo_rpe` cross-check against the written TUM files; noise-profile comparison at statistical significance (multiple seeded runs per profile)
+- ⚠️ The synthetic square-loop test's "70% ATE reduction" (Progress.md Phase 6) is superseded
+  by the real benchmark above — its dense, easily-overlapping synthetic point clouds make loop
+  closure fire far more readily than real depth-camera data does. Use the 0.58 m figure, not 70%.
 
 ## Not yet implemented (Week 3 prep only — see docs/SLAM_PLAN.md Part 11)
 

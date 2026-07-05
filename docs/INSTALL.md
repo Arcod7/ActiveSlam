@@ -53,7 +53,21 @@ source install/setup.zsh
 (`CMP0144`/`CMP0074` about `_ROOT` variables) — noise from upstream PCL, not
 this project.
 
-**`vdbfusion` (needed only for `mapper:=tsdf`) is not covered by `rosdep`.**
+## 6. Python dependencies not covered by `rosdep`
+
+[`requirements.txt`](../requirements.txt) lists everything `rosdep` can't
+resolve because it isn't packaged for apt — install with:
+
+```bash
+pip install -r requirements.txt   # or --break-system-packages / inside a venv
+```
+
+`gtsam` and `small-gicp` (needed only for `slam:=slam`) are plain PyPI
+wheels and install cleanly this way on aarch64 as well as x86_64. `vdbfusion`
+(needed only for `mapper:=tsdf`) is the exception — see below, it needs a
+source build instead.
+
+**`vdbfusion` is NOT installable via this file.**
 PyPI only publishes wheels up to Python 3.10, x86_64
 only — there is no wheel for Python 3.11/3.12 (Ubuntu 24.04's default) on any
 architecture, so `pip install vdbfusion` fails everywhere on a fresh Jazzy
@@ -78,5 +92,5 @@ ros2 launch bringup demo.launch.py
 
 Should bring up Stonefish, RViz, and print a reminder to run
 `ros2 run launch_tools my_keyboard` in another terminal (the default mode is
-`teleop`). See the root README's *Run* section for the `mode`/`mapper`
+`teleop`). See the root README's *Run* section for the `mode`/`mapper`/`slam`
 switches.

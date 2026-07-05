@@ -16,15 +16,20 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phased plan and current status.
 A BlueROV2 in a simulated underwater scene, sensed by a depth camera
 configured as a wide-FoV 3D sonar proxy (elevation aperture wired through a
 [patched Stonefish](sim/stonefish_patches/)), building a map while either
-teleoperated or exploring autonomously via frontier detection.
+teleoperated or exploring autonomously via frontier detection. Pose can come
+from ground truth (default) or from a GTSAM pose-graph SLAM backend
+correcting simulated pressure/IMU/DVL sensor noise, with a benchmarking node
+logging ATE/RPE against ground truth.
 
 | Package | Role |
 |---|---|
-| [`bringup`](bringup) | Unified `demo.launch.py` (mode + mapper switches) and the demo RViz config |
+| [`bringup`](bringup) | Unified `demo.launch.py` (mode/mapper/slam switches) and the demo RViz config |
 | [`sim/world`](sim/world) | Stonefish scenario: BlueROV2 model, environment meshes, `.scn` config |
 | [`sim/stonefish_ros2`](sim/stonefish_ros2) | ROS 2 bridge to the simulator (patched fork) |
 | [`slam/stonefish_groundtruth_mapping`](slam/stonefish_groundtruth_mapping) | TF chain, depth image → point cloud, OctoMap/TSDF mapping |
+| [`slam/slam_backend`](slam/slam_backend) | Simulated pressure/IMU/DVL sensors + dead-reckoning fusion + GTSAM iSAM2 pose-graph SLAM |
 | [`planner/frontier_slam`](planner/frontier_slam) | Frontier-based autonomous exploration (the optional mode) |
+| [`eval/eval_tools`](eval/eval_tools) | ATE/RPE benchmarking against ground truth, TUM trajectory export, offline plotting |
 | [`tools/launch_tools`](tools/launch_tools) | Keyboard teleop |
 
 ## Install
@@ -60,12 +65,25 @@ One command brings up Stonefish + TF + point cloud + mapper + RViz:
 ros2 launch bringup demo.launch.py
 ```
 
-Two independent switches, each defaulting to the first value:
+Independent switches, each defaulting to the first value:
 
 ```bash
-ros2 launch bringup demo.launch.py mode:=teleop|frontier      # operator mode
-ros2 launch bringup demo.launch.py mapper:=octomap|tsdf       # map backend
-ros2 launch bringup demo.launch.py rviz:=false                # headless
+ros2 launch bringup demo.launch.py mode:=teleop|frontier          # operator mode
+ros2 launch bringup demo.launch.py mapper:=octomap|tsdf           # map backend
+ros2 launch bringup demo.launch.py slam:=none|slam                # pose source
+ros2 launch bringup demo.launch.py noise_profile:=ideal|realistic|degraded  # slam:=slam only
+ros2 launch bringup demo.launch.py rviz:=false                    # headless
+```
+
+`slam:=none` (default) broadcasts pose from ground truth, as before.
+`slam:=slam` replaces that with a GTSAM iSAM2 pose graph correcting
+simulated pressure/IMU/DVL sensor noise (see
+[`slam/slam_backend`](slam/slam_backend)), and starts a benchmark node
+that logs ATE/RPE against ground truth and writes TUM trajectory files
+to `eval/runs/<timestamp>/` — plot them with:
+
+```bash
+ros2 run eval_tools plot_results eval/runs/<timestamp>/
 ```
 
 `mode:=teleop` (the default) brings up sim+mapper and prints a reminder to
@@ -85,4 +103,6 @@ if not running from the default checkout location.
 
 Individual pieces are still directly launchable if you don't want the whole
 stack — see [`slam/stonefish_groundtruth_mapping/launch/`](slam/stonefish_groundtruth_mapping/launch)
-(`tf` → `pointcloud` → `octomap`/`tsdf`, each including the one before it).
+(`tf` → `pointcloud` → `octomap`/`tsdf`, each including the one before it) and
+[`slam/slam_backend/launch/`](slam/slam_backend/launch) (`sensors_only` for
+just the simulated pressure/IMU/DVL sensors, `slam` adds the pose graph on top).

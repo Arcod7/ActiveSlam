@@ -180,3 +180,32 @@ loop closures fire on real depth-camera clouds within the first ~10 s of
 motion, zero exceptions over a 45 s run. One expected transient: `octomap_server`
 drops a single early message during the TF-broadcaster handoff at startup
 (normal message_filter behavior, not a bug).
+
+---
+
+## Phase 12 — Real 2-minute-class benchmark (correcting Phase 6's headline number)
+
+**Date**: 2026-07-04
+**Files**: none (verification only)
+
+**Objective**: The Phase 6 "70% ATE reduction" figure came from a synthetic
+square-loop trajectory with dense, easily-overlapping synthetic point clouds
+and a single-endpoint distance comparison — not from `benchmark.py`'s actual
+ATE computation, and not from a run long enough to be a meaningful trajectory
+length (~5s of represented motion). Challenged on this; re-verified properly:
+a 157s (~2.6 min) `slam:=slam mode:=frontier noise_profile:=realistic` session
+against the real Stonefish sim, reading `benchmark.py`'s actual `metrics.csv`
+output and `plot_results.py`'s rendered figure, not a manual proxy.
+
+**Observed impact**: ✅ Zero exceptions, 116 keyframes, 12 loop closures.
+Real numbers: final cumulative ATE **0.58 m**, peak instantaneous position
+error 0.95 m (around t=90-110s), mean RPE (translation) 0.12 m. Key finding:
+all 12 loop closures landed in two early clusters — **zero fired in the final
+~63s** of the run, because frontier exploration pushed the robot into
+genuinely new territory outside the 5 m loop-closure search radius. Loop
+closure is opportunistic only: it corrects drift when the robot happens to
+pass near an old keyframe, it has no mechanism to make that happen. This is
+the concrete, measured version of the gap Week 3 (active decision: explore vs
+revisit) is meant to close — see `docs/ROADMAP.md`. One run, one unseeded
+noise draw; not yet a statistically defensible ideal/realistic/degraded
+comparison (would need multiple seeded runs per profile).
