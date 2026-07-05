@@ -23,15 +23,23 @@ instance (topics under /gt/...) integrates it through the ground-truth
 chain instead.
 
 Mirrors mapper:=octomap|tsdf so the GT map always matches the belief map's
-backend (mapper launch configuration is declared by bringup/demo.launch.py
-before this file is included).
+backend. bringup/demo.launch.py already declares mapper before including
+this file, but it's declared here too (DeclareLaunchArgument only fills an
+unset value, so this doesn't clobber that) so this file is also launchable
+standalone, e.g. for isolated testing.
 """
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
 from launch.conditions import LaunchConfigurationEquals
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    mapper_arg = DeclareLaunchArgument(
+        'mapper', default_value='octomap', choices=['octomap', 'tsdf'],
+        description='Map backend the ground-truth map should mirror',
+    )
+
     odom_to_tf_gt = Node(
         package='stonefish_groundtruth_mapping',
         executable='odom_tf_sync',
@@ -102,6 +110,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        mapper_arg,
         odom_to_tf_gt, static_camera_tf_gt, cloud_relabel_gt,
         octomap_gt, tsdf_gt,
     ])
