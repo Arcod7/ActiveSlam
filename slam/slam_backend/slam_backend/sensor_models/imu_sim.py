@@ -54,9 +54,13 @@ class IMUSimNode(Node):
             
         dt = current_time - self.last_msg_time
         self.last_msg_time = current_time
-        
-        # Maintain drifting yaw bias each step (100 Hz from ground truth)
-        self.yaw_bias += np.random.normal(0, self.profile.gyro_bias_drift_rad_s * dt)
+
+        # Maintain drifting yaw bias each step (100 Hz from ground truth).
+        # Skip the draw on a non-positive dt (e.g. a sim-time/clock reset or
+        # out-of-order delivery) rather than pass a negative scale into
+        # np.random.normal — mirrors the dt > 0 guard in dead_reckoning.py.
+        if dt > 0:
+            self.yaw_bias += np.random.normal(0, self.profile.gyro_bias_drift_rad_s * dt)
         
         if current_time - self.last_pub_time < self.publish_interval:
             return

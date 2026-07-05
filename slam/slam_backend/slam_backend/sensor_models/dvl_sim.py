@@ -62,6 +62,13 @@ class DVLSimNode(Node):
             return
 
         dt = current_time - self.last_pub_time
+        if dt < 0:
+            # Backward stamp jump (sim-time/clock reset) — resync instead of
+            # stalling forever or dividing the velocity average by a negative
+            # interval below.
+            self.T_last_pub_gt = T_curr_gt
+            self.last_pub_time = current_time
+            return
         if dt < self.publish_interval:
             return
 

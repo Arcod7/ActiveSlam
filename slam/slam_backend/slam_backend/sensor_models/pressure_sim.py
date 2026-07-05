@@ -41,9 +41,15 @@ class PressureSimNode(Node):
         current_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         
         if self.last_pub_time is not None:
-            if current_time - self.last_pub_time < self.publish_interval:
+            elapsed = current_time - self.last_pub_time
+            if elapsed < 0:
+                # Backward stamp jump (sim-time/clock reset) — resync rather
+                # than stall until current_time climbs back past the stale
+                # future last_pub_time.
+                self.last_pub_time = None
+            elif elapsed < self.publish_interval:
                 return
-                
+
         self.last_pub_time = current_time
         
         true_z = msg.pose.pose.position.z
