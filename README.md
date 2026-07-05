@@ -23,7 +23,7 @@ logging ATE/RPE against ground truth.
 
 | Package | Role |
 |---|---|
-| [`bringup`](bringup) | Unified `demo.launch.py` (mode/mapper/slam switches) and the demo RViz config |
+| [`bringup`](bringup) | Unified `demo.launch.py` (mode/mapper/slam switches) and the three RViz configs it picks between |
 | [`sim/world`](sim/world) | Stonefish scenario: BlueROV2 model, environment meshes, `.scn` config |
 | [`sim/stonefish_ros2`](sim/stonefish_ros2) | ROS 2 bridge to the simulator (patched fork) |
 | [`slam/stonefish_groundtruth_mapping`](slam/stonefish_groundtruth_mapping) | TF chain, depth image → point cloud, OctoMap/TSDF mapping |
@@ -85,6 +85,16 @@ to `eval/runs/<timestamp>/` — plot them with:
 ```bash
 ros2 run eval_tools plot_results eval/runs/<timestamp>/
 ```
+
+RViz view switches automatically with `mapper`/`slam` (`slam:=slam` wins if both
+apply — see [`bringup/rviz/`](bringup/rviz)):
+- default (`mapper:=octomap slam:=none`): unchanged base view.
+- `mapper:=tsdf`: TSDF surface/voxels in place of the OctoMap displays (which
+  would just sit empty — `octomap_server` isn't launched in this mode).
+- `slam:=slam`: ground truth (green) vs SLAM (blue) vs raw dead-reckoning (red)
+  paths, a live drift arrow + text HUD (error/ATE/RPE/keyframes/loop
+  closures/D-optimality, from `/eval/markers`), pose-graph edges, and
+  covariance ellipsoids.
 
 `mode:=teleop` (the default) brings up sim+mapper and prints a reminder to
 run teleop yourself in another terminal:

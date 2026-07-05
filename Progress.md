@@ -209,3 +209,40 @@ the concrete, measured version of the gap Week 3 (active decision: explore vs
 revisit) is meant to close — see `docs/ROADMAP.md`. One run, one unseeded
 noise draw; not yet a statistically defensible ideal/realistic/degraded
 comparison (would need multiple seeded runs per profile).
+
+---
+
+## Phase 13 — Purpose-built RViz views per mapper/slam mode
+
+**Date**: 2026-07-05
+**Files**: `bringup/rviz/demo_tsdf.rviz` (new), `bringup/rviz/demo_slam.rviz` (new),
+`bringup/launch/demo.launch.py`, `bringup/setup.py`, `eval/eval_tools/eval_tools/benchmark.py`,
+`eval/eval_tools/package.xml`
+
+**Objective**: The single `demo.rviz` used for every combination showed OctoMap
+displays with nothing behind them under `mapper:=tsdf` (`octomap_server` isn't
+even launched in that mode), and gave no way to see SLAM drift/noise beyond
+eyeballing gaps between overlapping Odometry arrows. Added two new configs and
+switched between all three automatically from `demo.launch.py`'s `mapper`/`slam`
+arguments (`slam:=slam` takes priority since it's the more specific need):
+`demo.rviz` stays byte-for-byte the original base view; `demo_tsdf.rviz` swaps
+the OctoMap displays for TSDF surface/voxels; `demo_slam.rviz` adds ground-truth
+(green)/SLAM (blue)/dead-reckoning (red) `Path` overlays, the existing
+`/slam/graph_edges` and `/slam/covariance` `MarkerArray`s, and a new
+`/eval/markers` `MarkerArray` published by `benchmark.py` — a drift arrow from
+GT to the SLAM estimate plus a `TEXT_VIEW_FACING` HUD showing live
+err/ATE/RPE/keyframe-count/loop-closure-count/D-optimality, computed from data
+`benchmark.py`'s `_slam_cb` already had on hand (no new subscriptions needed
+beyond caching `/slam/keyframe_count` and `/slam/loop_closure_count` for the
+HUD text). Config selection itself is a `PythonExpression` computing the RViz
+`-d` path, verified in isolation (all 4 mapper×slam combinations resolve to the
+correct file) since `ros2 launch --print-description` doesn't evaluate
+per-invocation substitutions.
+
+**Observed impact**: ✅ All 4 `mapper`×`slam` combinations resolve to the
+intended config file (checked directly via `PythonExpression.perform()`, not
+just read from the launch file). Live-verified `slam:=slam mode:=frontier
+noise_profile:=realistic` for 45 s against the real Stonefish sim: zero
+exceptions, loop closures firing as before, and `metrics.csv` shows 28
+successful `_slam_cb` calls — meaning `_publish_eval_markers` (and therefore
+the new drift-arrow/HUD code path) ran cleanly on every SLAM update.

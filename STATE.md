@@ -4,6 +4,21 @@ Mutable snapshot. Overwrite, never append. Last updated: 2026-07-05.
 
 Change log → `Progress.md`. Detailed design + as-built deltas → `docs/SLAM_PLAN.md`.
 
+## RViz views
+
+`bringup/demo.launch.py` picks one of three configs automatically (`slam:=slam`
+takes priority over `mapper`):
+- `rviz/demo.rviz` — unchanged base view (`mapper:=octomap slam:=none`).
+- `rviz/demo_tsdf.rviz` — TSDF surface/voxel displays instead of OctoMap's
+  (OctoMap topics aren't published when `mapper:=tsdf`, so its displays would
+  just be empty).
+- `rviz/demo_slam.rviz` — the error/noise view: ground truth (green) vs SLAM
+  (blue) vs raw dead-reckoning (red) paths, pose-graph edges, covariance
+  ellipsoids, and a drift arrow + live text HUD sourced from
+  `eval_tools/benchmark.py`'s `/eval/markers` (`MarkerArray`) topic —
+  `err`/`ATE`/`RPE` translation+rotation/keyframe count/loop-closure
+  count/D-optimality, refreshed on every `/slam/pose` update.
+
 ## Architecture
 
 ```
@@ -28,7 +43,7 @@ Change log → `Progress.md`. Detailed design + as-built deltas → `docs/SLAM_P
          base_link)               │
                                   ▼
                             benchmark (eval_tools)
-                          ATE / RPE / TUM export
+                     ATE / RPE / TUM export / /eval/markers
 ```
 
 ## Packages
