@@ -18,8 +18,9 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import PoseWithCovarianceStamped
-from std_msgs.msg import Float64
+from geometry_msgs.msg import PoseWithCovarianceStamped, Point
+from std_msgs.msg import Float64, Int32, ColorRGBA
+from visualization_msgs.msg import Marker, MarkerArray
 from scipy.spatial.transform import Rotation
 
 from eval_tools.tum_writer import TUMWriter
@@ -105,23 +106,34 @@ class BenchmarkNode(Node):
         self._matched_pairs = []   # [(gt_sample, est_sample), ...] for RPE
         self._sq_errors = []       # running ATE accumulator
         self._latest_dopt = None   # cached from pose_graph.py's /slam/dopt
+        self._latest_kf_count = 0
+        self._latest_lc_count = 0
 
         gt_topic = self.get_parameter('gt_topic').value
         self.create_subscription(Odometry, gt_topic, self._gt_cb, 50)
         self.create_subscription(PoseWithCovarianceStamped, '/slam/pose', self._slam_cb, 10)
         self.create_subscription(Odometry, '/slam/sensors/dead_reckoned_odom', self._dr_cb, 10)
         self.create_subscription(Float64, '/slam/dopt', self._dopt_cb, 10)
+        self.create_subscription(Int32, '/slam/keyframe_count', self._kf_count_cb, 10)
+        self.create_subscription(Int32, '/slam/loop_closure_count', self._lc_count_cb, 10)
 
         self.pub_abs_error = self.create_publisher(Float64, '/eval/abs_error', 10)
         self.pub_ate = self.create_publisher(Float64, '/eval/ate', 10)
         self.pub_rpe_trans = self.create_publisher(Float64, '/eval/rpe_trans', 10)
         self.pub_rpe_rot = self.create_publisher(Float64, '/eval/rpe_rot', 10)
         self.pub_dr_error = self.create_publisher(Float64, '/eval/dr_error', 10)
+        self.pub_markers = self.create_publisher(MarkerArray, '/eval/markers', 10)
 
         self.get_logger().info(f'Benchmark node started. Writing to {out_dir}')
 
     def _dopt_cb(self, msg: Float64):
         self._latest_dopt = msg.data
+
+    def _kf_count_cb(self, msg: Int32):
+        self._latest_kf_count = msg.data
+
+    def _lc_count_cb(self, msg: Int32):
+        self._latest_lc_count = msg.data
 
     def _gt_cb(self, msg: Odometry):
         sample = _odom_to_sample(msg)
@@ -159,6 +171,53 @@ class BenchmarkNode(Node):
         self._metrics_file.write(
             f'{sample.t:.6f},{abs_error:.6f},{ate:.6f},{rpe_trans_str},{rpe_rot_str},{dopt_str}\n')
         self._metrics_file.flush()
+
+        self._publish_eval_markers(gt, sample, abs_error, ate, rpe_trans, rpe_rot_deg)
+
+    def _publish_eval_markers(self, gt: PoseSample, est: PoseSample, abs_error: float,
+                               ate: float, rpe_trans, rpe_rot_deg):
+        """Drift arrow (GT -> SLAM estimate) + a live text HUD, both in
+        world_ned — the direct answer to "how far off, right now" that a
+        Path-only view can't show without eyeballing gaps between lines."""
+        markers = MarkerArray()
+
+        arrow = Marker()
+        arrow.header.frame_id = 'world_ned'
+        arrow.header.stamp = self.get_clock().now().to_msg()
+        arrow.ns = 'eval_drift'
+        arrow.id = 0
+        arrow.type = Marker.ARROW
+        arrow.action = Marker.ADD
+        arrow.points = [Point(x=gt.pos[0], y=gt.pos[1], z=gt.pos[2]),
+                        Point(x=est.pos[0], y=est.pos[1], z=est.pos[2])]
+        arrow.scale.x = 0.05   # shaft diameter
+        arrow.scale.y = 0.12   # head diameter
+        arrow.scale.z = 0.15   # head length
+        arrow.color = ColorRGBA(r=1.0, g=0.1, b=0.1, a=0.9)
+        markers.markers.append(arrow)
+
+        text = Marker()
+        text.header.frame_id = 'world_ned'
+        text.header.stamp = arrow.header.stamp
+        text.ns = 'eval_hud'
+        text.id = 0
+        text.type = Marker.TEXT_VIEW_FACING
+        text.action = Marker.ADD
+        text.pose.position.x = est.pos[0]
+        text.pose.position.y = est.pos[1]
+        text.pose.position.z = est.pos[2] - 2.0   # NED: -z is up, so this floats above the robot
+        text.scale.z = 0.4
+        text.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
+        rpe_t_str = f'{rpe_trans:.2f}m' if rpe_trans is not None else 'n/a'
+        rpe_r_str = f'{rpe_rot_deg:.1f}deg' if rpe_rot_deg is not None else 'n/a'
+        dopt_str = f'{self._latest_dopt:.4f}' if self._latest_dopt is not None else 'n/a'
+        text.text = (
+            f'err {abs_error:.2f}m | ATE {ate:.2f}m | RPE {rpe_t_str}/{rpe_r_str}\n'
+            f'KF {self._latest_kf_count} | LC {self._latest_lc_count} | D-opt {dopt_str}'
+        )
+        markers.markers.append(text)
+
+        self.pub_markers.publish(markers)
 
     def _update_rpe(self, gt_sample: PoseSample, est_sample: PoseSample):
         self._matched_pairs.append((gt_sample, est_sample))
