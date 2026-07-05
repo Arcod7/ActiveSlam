@@ -70,19 +70,28 @@ Visualization Manager:
         Value: /sensor_msgs/image_depth
       Value: false
       Visibility:
+        Covariance: true
+        DeadReckoningPath: true
         DepthCamera: true
+        ErrorHUD: true
         Frontiers: true
+        GraphEdges: true
         Grid: true
+        GroundTruth: true
+        GroundTruthMap: true
         OccupancyGrid: true
         Octomap: true
         OctomapPoints: true
-        Odometry: true
         Path: true
         PointStamped: true
         Pose: true
+        SLAMPath: true
+        SLAMPoseCovariance: true
         Sonar3D: true
         TSDFSurface: true
+        TSDFSurface_GroundTruth: true
         TSDFVoxels: true
+        TSDFVoxels_GroundTruth: true
         Value: true
       Zoom Factor: 1
     - Alpha: 1
