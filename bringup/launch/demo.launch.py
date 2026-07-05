@@ -7,12 +7,19 @@ Usage:
   ros2 launch bringup demo.launch.py mapper:=tsdf            # TSDF surface reconstruction instead of OctoMap
   ros2 launch bringup demo.launch.py mode:=frontier mapper:=tsdf
   ros2 launch bringup demo.launch.py motion:=wallfollow mapper:=tsdf   # wall-normal following
+  ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic  # SLAM pose + error viz
   ros2 launch bringup demo.launch.py rviz:=false              # headless (e.g. CI, remote box)
 
-`mode`, `motion`, and `mapper` are independent axes — the sim+mapping core is shared,
-operator mode and map backend can each be swapped without touching the other.
-Exception: motion:=wallfollow consumes /tsdf/surface_normals_cloud, so it only
-does something useful with mapper:=tsdf (a LogInfo reminds you at launch).
+`mode`, `motion`, `mapper`, and `slam` are independent axes — the sim+mapping core is
+shared, operator mode/map backend/pose source can each be swapped without touching
+the others. Exception: motion:=wallfollow consumes /tsdf/surface_normals_cloud, so it
+only does something useful with mapper:=tsdf (a LogInfo reminds you at launch).
+
+RViz view is picked automatically (see rviz/demo*.rviz), slam:=slam taking priority:
+  slam:=slam    -> demo_slam.rviz: GT vs SLAM vs dead-reckoning paths, a drift arrow
+                   + live error/ATE/RPE text HUD, graph edges, covariance ellipsoids
+  mapper:=tsdf  -> demo_tsdf.rviz: TSDF surface/voxels instead of OctoMap displays
+  otherwise     -> demo.rviz: unchanged base view
 
 Note on mode:=teleop: keyboard_control reads the terminal directly
 (termios raw mode), which needs a real TTY — `ros2 launch` doesn't give
@@ -153,11 +160,27 @@ def generate_launch_description():
         condition=LaunchConfigurationEquals('motion', 'wallfollow'),
     )
 
+    # Three purpose-built views, picked by mapper/slam rather than hand-edited
+    # per run: the plain demo.rviz stays byte-for-byte what it always was
+    # (slam:=none mapper:=octomap, the base teleop/frontier demo); mapper:=tsdf
+    # swaps in the TSDF-focused view (its OctoMap displays would just show
+    # nothing, since octomap_server isn't even launched); slam:=slam takes
+    # priority over both because the SLAM view is the only one that adds the
+    # ground-truth-vs-estimate comparison (ATE/RPE drift arrow + text HUD,
+    # SLAM/dead-reckoning path overlay, covariance ellipsoids, graph edges).
+    rviz_config = PythonExpression([
+        "'", os.path.join(bringup_share, 'rviz', 'demo_slam.rviz'), "' if '",
+        LaunchConfiguration('slam'), "' == 'slam' else ('",
+        os.path.join(bringup_share, 'rviz', 'demo_tsdf.rviz'), "' if '",
+        LaunchConfiguration('mapper'), "' == 'tsdf' else '",
+        os.path.join(bringup_share, 'rviz', 'demo.rviz'), "')",
+    ])
+
     rviz = Node(
         package='rviz2',
         executable='rviz2',
         name='rviz2',
-        arguments=['-d', os.path.join(bringup_share, 'rviz', 'demo.rviz')],
+        arguments=['-d', rviz_config],
         output='screen',
         condition=IfCondition(LaunchConfiguration('rviz')),
     )
