@@ -115,16 +115,30 @@ ros2 launch slam_backend sensors_only.launch.py noise_profile:=degraded  # senso
 - ✅ Regression check: `slam:=none` (default) unchanged, no SLAM nodes started, `odom_tf_sync` still the TF source
 - ✅ Ground-truth reference map (`gt_map.launch.py`): live-verified both `mapper:=octomap`
   (`/gt/octomap_binary` ~24–28 Hz, `/gt/cloud_in` ~25 Hz) and `mapper:=tsdf`
-  (`tsdf_mapper_gt` voxel/surface counts growing steadily, unaffected by an
-  unrelated belief-side `imu_sim` crash — see known issues below). Not yet
+  (`tsdf_mapper_gt` voxel/surface counts growing steadily, unaffected by a
+  belief-side `imu_sim` crash that has since been fixed — see below). Not yet
   visually confirmed in RViz (headless verification only, no GUI here).
+- ✅ **Fixed**: `pose_graph.py`'s re-detect-loop-closures-after-move step was dead
+  code — every keyframe's pose was overwritten with the post-optimization estimate
+  *before* the moved-keyframe check ran, so it always compared a value against
+  itself and never found anything to re-check. Fixed by letting
+  `_find_moved_keyframes` do the refresh itself (it already did) instead of a
+  separate premature overwrite. Verified two ways: a synthetic call with a
+  keyframe shifted 0.5 m confirms the method detects and refreshes it; a live
+  100s/60s run shows the log line `Re-detecting loop closures for moved
+  keyframes [...]` actually firing after a real loop closure. The 0.58 m ATE
+  figure above predates this fix and may improve on a rerun.
+- ✅ **Fixed**: `imu_sim.py` crashed (`ValueError: scale < 0`) when a non-monotonic
+  odom timestamp made `dt` negative, feeding straight into a noise draw's scale
+  parameter — only possible with `gyro_bias_drift_rad_s > 0` (realistic/degraded
+  profiles), matching the crash as observed. `pressure_sim.py`/`dvl_sim.py` had the
+  same root cause but stalled silently instead of crashing. All three now guard
+  against non-positive `dt`. Verified with a synthetic reproduction of the exact
+  crash input and a 60s live run on `noise_profile:=degraded`.
 - 🔲 Not yet run: long-duration (10+ min) session; `evo_ape`/`evo_rpe` cross-check against the written TUM files; noise-profile comparison at statistical significance (multiple seeded runs per profile)
 - ⚠️ The synthetic square-loop test's "70% ATE reduction" (Progress.md Phase 6) is superseded
   by the real benchmark above — its dense, easily-overlapping synthetic point clouds make loop
   closure fire far more readily than real depth-camera data does. Use the 0.58 m figure, not 70%.
-- ⚠️ **Known issue, unrelated to any change above**: `slam_backend/sensor_models/imu_sim.py`
-  crashed once (`ValueError: scale < 0` in the gyro-bias-drift noise draw), implying `dt` went
-  negative — flaky, not reproduced every run. Not yet fixed.
 
 ## Not yet implemented (Week 3 prep only — see docs/SLAM_PLAN.md Part 11)
 
