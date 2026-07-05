@@ -21,9 +21,16 @@ Published topics:
                                  the same sampled points + normals in machine-
                                  readable form, consumed by wall_follower
   /tsdf/voxels           (visualization_msgs/MarkerArray)
-                           CUBE_LIST per weight bucket:
-                             size  ∝ weight  (log-scale, 10 buckets, 0.1×–1.0× voxel)
-                             color ∝ d value (red=occupied · green=surface · blue=free)
+                           single CUBE_LIST at the true voxel resolution (fixed
+                           size — a size varying with weight is what made
+                           neighbouring voxels overlap and look cluttered).
+                           A voxel is only included if BOTH:
+                             weight >= voxel_min_weight        (observed often enough)
+                             solid-confidence >= voxel_min_solid_confidence
+                               where solid-confidence = (trunc - d) / (2*trunc)
+                               (0.5 at the surface d=0, 1.0 at full saturation d=-trunc)
+                           color ∝ weight (log-scale): orange = just past the
+                           observation floor, green = heavily observed.
 """
 
 import numpy as np
@@ -37,8 +44,6 @@ from visualization_msgs.msg import Marker, MarkerArray
 import tf2_ros
 from scipy.spatial.transform import Rotation
 from vdbfusion import VDBVolume
-
-_N_BUCKETS = 10   # weight buckets for size encoding
 
 
 class TSDFMapper(Node):
@@ -55,7 +60,8 @@ class TSDFMapper(Node):
         self.declare_parameter('trunc_distance',   0.6)    # metres, ≥ 3× voxel_size
         self.declare_parameter('space_carving',    True)
         self.declare_parameter('min_weight',       2.0)
-        self.declare_parameter('surface_thresh_m', 0.15)   # |d| < this → show as surface
+        self.declare_parameter('voxel_min_weight', 10.0)   # hide voxels observed fewer times
+        self.declare_parameter('voxel_min_solid_confidence', 0.95)  # see module docstring
         self.declare_parameter('normal_every',     10)
         self.declare_parameter('max_voxels_viz',   40_000)
         self.declare_parameter('show_free_voxels', False)
@@ -69,7 +75,9 @@ class TSDFMapper(Node):
         self._world_frame  = self.get_parameter('world_frame').value
         self._cloud_frame  = self.get_parameter('cloud_frame').value
         self._min_weight   = float(self.get_parameter('min_weight').value)
-        self._surf_thresh  = float(self.get_parameter('surface_thresh_m').value)
+        self._voxel_min_weight = float(self.get_parameter('voxel_min_weight').value)
+        self._voxel_min_solid_confidence = float(
+            self.get_parameter('voxel_min_solid_confidence').value)
         self._normal_every = int(self.get_parameter('normal_every').value)
         self._max_viz      = int(self.get_parameter('max_voxels_viz').value)
         self._show_free    = bool(self.get_parameter('show_free_voxels').value)
@@ -80,6 +88,9 @@ class TSDFMapper(Node):
 
         self._voxel_size = voxel_size
         self._trunc      = trunc
+        # solid-confidence = (trunc - d) / (2*trunc) >= voxel_min_solid_confidence
+        #   <=>  d <= trunc * (1 - 2*voxel_min_solid_confidence)
+        self._voxel_max_d = trunc * (1.0 - 2.0 * self._voxel_min_solid_confidence)
         self._volume     = VDBVolume(voxel_size, trunc, space_carving=space_carving)
 
         if not self._volume.pyopenvdb_support_enabled:
@@ -206,71 +217,56 @@ class TSDFMapper(Node):
         if not self._volume.pyopenvdb_support_enabled:
             return
 
-        # Only iterate voxels we'll actually show (early filtering inside)
-        max_d = self._surf_thresh if not self._show_free else None
-        pts, d_vals, w_vals = _extract_voxels(
+        # Only iterate voxels we'll actually show (early filtering inside):
+        # confidently solid (TSDF-derived) AND observed often enough (weight).
+        max_d = self._voxel_max_d if not self._show_free else None
+        pts, _d_vals, w_vals = _extract_voxels(
             self._volume.tsdf, self._volume.weights,
-            self._voxel_size, min_weight=1.0, max_d=max_d)
+            self._voxel_size, min_weight=self._voxel_min_weight, max_d=max_d)
+
+        now = self.get_clock().now().to_msg()
 
         if pts is None:
+            del_m = Marker()
+            del_m.header.stamp    = now
+            del_m.header.frame_id = self._world_frame
+            del_m.ns     = 'tsdf_voxels'
+            del_m.id     = 0
+            del_m.action = Marker.DELETE
+            self._voxels_pub.publish(MarkerArray(markers=[del_m]))
             return
 
         n = len(pts)
         if n > self._max_viz:
             sel    = np.random.choice(n, self._max_viz, replace=False)
             pts    = pts[sel]
-            d_vals = d_vals[sel]
             w_vals = w_vals[sel]
 
-        # SDF → colour  (values are raw metres; normalise to [-1, 1])
-        d_norm = np.clip(d_vals / self._trunc, -1.0, 1.0)
-        colors  = _tsdf_colormap(d_norm)
+        # Weight → colour (log scale, above the observation floor). Cube size
+        # stays fixed at the true grid resolution: varying it by weight (as
+        # before) let differently-sized neighbouring cubes overlap, which is
+        # what made the map look cluttered.
+        w_max  = max(float(w_vals.max()), self._voxel_min_weight + 1.0)
+        w_norm = np.log1p(np.clip(w_vals - self._voxel_min_weight, 0.0, None)) \
+            / np.log1p(w_max - self._voxel_min_weight)
+        colors = _confidence_colormap(np.clip(w_norm, 0.0, 1.0))
 
-        # Weight → size bucket (log scale, 10 levels)
-        w_max   = max(float(w_vals.max()), 2.0)
-        w_norm  = np.log1p(np.clip(w_vals - 1.0, 0.0, None)) / np.log1p(w_max - 1.0)
-        w_norm  = np.clip(w_norm, 0.0, 1.0)
-        buckets = np.clip((w_norm * _N_BUCKETS).astype(int), 0, _N_BUCKETS - 1)
+        m = Marker()
+        m.header.stamp    = now
+        m.header.frame_id = self._world_frame
+        m.ns       = 'tsdf_voxels'
+        m.id       = 0
+        m.type     = Marker.CUBE_LIST
+        m.action   = Marker.ADD
+        m.lifetime = Duration(sec=4)
+        m.scale.x  = self._voxel_size
+        m.scale.y  = self._voxel_size
+        m.scale.z  = self._voxel_size
+        m.points   = [Point(x=float(p[0]), y=float(p[1]), z=float(p[2])) for p in pts]
+        m.colors   = [ColorRGBA(r=float(c[0]), g=float(c[1]),
+                                b=float(c[2]), a=float(c[3])) for c in colors]
 
-        size_min = 0.1 * self._voxel_size
-        size_max = 1.0 * self._voxel_size
-        now      = self.get_clock().now().to_msg()
-        lifetime = Duration(sec=4)
-        markers  = MarkerArray()
-
-        for b in range(_N_BUCKETS):
-            mask = buckets == b
-            if not np.any(mask):
-                del_m = Marker()
-                del_m.header.stamp    = now
-                del_m.header.frame_id = self._world_frame
-                del_m.ns     = 'tsdf_voxels'
-                del_m.id     = b
-                del_m.action = Marker.DELETE
-                markers.markers.append(del_m)
-                continue
-
-            scale  = float(size_min + (b + 0.5) / _N_BUCKETS * (size_max - size_min))
-            b_pts  = pts[mask]
-            b_clrs = colors[mask]
-
-            m = Marker()
-            m.header.stamp    = now
-            m.header.frame_id = self._world_frame
-            m.ns       = 'tsdf_voxels'
-            m.id       = b
-            m.type     = Marker.CUBE_LIST
-            m.action   = Marker.ADD
-            m.lifetime = lifetime
-            m.scale.x  = scale
-            m.scale.y  = scale
-            m.scale.z  = scale
-            m.points   = [Point(x=float(p[0]), y=float(p[1]), z=float(p[2])) for p in b_pts]
-            m.colors   = [ColorRGBA(r=float(c[0]), g=float(c[1]),
-                                    b=float(c[2]), a=float(c[3])) for c in b_clrs]
-            markers.markers.append(m)
-
-        self._voxels_pub.publish(markers)
+        self._voxels_pub.publish(MarkerArray(markers=[m]))
         self.get_logger().info(f'Voxels: {len(pts)} published', throttle_duration_sec=5.0)
 
 
@@ -381,23 +377,19 @@ def _compute_normals_vdb(tsdf_grid, world_points: np.ndarray,
     return normals
 
 
-def _tsdf_colormap(d_norm: np.ndarray) -> np.ndarray:
-    """RGBA colormap for normalised VDBFusion TSDF values in [-1, 1].
+def _confidence_colormap(conf_norm: np.ndarray) -> np.ndarray:
+    """RGBA colormap for observation-count confidence, normalised to [0, 1].
 
-    VDBFusion convention:
-      d = -1  →  occupied  →  RED
-      d =  0  →  surface   →  GREEN
-      d = +1  →  free      →  BLUE
+    0 = just cleared the min-observation-count floor (least-trusted voxel
+    still shown this scan), 1 = the most-observed voxel in this scan
+    (log-scaled). Low confidence -> orange, high confidence -> green.
     """
-    t  = np.clip((d_norm + 1.0) / 2.0, 0.0, 1.0)  # 0=occupied, 0.5=surface, 1=free
-    c  = np.zeros((len(d_norm), 4), dtype=np.float32)
-    lo = t < 0.5                        # occupied → surface  (red → green)
-    c[lo, 0] = 1.0 - 2.0 * t[lo]       # red:   1 → 0
-    c[lo, 1] = 2.0 * t[lo]             # green: 0 → 1
-    hi = ~lo                            # surface → free  (green → blue)
-    c[hi, 1] = 2.0 - 2.0 * t[hi]       # green: 1 → 0
-    c[hi, 2] = 2.0 * t[hi] - 1.0       # blue:  0 → 1
-    c[:, 3]  = 0.75
+    t = np.clip(conf_norm, 0.0, 1.0)
+    c = np.zeros((len(t), 4), dtype=np.float32)
+    c[:, 0] = 1.0 - 0.9 * t     # red:   1.0 -> 0.1
+    c[:, 1] = 0.55 + 0.35 * t   # green: 0.55 -> 0.9
+    c[:, 2] = 0.2 * t           # blue:  0.0 -> 0.2
+    c[:, 3] = 0.85
     return c
 
 

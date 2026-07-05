@@ -1711,3 +1711,40 @@ Stonefish, RViz, and the octomap build all confirmed working by Antoine directly
 - Added closed-loop kinematic tests verifying the controller's convergence.
 
 **Observed impact**: ✅ The WallFollower successfully tracks the wall at a set standoff distance while orienting towards it and maintaining continuous movement along the tangent.
+
+## Change 56 — Filter /tsdf/voxels to confidently-solid, well-observed voxels only
+
+**Date**: 2026-07-05
+**Files**: `tsdf_mapper.py`
+
+**Objective**: The `/tsdf/voxels` `MarkerArray` scaled each cube's *size* by its
+observation-count weight (log-scale, 10 buckets, 0.1x-1.0x voxel size) to convey
+confidence. Differently-sized cubes at adjacent grid cells don't tile cleanly,
+which is what made the map look like everything was overlapping. Also, the
+only filter on what got shown was `d <= surface_thresh_m` (0.15 m) with
+`min_weight` hardcoded to 1.0 — practically no filtering at all, so
+low-confidence and single-observation voxels cluttered the view alongside
+real structure.
+
+**What changed**: Cube size is now fixed at the true grid resolution
+(`voxel_size`) for every voxel; the size channel is retired. Weight/confidence
+now drives *color* instead (log-scaled, orange = just past the observation
+floor, green = heavily observed) via a new `_confidence_colormap()`, replacing
+the old occupied/surface/free `_tsdf_colormap()` (which is dropped — with the
+new solid-only filter below, every remaining voxel is already known-occupied,
+so an occupied/free color axis has nothing left to distinguish). Two new
+parameters gate what's shown at all:
+- `voxel_min_weight` (default 10.0): hides voxels observed fewer times.
+- `voxel_min_solid_confidence` (default 0.95): using VDBFusion's TSDF
+  convention (`d=0` surface = maximally ambiguous, `d=-trunc` = fully
+  saturated occupied), `solid_confidence = (trunc - d) / (2*trunc)` — a
+  voxel must clear 0.95 (equivalently `d <= -0.9*trunc`) to be shown at all.
+  Both are real `declare_parameter`s, tunable from a launch file without a
+  rebuild if the default turns out too strict/loose for a given voxel/trunc
+  size pairing.
+
+**Observed impact**: ✅ Builds clean, live-verified against the real Stonefish
+sim (`demo.launch.py mode:=frontier mapper:=tsdf`, 40 s, zero exceptions):
+voxel count grows steadily as more of the scene gets confidently observed
+(307 → 741 → 909 → 1010 over ~24 s), confirming the stricter filter still
+passes real voxels rather than filtering the map down to nothing.
