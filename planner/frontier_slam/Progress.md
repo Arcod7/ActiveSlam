@@ -1748,3 +1748,30 @@ sim (`demo.launch.py mode:=frontier mapper:=tsdf`, 40 s, zero exceptions):
 voxel count grows steadily as more of the scene gets confidently observed
 (307 → 741 → 909 → 1010 over ~24 s), confirming the stricter filter still
 passes real voxels rather than filtering the map down to nothing.
+
+## Change 57 — Fix /tsdf/voxels draw-order artifact (render opaque)
+
+**Date**: 2026-07-05
+**Files**: `tsdf_mapper.py`
+
+**Objective**: Change 56 fixed the size-mismatch overlap but voxels still
+rendered in visibly wrong front/back order. Root cause: `_confidence_colormap`
+published alpha=0.85 per cube; any marker alpha < 1 puts the whole CUBE_LIST
+into OGRE's transparent render queue, which draws in insertion order (i.e.
+VDB grid iteration order) rather than depth order. With thousands of cubes in
+one marker, overlapping ones then render in whatever order they happened to
+be added, not the order the camera would actually see them in.
+
+**What changed**: `_confidence_colormap` now returns alpha=1.0 (fully
+opaque) for every voxel. Opaque geometry is resolved per-pixel by the GPU's
+depth buffer regardless of draw order, so occlusion is always correct.
+`octomap_rviz_plugins` already does exactly this: its "Occupied Voxels" mode
+uses `Voxel Alpha: 1`, while its "Free Voxels" haze mode uses `~0.01` (low
+enough that the same sorting glitch is imperceptible) — confirmed by
+inspecting `bringup/rviz/demo.rviz`'s two `OccupancyGrid` display configs.
+Since this view is already gated to confidently-solid, well-observed voxels
+(Change 56), there was no real transparency information left to lose.
+
+**Observed impact**: ✅ Builds clean. Not yet re-verified visually in RViz on
+this machine (headless verification only, per Change 56) — worth eyeballing
+once RViz is run interactively.
