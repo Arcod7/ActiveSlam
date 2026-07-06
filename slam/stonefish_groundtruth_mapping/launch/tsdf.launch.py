@@ -11,16 +11,27 @@ Full TSDF mapping stack: Stonefish + TF + point cloud + tsdf_mapper.
                                   → /tsdf/voxels                 (weight/sign-coded MarkerArray)
 
 Parallel structure to octomap.launch.py — same core, different map backend.
+
+map_rebuild:=true (slam:=slam only; see pose_graph.py, tsdf_mapper.py) makes
+this belief-map instance reset+re-integrate from corrected keyframe poses
+after a big loop closure. Never touches tsdf_mapper_gt (gt_map.launch.py) —
+that instance always keeps enable_rebuild at its default (false).
 """
 import os
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 
 def generate_launch_description():
+    map_rebuild_arg = DeclareLaunchArgument(
+        'map_rebuild', default_value='false',
+        description='Reset+re-integrate this TSDF instance after a big loop closure',
+    )
+
     pointcloud = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
@@ -35,6 +46,7 @@ def generate_launch_description():
         executable='tsdf_mapper',
         name='tsdf_mapper',
         output='screen',
+        parameters=[{'enable_rebuild': LaunchConfiguration('map_rebuild')}],
     )
 
-    return LaunchDescription([pointcloud, tsdf_mapper])
+    return LaunchDescription([map_rebuild_arg, pointcloud, tsdf_mapper])

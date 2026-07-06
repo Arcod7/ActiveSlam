@@ -37,9 +37,9 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, PoseStamped
 from sensor_msgs.msg import PointCloud2, PointField
-from std_msgs.msg import ColorRGBA, Header
+from std_msgs.msg import ColorRGBA, Header, Int32
 from visualization_msgs.msg import Marker, MarkerArray
 import tf2_ros
 from scipy.spatial.transform import Rotation
@@ -71,6 +71,10 @@ class TSDFMapper(Node):
         # every direction the camera sweeps produces occupied voxels at max
         # range, creating ghost geometry during rotation.
         self.declare_parameter('max_range_m', 15.0)
+        # Map rebuild consumer (pose_graph.py publisher side): off by default,
+        # and never set true on the ground-truth instance (tsdf_mapper_gt) --
+        # only the belief map should ever be reset+re-integrated.
+        self.declare_parameter('enable_rebuild', False)
 
         self._world_frame  = self.get_parameter('world_frame').value
         self._cloud_frame  = self.get_parameter('cloud_frame').value
@@ -88,6 +92,7 @@ class TSDFMapper(Node):
 
         self._voxel_size = voxel_size
         self._trunc      = trunc
+        self._space_carving = space_carving
         # solid-confidence = (trunc - d) / (2*trunc) >= voxel_min_solid_confidence
         #   <=>  d <= trunc * (1 - 2*voxel_min_solid_confidence)
         self._voxel_max_d = trunc * (1.0 - 2.0 * self._voxel_min_solid_confidence)
@@ -108,6 +113,17 @@ class TSDFMapper(Node):
 
         # ── pub/sub ──────────────────────────────────────────────────────
         self.create_subscription(PointCloud2, '/cloud_in', self._cloud_cb, 5)
+
+        self._enable_rebuild = bool(self.get_parameter('enable_rebuild').value)
+        self._rebuild_expected = 0
+        self._rebuild_done = 0
+        self._rebuild_pending = {}   # stamp key -> {'scan': (N,3) array, 'origin': (3,) array}
+        if self._enable_rebuild:
+            self.create_subscription(Int32, '/slam/rebuild/begin', self._rebuild_begin_cb, 10)
+            self.create_subscription(PointCloud2, '/slam/rebuild/scan', self._rebuild_scan_cb, 512)
+            self.create_subscription(PoseStamped, '/slam/rebuild/origin', self._rebuild_origin_cb, 512)
+            self.get_logger().info(
+                'Map rebuild consumer enabled: will reset+re-integrate on /slam/rebuild/begin')
 
         self._cloud_pub   = self.create_publisher(PointCloud2, '/tsdf/surface_cloud',   1)
         self._normals_pub = self.create_publisher(MarkerArray, '/tsdf/surface_normals',  1)
@@ -171,6 +187,62 @@ class TSDFMapper(Node):
         self.get_logger().info(
             f'Integrated {len(pts_world)} pts  cam=({t[0]:.2f},{t[1]:.2f},{t[2]:.2f})',
             throttle_duration_sec=2.0)
+
+    # ────────────────────────────────────────────────────────────────────
+    # Map rebuild consumer (pose_graph.py is the publisher side)
+    #
+    # /slam/rebuild/begin gives the bundle size and resets the volume; each
+    # keyframe then arrives as a (scan, origin) pair on /slam/rebuild/scan +
+    # /slam/rebuild/origin, matched by identical header.stamp. Both clouds
+    # are already in world_ned (pose_graph corrected them before publishing),
+    # so no TF lookup is needed here -- integrate() takes them as-is, same
+    # call as the live _cloud_cb path. The live /cloud_in stream keeps
+    # integrating into the same (fresh) volume concurrently throughout.
+    # ────────────────────────────────────────────────────────────────────
+
+    def _rebuild_begin_cb(self, msg: Int32) -> None:
+        n = int(msg.data)
+        if n <= 0:
+            self.get_logger().warn(f'Rebuild begin with N={n}, ignoring')
+            return
+        self._rebuild_expected = n
+        self._rebuild_done = 0
+        self._rebuild_pending = {}
+        self._volume = VDBVolume(self._voxel_size, self._trunc, space_carving=self._space_carving)
+        self.get_logger().info(f'Map rebuild starting: expecting {n} keyframe scans')
+
+    def _rebuild_scan_cb(self, msg: PointCloud2) -> None:
+        if self._rebuild_expected == 0:
+            return
+        pts = _parse_pointcloud2(msg)
+        key = (msg.header.stamp.sec, msg.header.stamp.nanosec)
+        self._rebuild_pending.setdefault(key, {})['scan'] = (
+            pts if pts is not None else np.zeros((0, 3)))
+        self._maybe_integrate_rebuild_pair(key)
+
+    def _rebuild_origin_cb(self, msg: PoseStamped) -> None:
+        if self._rebuild_expected == 0:
+            return
+        key = (msg.header.stamp.sec, msg.header.stamp.nanosec)
+        p = msg.pose.position
+        self._rebuild_pending.setdefault(key, {})['origin'] = np.array(
+            [p.x, p.y, p.z], dtype=np.float64)
+        self._maybe_integrate_rebuild_pair(key)
+
+    def _maybe_integrate_rebuild_pair(self, key) -> None:
+        entry = self._rebuild_pending.get(key)
+        if entry is None or 'scan' not in entry or 'origin' not in entry:
+            return
+        pts, origin = entry['scan'], entry['origin']
+        del self._rebuild_pending[key]
+        if len(pts) > 0:
+            self._volume.integrate(pts, origin)
+        self._rebuild_done += 1
+        if self._rebuild_done >= self._rebuild_expected:
+            self.get_logger().info(
+                f'Map rebuild complete: {self._rebuild_done}/{self._rebuild_expected} '
+                f'scans re-integrated')
+            self._rebuild_expected = 0
 
     # ────────────────────────────────────────────────────────────────────
     # Surface cloud + normals (marching cubes via VDBFusion)
