@@ -24,12 +24,29 @@ class DVLNoise:
     publish_rate_hz: float = 10.0
 
 @dataclass
+class SonarNoise:
+    """Datasheet-grounded noise model for the depth-camera cloud standing in
+    for a WaterLinked Sonar 3D-15 (1.2 MHz mode). All defaults are zero so a
+    profile that omits the `sonar:` section is an exact passthrough."""
+    range_quant_m: float = 0.0          # range-bin quantization (datasheet: 1.5mm)
+    range_sigma0_m: float = 0.0         # range noise floor (constant term)
+    range_sigma_k: float = 0.0          # range noise growth per metre (speckle/SNR)
+    lat_sigma_h_per_m: float = 0.0      # horizontal beam-spread jitter per metre range
+    lat_sigma_v_per_m: float = 0.0      # vertical beam-spread jitter per metre range
+    dropout_p0: float = 0.0            # base dropout probability
+    dropout_p_range: float = 0.0       # extra dropout probability at max range
+    outlier_p: float = 0.0             # multipath outlier probability
+    outlier_range_min_m: float = 0.3   # late-arrival excess range, lower bound
+    outlier_range_max_m: float = 3.0   # late-arrival excess range, upper bound
+
+@dataclass
 class NoiseProfile:
     name: str = "realistic"
     seed: int = -1                    # -1 = random; fixed seed for reproducible runs
     pressure: PressureNoise = field(default_factory=PressureNoise)
     imu: IMUNoise = field(default_factory=IMUNoise)
     dvl: DVLNoise = field(default_factory=DVLNoise)
+    sonar: SonarNoise = field(default_factory=SonarNoise)
 
 def load_noise_profile(yaml_path: str) -> NoiseProfile:
     with open(yaml_path) as f:
@@ -42,4 +59,6 @@ def load_noise_profile(yaml_path: str) -> NoiseProfile:
         profile.imu = IMUNoise(**data['imu'])
     if 'dvl' in data:
         profile.dvl = DVLNoise(**data['dvl'])
+    if 'sonar' in data:
+        profile.sonar = SonarNoise(**data['sonar'])
     return profile

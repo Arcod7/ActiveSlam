@@ -16,3 +16,12 @@ dvl:
   bias_m_s: 0.0
   scale_error_pct: 0.0
   publish_rate_hz: 10.0
+sonar:
+  range_quant_m: 0.0
+  range_sigma0_m: 0.0
+  range_sigma_k: 0.0
+  lat_sigma_h_per_m: 0.0
+  lat_sigma_v_per_m: 0.0
+  dropout_p0: 0.0
+  dropout_p_range: 0.0
+  outlier_p: 0.0
