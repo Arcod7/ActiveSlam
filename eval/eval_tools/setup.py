@@ -25,6 +25,7 @@ setup(
         'console_scripts': [
             'benchmark    = eval_tools.benchmark:main',
             'plot_results = eval_tools.plot_results:main',
+            'map_metrics  = eval_tools.map_metrics:main',
         ],
     },
 )

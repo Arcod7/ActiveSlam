@@ -177,7 +177,10 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(eval_tools_share, 'launch', 'eval.launch.py')
         ),
-        launch_arguments={'output_dir': LaunchConfiguration('output_dir')}.items(),
+        launch_arguments={
+            'output_dir': LaunchConfiguration('output_dir'),
+            'mapper': LaunchConfiguration('mapper'),
+        }.items(),
         condition=LaunchConfigurationEquals('slam', 'slam'),
     )
 

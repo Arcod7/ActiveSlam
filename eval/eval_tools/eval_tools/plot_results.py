@@ -45,15 +45,32 @@ def _load_metrics(filepath: str):
     return {k: np.array(v) for k, v in rows.items()}
 
 
+def _load_map_metrics(filepath: str):
+    numeric_cols = ['t', 'coverage', 'iou_occ', 'chamfer', 'rmse_belief_to_gt',
+                    'rmse_gt_to_belief', 'n_belief', 'n_gt']
+    rows = {c: [] for c in numeric_cols + ['backend']}
+    if not os.path.exists(filepath):
+        return {k: np.array(v) for k, v in rows.items()}
+    with open(filepath) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows['backend'].append(row.get('backend', ''))
+            for key in numeric_cols:
+                val = row.get(key, '')
+                rows[key].append(float(val) if val not in ('', None) else np.nan)
+    return {k: np.array(v) for k, v in rows.items()}
+
+
 def plot_run(run_dir: str):
     t_gt, pos_gt = _load_tum(os.path.join(run_dir, 'gt_traj.tum'))
     t_slam, pos_slam = _load_tum(os.path.join(run_dir, 'slam_traj.tum'))
     t_odom, pos_odom = _load_tum(os.path.join(run_dir, 'odom_traj.tum'))
     metrics = _load_metrics(os.path.join(run_dir, 'metrics.csv'))
+    map_metrics = _load_map_metrics(os.path.join(run_dir, 'map_metrics.csv'))
 
     t0 = t_gt[0] if len(t_gt) else (metrics['t'][0] if len(metrics['t']) else 0.0)
 
-    fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+    fig, axes = plt.subplots(2, 4, figsize=(20, 9))
 
     ax = axes[0, 0]
     if len(pos_gt):
@@ -108,6 +125,25 @@ def plot_run(run_dir: str):
     ax.set_ylabel('D-opt = det(cov_pos)^(1/3)')
     ax.set_title('Pose uncertainty (D-optimality)')
     ax.grid(True, alpha=0.3)
+
+    ax = axes[0, 3]
+    if len(map_metrics['t']):
+        t_map = map_metrics['t'] - t0
+        ax.plot(t_map, map_metrics['coverage'], color='tab:cyan', label='coverage')
+        ax.set_ylabel('coverage (fraction of GT known/observed)')
+        if np.any(~np.isnan(map_metrics['iou_occ'])):
+            ax2 = ax.twinx()
+            ax2.plot(t_map, map_metrics['iou_occ'], color='tab:olive', label='IoU (occupied)')
+            ax2.set_ylabel('IoU (occupied cells)')
+        elif np.any(~np.isnan(map_metrics['chamfer'])):
+            ax2 = ax.twinx()
+            ax2.plot(t_map, map_metrics['chamfer'], color='tab:pink', label='chamfer (m)')
+            ax2.set_ylabel('chamfer distance (m)')
+        ax.legend(loc='upper left')
+    ax.set_xlabel('time (s)')
+    ax.set_title('Map quality vs ground truth')
+    ax.grid(True, alpha=0.3)
+    axes[1, 3].axis('off')
 
     fig.suptitle(f'Benchmark run: {os.path.basename(run_dir.rstrip("/"))}')
     fig.tight_layout()

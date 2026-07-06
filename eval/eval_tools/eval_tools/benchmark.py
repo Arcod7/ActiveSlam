@@ -101,13 +101,14 @@ class BenchmarkNode(Node):
         self._odom_tum = TUMWriter(os.path.join(out_dir, 'odom_traj.tum'))
 
         self._metrics_file = open(os.path.join(out_dir, 'metrics.csv'), 'w')
-        self._metrics_file.write('t,abs_error,ate,rpe_trans,rpe_rot_deg,dopt\n')
+        self._metrics_file.write('t,abs_error,ate,rpe_trans,rpe_rot_deg,dopt,lc_count,rebuild_count\n')
 
         self._matched_pairs = []   # [(gt_sample, est_sample), ...] for RPE
         self._sq_errors = []       # running ATE accumulator
         self._latest_dopt = None   # cached from pose_graph.py's /slam/dopt
         self._latest_kf_count = 0
         self._latest_lc_count = 0
+        self._latest_rebuild_count = 0
 
         gt_topic = self.get_parameter('gt_topic').value
         self.create_subscription(Odometry, gt_topic, self._gt_cb, 50)
@@ -116,6 +117,7 @@ class BenchmarkNode(Node):
         self.create_subscription(Float64, '/slam/dopt', self._dopt_cb, 10)
         self.create_subscription(Int32, '/slam/keyframe_count', self._kf_count_cb, 10)
         self.create_subscription(Int32, '/slam/loop_closure_count', self._lc_count_cb, 10)
+        self.create_subscription(Int32, '/slam/rebuild_count', self._rebuild_count_cb, 10)
 
         self.pub_abs_error = self.create_publisher(Float64, '/eval/abs_error', 10)
         self.pub_ate = self.create_publisher(Float64, '/eval/ate', 10)
@@ -134,6 +136,9 @@ class BenchmarkNode(Node):
 
     def _lc_count_cb(self, msg: Int32):
         self._latest_lc_count = msg.data
+
+    def _rebuild_count_cb(self, msg: Int32):
+        self._latest_rebuild_count = msg.data
 
     def _gt_cb(self, msg: Odometry):
         sample = _odom_to_sample(msg)
@@ -169,7 +174,8 @@ class BenchmarkNode(Node):
         rpe_rot_str = f'{rpe_rot_deg:.6f}' if rpe_rot_deg is not None else ''
         dopt_str = f'{self._latest_dopt:.8f}' if self._latest_dopt is not None else ''
         self._metrics_file.write(
-            f'{sample.t:.6f},{abs_error:.6f},{ate:.6f},{rpe_trans_str},{rpe_rot_str},{dopt_str}\n')
+            f'{sample.t:.6f},{abs_error:.6f},{ate:.6f},{rpe_trans_str},{rpe_rot_str},{dopt_str},'
+            f'{self._latest_lc_count},{self._latest_rebuild_count}\n')
         self._metrics_file.flush()
 
         self._publish_eval_markers(gt, sample, abs_error, ate, rpe_trans, rpe_rot_deg)
