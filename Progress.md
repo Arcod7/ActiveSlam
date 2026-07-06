@@ -305,3 +305,157 @@ this machine (headless verification only, no GUI available here).
 — only possible if `dt` goes negative (out-of-order/backward timestamps).
 Flaky, not reproduced on every run. Worth a `dt = max(dt, 0.0)` guard at
 some point, but out of scope here.
+
+## Phase 15 — Sonar noise model (datasheet-grounded)
+
+**Date**: 2026-07-06
+**Files**: `slam/slam_backend/slam_backend/sensor_models/sonar_noise.py` (new),
+`slam/slam_backend/slam_backend/sensor_models/noise_profiles.py`,
+`slam/slam_backend/config/noise_{ideal,realistic,degraded}.yaml`,
+`slam/stonefish_groundtruth_mapping/launch/{pointcloud,gt_map}.launch.py`,
+`bringup/launch/demo.launch.py`
+
+**Objective**: The depth-camera cloud standing in for a WaterLinked Sonar
+3D-15 (`sim/world/data/robot/simple_rov.scn`) was completely noise-free —
+every point exactly where the sensor model says, no matter the range. Real
+imaging sonar is nothing like that: range precision is roughly constant but
+lateral/cross-range uncertainty grows with range (wider beam footprint the
+further out you look), plus dropouts and occasional multipath outliers. None
+of that was modeled, so "SLAM under realistic sonar noise" wasn't actually
+being tested by anything.
+
+**What changed**: A new `sonar_noise` node sits between `depth_image_proc`
+and every consumer (`/cloud_in_raw -> sonar_noise -> /cloud_in`), only when
+`slam:=slam`. Per finite point (excluding already-invalid and "no-return"
+max-range pixels, so max-range filters downstream keep working): along-ray
+range noise (`sigma0 + k*range`), 1.5mm range-bin quantization (the
+datasheet's stated range resolution), beam-spreading lateral jitter
+(`sigma_h/v * range`, derived from the datasheet's 0.35°/0.60° H/V beam
+separation), range-growing dropout probability (NaN, same convention the
+rest of the pipeline already handles), and sparse multipath outliers (a
+positive range excursion, since multipath is always a late arrival). All
+parameters live in a new `sonar:` YAML section per noise profile — zeroed
+for `ideal` (exact passthrough), datasheet-derived for `realistic`, worse
+for `degraded`. The ground-truth reference map switches its own cloud
+source to `/cloud_in_raw` so it stays clean regardless.
+
+**Observed impact**: ✅ Synthetic checks confirm exact range-noise std vs.
+range, dropout fraction vs. range, exact quantization lattice, NaN/no-return
+pixels left untouched, and bytes-identical passthrough for the `ideal`
+profile. Live: `/cloud_in_raw`, `/cloud_in`, `/gt/cloud_in` all publish at
+~5 Hz with correct frame IDs; `slam:=none` regression-checked unchanged (no
+`sonar_noise` node, no `/cloud_in_raw` topic).
+
+## Phase 16 — Benchmarking switches: loop closure, noise seed, map rebuild
+
+**Date**: 2026-07-06
+**Files**: `slam/slam_backend/slam_backend/pose_graph.py`,
+`planner/frontier_slam/frontier_slam/tsdf_mapper.py`,
+`slam/slam_backend/slam_backend/sensor_models/{imu,dvl,pressure,sonar_noise}*.py`,
+`slam/slam_backend/launch/{slam,sensors_only}.launch.py`,
+`slam/stonefish_groundtruth_mapping/launch/tsdf.launch.py`,
+`bringup/launch/demo.launch.py`
+
+**Objective**: An overnight evaluation framework needs A/B levers to actually
+sweep — none existed. Also, the map was never re-aligned after a loop
+closure moved keyframe poses (integrated scans stayed wherever they were
+first placed), a known limitation from Phase 6 that was worth turning into
+a benchmarkable option rather than leaving it a fixed limitation.
+
+**What changed**: (1) `loop_closure_enabled` param (default true) on
+`pose_graph.py` — false skips loop-closure detection and re-detection
+entirely while keyframe pose refresh keeps running, so paths/viz stay
+correct either way; plumbed as `demo.launch.py`'s `loop_closure:=`. (2) A
+`noise_seed` override (default -1 = use the profile's baked-in seed) on all
+four noise sources, each offset by a fixed per-sensor constant so a shared
+seed no longer gives every sensor an identical RNG stream — needed for
+seeded, reproducible, decorrelated multi-run comparisons. (3) `map_rebuild`
+(default false, TSDF-only — octomap_server has no clean way to replay a
+corrected sensor origin for its free-space raycasting): when a loop closure
+moves a keyframe beyond a threshold, `pose_graph.py` streams every
+keyframe's cloud back out at its corrected pose on
+`/slam/rebuild/{begin,scan,origin}` (throttled, paced by a drain timer, not
+one burst), and `tsdf_mapper.py` resets its VDBFusion volume and
+re-integrates from scratch — parameterized specifically so "does rebuilding
+actually help" is itself something the benchmark matrix can answer, per
+this session's design decision, rather than assumed.
+
+**Observed impact**: ✅ Live-verified each switch independently:
+`loop_closure:=false` keeps `/slam/loop_closure_count` at 0 with the default
+still closing loops normally; `noise_seed:=7` correctly reaches all four
+sensor nodes; a forced-threshold live run fired 4 rebuild cycles cleanly
+(49/49, 54/54 scans re-integrated) with the ground-truth map instance
+showing zero rebuild activity and the belief surface cloud still publishing
+afterward. Default settings regression-checked unaffected.
+
+## Phase 17 — Map-quality metrics (belief vs. ground truth)
+
+**Date**: 2026-07-06
+**Files**: `eval/eval_tools/eval_tools/map_metrics.py` (new),
+`eval/eval_tools/eval_tools/{benchmark,plot_results}.py`,
+`eval/eval_tools/launch/eval.launch.py`, `bringup/launch/demo.launch.py`
+
+**Objective**: `benchmark.py` is pose-only — nothing scored the belief map
+itself against the ground-truth reference map (Phase 14), even though both
+run side by side under `slam:=slam` (`docs/ROADMAP.md` flags this as an
+open gap).
+
+**What changed**: New `map_metrics` node. For `mapper:=octomap`: aligns
+`/projected_map` against `/gt/projected_map` by their `MapMetaData` origin
+offset (python `octomap` bindings aren't importable in this environment, and
+the vis-marker topic is too fragile to couple metrics to) and reports
+occupied-cell IoU plus known-cell coverage. For `mapper:=tsdf`: subsampled
+KD-tree nearest-neighbor chamfer distance and coverage between
+`/tsdf/surface_cloud` and `/gt/tsdf/surface_cloud`. Writes
+`map_metrics.csv` alongside `metrics.csv` (which also gained
+`lc_count`/`rebuild_count` columns fed from Phase 16's rebuild counter);
+`plot_results.py` gained a coverage/IoU-or-chamfer panel.
+`eval.launch.py` now resolves `output_dir` once via an `OpaqueFunction`
+instead of letting `benchmark.py` and `map_metrics.py` each independently
+default to their own timestamp (which could land them in two different
+directories a few hundred ms apart).
+
+**Observed impact**: ✅ Synthetic checks of the grid-alignment/IoU/coverage
+math and the chamfer/coverage math (identical clouds -> ~0 chamfer, coverage
+1.0; shifted clouds -> chamfer >> 0, coverage -> 0). Live 60 s runs on both
+backends produced sane, time-varying values (octomap: coverage ~0.98,
+IoU ~0.5; tsdf: coverage 0.89 -> 0.82, chamfer 0.3 m -> 0.72 m as drift
+accumulates) with zero non-shutdown exceptions.
+
+## Phase 18 — Overnight batch evaluation framework
+
+**Date**: 2026-07-06
+**Files**: `eval/eval_tools/scripts/run_matrix.py` (new),
+`eval/eval_tools/config/matrix_{overnight,smoke}.yaml` (new)
+
+**Objective**: Comparing approaches (mapper, next-pose policy, loop closure
+on/off, noise conditions) meant launching and eyeballing runs by hand, one
+at a time — no way to leave a comparison running overnight and come back to
+a result.
+
+**What changed**: `run_matrix.py`, a plain script (not a ROS node) reading
+a YAML matrix (configs x seeds), launches `bringup/demo.launch.py` headless
+one at a time — sequential, since Stonefish's GL context and the global
+topic names rule out running two sims at once. There is no
+run-completion signal anywhere in the stack (frontier exploration just logs
+"no frontiers found" and keeps spinning), so a wall-clock `duration_s` is
+the termination mechanism, escalating SIGINT -> SIGTERM -> SIGKILL on the
+whole process group if the sim doesn't stop cleanly; `benchmark.py` and
+`map_metrics.py` flush every row as it's written, so a killed run still
+leaves valid partial data. Each run gets a `manifest.json` (resolved args,
+seed, git SHA, timing, a validity verdict) and an automatic `plot_results`
+call; one retry only fires when a run produced literally zero data (a
+failed start, not a real result). At the batch level: `summary.csv` (one
+row per run — final ATE/RPE/coverage/IoU/chamfer/loop-closure count/rebuild
+count/traceback count) plus per-axis comparison boxplots.
+`matrix_overnight.yaml` bundles all four requested axes into one 35-run
+preset (~5.3 h); `matrix_smoke.yaml` is a 2-run/120 s pre-flight check.
+
+**Observed impact**: ✅ `--dry-run` on the overnight preset prints exactly
+35 resolved commands and rejects a `motion:=wallfollow` + `mapper:=octomap`
+config at load time; caught and fixed a bug where dry-run was still
+creating empty run directories (verified fixed: identical directory count
+before/after). A real mini-batch (2 runs x 120 s) produced every expected
+per-run artifact plus a valid summary/comparison at the batch level,
+including a clean back-to-back Stonefish restart; `--aggregate-only`
+re-runs cleanly against existing manifests.

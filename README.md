@@ -75,15 +75,37 @@ ros2 launch bringup demo.launch.py noise_profile:=ideal|realistic|degraded  # sl
 ros2 launch bringup demo.launch.py rviz:=false                    # headless
 ```
 
+Benchmarking switches (all `slam:=slam` only, all default to today's behavior):
+
+```bash
+ros2 launch bringup demo.launch.py slam:=slam loop_closure:=false             # A/B: no loop closure
+ros2 launch bringup demo.launch.py slam:=slam mapper:=tsdf map_rebuild:=true  # rebuild belief TSDF after big closures
+ros2 launch bringup demo.launch.py slam:=slam noise_seed:=7                   # reproducible, decorrelated noise draws
+ros2 launch bringup demo.launch.py slam:=slam output_dir:=/path/to/run       # label eval output instead of a timestamp
+```
+
 `slam:=none` (default) broadcasts pose from ground truth, as before.
 `slam:=slam` replaces that with a GTSAM iSAM2 pose graph correcting
-simulated pressure/IMU/DVL sensor noise (see
+simulated pressure/IMU/DVL/sonar sensor noise (see
 [`slam/slam_backend`](slam/slam_backend)), and starts a benchmark node
-that logs ATE/RPE against ground truth and writes TUM trajectory files
-to `eval/runs/<timestamp>/` — plot them with:
+that logs ATE/RPE against ground truth plus a map_metrics node that
+scores the belief map against the ground-truth reference map (IoU/coverage
+for `mapper:=octomap`, chamfer distance/coverage for `mapper:=tsdf`),
+writing TUM trajectory files + CSVs to `eval/runs/<timestamp>/` — plot them
+with:
 
 ```bash
 ros2 run eval_tools plot_results eval/runs/<timestamp>/
+```
+
+To compare multiple configurations/seeds unattended, use the batch
+orchestrator (a plain script, run directly with `python3` after sourcing
+`install/setup.bash` — see [`eval/eval_tools/scripts/run_matrix.py`](eval/eval_tools/scripts/run_matrix.py)
+and the example matrices in [`eval/eval_tools/config/`](eval/eval_tools/config)):
+
+```bash
+python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_smoke.yaml     # ~5min pre-flight check
+python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_overnight.yaml # 35 runs, ~5.3h
 ```
 
 RViz view switches automatically with `mapper`/`slam` (`slam:=slam` wins if both
