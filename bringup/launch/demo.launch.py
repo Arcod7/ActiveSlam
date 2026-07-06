@@ -75,6 +75,12 @@ def generate_launch_description():
         'noise_seed', default_value='-1',
         description='Override the noise profile seed for slam:=slam (-1 = use the profile default)',
     )
+    map_rebuild_arg = DeclareLaunchArgument(
+        'map_rebuild', default_value='false', choices=['true', 'false'],
+        description='Rebuild the belief map from corrected keyframe poses after a big loop '
+                    'closure (slam:=slam, TSDF only — see tsdf_mapper.py; unsupported for '
+                    'mapper:=octomap, see the warning this prints if combined)',
+    )
 
     # tf.launch.py (included further below via octomap/tsdf -> pointcloud -> tf)
     # declares use_gt_tf with its own default of 'true'; DeclareLaunchArgument only
@@ -157,6 +163,7 @@ def generate_launch_description():
             'noise_profile': LaunchConfiguration('noise_profile'),
             'loop_closure': LaunchConfiguration('loop_closure'),
             'noise_seed': LaunchConfiguration('noise_seed'),
+            'map_rebuild': LaunchConfiguration('map_rebuild'),
         }.items(),
         condition=LaunchConfigurationEquals('slam', 'slam'),
     )
@@ -197,6 +204,19 @@ def generate_launch_description():
         condition=LaunchConfigurationEquals('motion', 'wallfollow'),
     )
 
+    map_rebuild_octomap_warning = LogInfo(
+        msg=(
+            'map_rebuild=true has no effect with mapper:=octomap: octomap_server raycasts '
+            'free space from a TF-at-stamp sensor origin, which replaying corrected '
+            'keyframe scans cannot reproduce cleanly. Map rebuild is TSDF-only '
+            '(tsdf_mapper.py) — use mapper:=tsdf to actually rebuild the belief map.'
+        ),
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('map_rebuild'), "' == 'true' and '",
+            LaunchConfiguration('mapper'), "' == 'octomap'",
+        ])),
+    )
+
     # Three purpose-built views, picked by mapper/slam rather than hand-edited
     # per run: the plain demo.rviz stays byte-for-byte what it always was
     # (slam:=none mapper:=octomap, the base teleop/frontier demo); mapper:=tsdf
@@ -224,11 +244,11 @@ def generate_launch_description():
 
     return LaunchDescription([
         mode_arg, motion_arg, mapper_arg, rviz_arg, slam_arg, noise_profile_arg,
-        loop_closure_arg, noise_seed_arg,
+        loop_closure_arg, noise_seed_arg, map_rebuild_arg,
         set_use_gt_tf, set_sonar_noise,
         octomap_stack, tsdf_stack, gt_map_stack,
         slam_stack, eval_stack, slam_hint,
         teleop_hint, frontier_exploration,
-        wall_follow, wallfollow_hint,
+        wall_follow, wallfollow_hint, map_rebuild_octomap_warning,
         rviz,
     ])

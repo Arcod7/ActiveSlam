@@ -18,9 +18,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
 from nav_msgs.msg import Odometry, Path
-from geometry_msgs.msg import PoseWithCovarianceStamped, Point
-from sensor_msgs.msg import PointCloud2
-from std_msgs.msg import Float64, Int32, ColorRGBA
+from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Point
+from sensor_msgs.msg import PointCloud2, PointField
+from std_msgs.msg import Float64, Int32, ColorRGBA, Header
 from visualization_msgs.msg import Marker, MarkerArray
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
 from sensor_msgs_py import point_cloud2
@@ -68,6 +68,10 @@ class PoseGraphNode(Node):
         self.declare_parameter('scan_max_correspondence_dist', 0.5)
         self.declare_parameter('cov_ellipsoid_stride', 5)
         self.declare_parameter('cov_ellipsoid_n_sigma', 2.0)
+        self.declare_parameter('map_rebuild_enabled', False)
+        self.declare_parameter('rebuild_min_move_m', 0.3)
+        self.declare_parameter('rebuild_min_move_rad', 0.15)
+        self.declare_parameter('rebuild_min_interval_s', 30.0)
 
         p = self.get_parameter
         self.world_frame = p('world_frame').value
@@ -83,6 +87,10 @@ class PoseGraphNode(Node):
         self.max_error_per_inlier = p('max_error_per_inlier').value
         self.cov_ellipsoid_stride = p('cov_ellipsoid_stride').value
         self.cov_ellipsoid_n_sigma = p('cov_ellipsoid_n_sigma').value
+        self.map_rebuild_enabled = p('map_rebuild_enabled').value
+        self.rebuild_min_move_m = p('rebuild_min_move_m').value
+        self.rebuild_min_move_rad = p('rebuild_min_move_rad').value
+        self.rebuild_min_interval_s = p('rebuild_min_interval_s').value
 
         yaml_path = p('noise_profile_path').value
         if not yaml_path or not os.path.exists(yaml_path):
@@ -124,6 +132,20 @@ class PoseGraphNode(Node):
         self.pub_loop_closure_count = self.create_publisher(Int32, '/slam/loop_closure_count', 10)
         self.pub_dopt = self.create_publisher(Float64, '/slam/dopt', 10)
 
+        # Map rebuild (parameterized, off by default): after a big loop
+        # closure moves keyframes, stream every keyframe's cloud back out at
+        # its CORRECTED world pose so a mapper (tsdf_mapper.py) can clear and
+        # re-integrate from scratch instead of keeping stale pre-closure
+        # geometry. Paced by a timer rather than published in one burst.
+        self.pub_rebuild_begin = self.create_publisher(Int32, '/slam/rebuild/begin', 10)
+        self.pub_rebuild_scan = self.create_publisher(PointCloud2, '/slam/rebuild/scan', 512)
+        self.pub_rebuild_origin = self.create_publisher(PoseStamped, '/slam/rebuild/origin', 512)
+        self.pub_rebuild_count = self.create_publisher(Int32, '/slam/rebuild_count', 10)
+        self._rebuild_queue: list = []
+        self._rebuild_count = 0
+        self._last_rebuild_time = None
+        self.create_timer(0.02, self._drain_rebuild_queue)
+
         self._path_dr_msgs = []
         self._path_slam_msgs = []
         self._rejected_edges = []   # [(idx_a, idx_b)] for viz only, cleared each keyframe
@@ -131,7 +153,8 @@ class PoseGraphNode(Node):
         self.get_logger().info(
             f"PoseGraph started. noise_profile={profile.name}, "
             f"keyframe_dist={self.keyframe_dist_m}m, keyframe_angle={self.keyframe_angle_rad}rad, "
-            f"loop_closure_enabled={self.loop_closure_enabled}")
+            f"loop_closure_enabled={self.loop_closure_enabled}, "
+            f"map_rebuild_enabled={self.map_rebuild_enabled}")
 
     # ------------------------------------------------------------------
     # GTSAM setup
@@ -295,7 +318,13 @@ class PoseGraphNode(Node):
             self.get_logger().info(
                 f"Loop closure: node {n} <-> {[i for i, _, _ in lc_factors]}")
             if moved:
-                self._redetect_and_apply(moved)
+                self._redetect_and_apply([idx for idx, _, _ in moved])
+
+        if self.map_rebuild_enabled and moved:
+            max_dist = max(dist for _, dist, _ in moved)
+            max_angle = max(angle for _, _, angle in moved)
+            if max_dist > self.rebuild_min_move_m or max_angle > self.rebuild_min_move_rad:
+                self._maybe_trigger_rebuild(max_dist, max_angle, len(moved))
 
         # Marginal covariance is queried only for the node just added — walking
         # every stored keyframe on each update would grow the per-keyframe cost
@@ -337,6 +366,9 @@ class PoseGraphNode(Node):
         return closures
 
     def _find_moved_keyframes(self, result_values, threshold_m=0.1, threshold_rad=0.05):
+        """Returns [(index, dist, angle), ...] for keyframes that shifted more
+        than the threshold; dist/angle are also read by the map-rebuild
+        trigger (a coarser threshold on the same numbers, see _add_keyframe)."""
         moved = []
         for kf in self._keyframes:
             T_new = result_values.atPose3(kf.symbol).matrix()
@@ -344,7 +376,7 @@ class PoseGraphNode(Node):
             dist = np.linalg.norm(T_delta[:3, 3])
             angle = np.arccos(np.clip((np.trace(T_delta[:3, :3]) - 1) / 2, -1, 1))
             if dist > threshold_m or angle > threshold_rad:
-                moved.append(kf.index)
+                moved.append((kf.index, dist, angle))
             kf.T_world = T_new
         return moved
 
@@ -372,6 +404,67 @@ class PoseGraphNode(Node):
             result_values = self._isam.calculateEstimate()
             for kf in self._keyframes:
                 kf.T_world = result_values.atPose3(kf.symbol).matrix()
+
+    # ------------------------------------------------------------------
+    # Map rebuild (parameterized; see module docstring / STATE.md)
+    # ------------------------------------------------------------------
+    def _maybe_trigger_rebuild(self, max_dist: float, max_angle: float, n_moved: int):
+        """Snapshot every keyframe's cloud at its CURRENT (corrected) world
+        pose and queue it for paced publishing to /slam/rebuild/{scan,origin}.
+        Non-keyframe scans between keyframes are not replayed and are lost on
+        rebuild — accepted, since keyframes are ~1/m or ~17 deg apart and the
+        live /cloud_in stream keeps integrating into the fresh volume
+        throughout the drain (tsdf_mapper.py)."""
+        if self._rebuild_queue:
+            return   # still draining a previous rebuild
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if (self._last_rebuild_time is not None
+                and now - self._last_rebuild_time < self.rebuild_min_interval_s):
+            return
+        self._last_rebuild_time = now
+        self._rebuild_count += 1
+        self.pub_rebuild_count.publish(Int32(data=self._rebuild_count))
+        self._rebuild_queue = list(self._keyframes)
+        self.pub_rebuild_begin.publish(Int32(data=len(self._rebuild_queue)))
+        self.get_logger().info(
+            f"Map rebuild #{self._rebuild_count}: {len(self._rebuild_queue)} keyframes "
+            f"({n_moved} moved, max move {max_dist:.2f}m / {np.degrees(max_angle):.1f}deg)")
+
+    def _drain_rebuild_queue(self):
+        if not self._rebuild_queue:
+            return
+        kf = self._rebuild_queue.pop(0)
+        R, t = kf.T_world[:3, :3], kf.T_world[:3, 3]
+        points_world = (R @ kf.cloud.T).T + t
+        origin = R @ self._T_base_cam[:3, 3] + t
+
+        header = Header()
+        header.stamp = kf.stamp
+        header.frame_id = self.world_frame
+
+        scan_msg = PointCloud2()
+        scan_msg.header = header
+        scan_msg.height = 1
+        scan_msg.width = len(points_world)
+        scan_msg.is_dense = True
+        scan_msg.is_bigendian = False
+        scan_msg.point_step = 12
+        scan_msg.row_step = 12 * len(points_world)
+        scan_msg.fields = [
+            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+        ]
+        scan_msg.data = points_world.astype(np.float32).tobytes()
+        self.pub_rebuild_scan.publish(scan_msg)
+
+        origin_msg = PoseStamped()
+        origin_msg.header = header
+        origin_msg.pose.position.x = float(origin[0])
+        origin_msg.pose.position.y = float(origin[1])
+        origin_msg.pose.position.z = float(origin[2])
+        origin_msg.pose.orientation.w = 1.0
+        self.pub_rebuild_origin.publish(origin_msg)
 
     # ------------------------------------------------------------------
     # Publishing

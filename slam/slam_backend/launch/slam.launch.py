@@ -32,6 +32,10 @@ def generate_launch_description():
         'noise_seed', default_value='-1',
         description='Override the noise profile seed (-1 = use the profile default)',
     )
+    map_rebuild_arg = DeclareLaunchArgument(
+        'map_rebuild', default_value='false',
+        description='Rebuild the belief TSDF map from corrected keyframe poses after a big loop closure',
+    )
 
     pkg_share = FindPackageShare('slam_backend')
     noise_file = PathJoinSubstitution([
@@ -58,11 +62,12 @@ def generate_launch_description():
         parameters=[{
             'noise_profile_path': noise_file,
             'loop_closure_enabled': LaunchConfiguration('loop_closure'),
+            'map_rebuild_enabled': LaunchConfiguration('map_rebuild'),
         }],
     )
 
     return LaunchDescription([
-        noise_profile_arg, loop_closure_arg, noise_seed_arg,
+        noise_profile_arg, loop_closure_arg, noise_seed_arg, map_rebuild_arg,
         sensors,
         pose_graph_node,
     ])
