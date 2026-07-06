@@ -81,6 +81,11 @@ def generate_launch_description():
                     'closure (slam:=slam, TSDF only — see tsdf_mapper.py; unsupported for '
                     'mapper:=octomap, see the warning this prints if combined)',
     )
+    output_dir_arg = DeclareLaunchArgument(
+        'output_dir', default_value='',
+        description='Directory for the eval stack to write TUM/CSV output to '
+                    '(slam:=slam; default: a timestamped dir under eval/runs/)',
+    )
 
     # tf.launch.py (included further below via octomap/tsdf -> pointcloud -> tf)
     # declares use_gt_tf with its own default of 'true'; DeclareLaunchArgument only
@@ -172,6 +177,7 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(eval_tools_share, 'launch', 'eval.launch.py')
         ),
+        launch_arguments={'output_dir': LaunchConfiguration('output_dir')}.items(),
         condition=LaunchConfigurationEquals('slam', 'slam'),
     )
 
@@ -244,7 +250,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         mode_arg, motion_arg, mapper_arg, rviz_arg, slam_arg, noise_profile_arg,
-        loop_closure_arg, noise_seed_arg, map_rebuild_arg,
+        loop_closure_arg, noise_seed_arg, map_rebuild_arg, output_dir_arg,
         set_use_gt_tf, set_sonar_noise,
         octomap_stack, tsdf_stack, gt_map_stack,
         slam_stack, eval_stack, slam_hint,
