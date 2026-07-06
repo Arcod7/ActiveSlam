@@ -31,11 +31,15 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2
 
-from slam_backend.sensor_models.noise_profiles import load_noise_profile, NoiseProfile
+from slam_backend.sensor_models.noise_profiles import load_noise_profile, resolve_seed, NoiseProfile
 
 DEPTH_MIN_M = 0.2
 NO_RETURN_RANGE_M = 14.9   # points at/beyond this are left completely untouched
 MAX_RANGE_M = 15.0
+
+# Per-sensor offset added to a shared seed so co-launched sims (identical
+# profile.seed) don't draw identical RNG streams (imu=+1, dvl=+2, pressure=+3).
+SEED_OFFSET = 4
 
 
 class SonarNoiseNode(Node):
@@ -43,6 +47,7 @@ class SonarNoiseNode(Node):
         super().__init__('sonar_noise', **kwargs)
 
         self.declare_parameter('noise_profile_path', '')
+        self.declare_parameter('noise_seed', -1)
         self.declare_parameter('input_topic', '/cloud_in_raw')
         self.declare_parameter('output_topic', '/cloud_in')
 
@@ -50,12 +55,13 @@ class SonarNoiseNode(Node):
         if not yaml_path or not os.path.exists(yaml_path):
             self.get_logger().warn(f"Invalid noise profile path: '{yaml_path}', using ideal defaults.")
             self.profile = NoiseProfile().sonar
-            seed = -1
+            profile_seed = -1
         else:
             full_profile = load_noise_profile(yaml_path)
             self.profile = full_profile.sonar
-            seed = full_profile.seed
+            profile_seed = full_profile.seed
 
+        seed = resolve_seed(profile_seed, self.get_parameter('noise_seed').value, SEED_OFFSET)
         self._rng = np.random.default_rng(seed if seed != -1 else None)
         self._passthrough = not any([
             self.profile.range_sigma0_m, self.profile.range_sigma_k,

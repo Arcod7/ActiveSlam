@@ -28,6 +28,10 @@ def generate_launch_description():
         'loop_closure', default_value='true',
         description='Enable loop-closure detection (false = odometry+scan-matching only, for A/B benchmarking)',
     )
+    noise_seed_arg = DeclareLaunchArgument(
+        'noise_seed', default_value='-1',
+        description='Override the noise profile seed (-1 = use the profile default)',
+    )
 
     pkg_share = FindPackageShare('slam_backend')
     noise_file = PathJoinSubstitution([
@@ -40,7 +44,10 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(slam_backend_share, 'launch', 'sensors_only.launch.py')
         ),
-        launch_arguments={'noise_profile': LaunchConfiguration('noise_profile')}.items(),
+        launch_arguments={
+            'noise_profile': LaunchConfiguration('noise_profile'),
+            'noise_seed': LaunchConfiguration('noise_seed'),
+        }.items(),
     )
 
     pose_graph_node = Node(
@@ -55,7 +62,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        noise_profile_arg, loop_closure_arg,
+        noise_profile_arg, loop_closure_arg, noise_seed_arg,
         sensors,
         pose_graph_node,
     ])

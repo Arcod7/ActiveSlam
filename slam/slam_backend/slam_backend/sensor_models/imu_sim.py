@@ -7,29 +7,32 @@ import numpy as np
 import os
 from scipy.spatial.transform import Rotation
 
-from slam_backend.sensor_models.noise_profiles import load_noise_profile
+from slam_backend.sensor_models.noise_profiles import load_noise_profile, resolve_seed
+
+# Per-sensor offset added to a shared seed so co-launched sims (identical
+# profile.seed) don't draw identical RNG streams (dvl=+2, pressure=+3, sonar=+4).
+SEED_OFFSET = 1
 
 class IMUSimNode(Node):
     def __init__(self, **kwargs):
         super().__init__('imu_sim', **kwargs)
-        
+
         self.declare_parameter('noise_profile_path', '')
+        self.declare_parameter('noise_seed', -1)
         yaml_path = self.get_parameter('noise_profile_path').value
-        
+
         if not yaml_path or not os.path.exists(yaml_path):
             self.get_logger().warn(f"Invalid noise profile path: '{yaml_path}', using ideal defaults.")
             from slam_backend.sensor_models.noise_profiles import NoiseProfile
             self.profile = NoiseProfile().imu
-            seed = -1
+            profile_seed = -1
         else:
             full_profile = load_noise_profile(yaml_path)
             self.profile = full_profile.imu
-            seed = full_profile.seed
-            
+            profile_seed = full_profile.seed
+
+        seed = resolve_seed(profile_seed, self.get_parameter('noise_seed').value, SEED_OFFSET)
         if seed != -1:
-            # We seed globally or use a local generator. Using global for simplicity.
-            # In a multi-node setup with the same seed, they will have identical RNG sequences,
-            # which is fine if they are in different processes.
             np.random.seed(seed)
             
         self.sub = self.create_subscription(Odometry, '/StoneFish/Odometry', self.odom_cb, 10)

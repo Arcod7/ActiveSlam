@@ -6,8 +6,12 @@ from geometry_msgs.msg import TwistStamped
 import numpy as np
 import os
 
-from slam_backend.sensor_models.noise_profiles import load_noise_profile
+from slam_backend.sensor_models.noise_profiles import load_noise_profile, resolve_seed
 from slam_backend.geometry_utils import odom_to_matrix
+
+# Per-sensor offset added to a shared seed so co-launched sims (identical
+# profile.seed) don't draw identical RNG streams (imu=+1, pressure=+3, sonar=+4).
+SEED_OFFSET = 2
 
 
 class DVLSimNode(Node):
@@ -24,18 +28,20 @@ class DVLSimNode(Node):
         super().__init__('dvl_sim', **kwargs)
 
         self.declare_parameter('noise_profile_path', '')
+        self.declare_parameter('noise_seed', -1)
         yaml_path = self.get_parameter('noise_profile_path').value
 
         if not yaml_path or not os.path.exists(yaml_path):
             self.get_logger().warn(f"Invalid noise profile path: '{yaml_path}', using ideal defaults.")
             from slam_backend.sensor_models.noise_profiles import NoiseProfile
             self.profile = NoiseProfile().dvl
-            seed = -1
+            profile_seed = -1
         else:
             full_profile = load_noise_profile(yaml_path)
             self.profile = full_profile.dvl
-            seed = full_profile.seed
+            profile_seed = full_profile.seed
 
+        seed = resolve_seed(profile_seed, self.get_parameter('noise_seed').value, SEED_OFFSET)
         if seed != -1:
             np.random.seed(seed)
 

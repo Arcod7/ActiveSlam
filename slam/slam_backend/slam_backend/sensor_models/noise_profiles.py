@@ -62,3 +62,10 @@ def load_noise_profile(yaml_path: str) -> NoiseProfile:
     if 'sonar' in data:
         profile.sonar = SonarNoise(**data['sonar'])
     return profile
+
+def resolve_seed(profile_seed: int, override: int, offset: int) -> int:
+    """Combine the profile's baked-in seed with a per-run override, then add
+    a per-sensor offset so multiple sims sharing one seed don't draw
+    identical RNG streams. -1 (random) passes through unchanged."""
+    base = override if override != -1 else profile_seed
+    return -1 if base == -1 else base + offset

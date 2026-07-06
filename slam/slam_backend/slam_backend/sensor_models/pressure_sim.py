@@ -6,25 +6,31 @@ from geometry_msgs.msg import PointStamped
 import numpy as np
 import os
 
-from slam_backend.sensor_models.noise_profiles import load_noise_profile
+from slam_backend.sensor_models.noise_profiles import load_noise_profile, resolve_seed
+
+# Per-sensor offset added to a shared seed so co-launched sims (identical
+# profile.seed) don't draw identical RNG streams (imu=+1, dvl=+2, sonar=+4).
+SEED_OFFSET = 3
 
 class PressureSimNode(Node):
     def __init__(self, **kwargs):
         super().__init__('pressure_sim', **kwargs)
-        
+
         self.declare_parameter('noise_profile_path', '')
+        self.declare_parameter('noise_seed', -1)
         yaml_path = self.get_parameter('noise_profile_path').value
-        
+
         if not yaml_path or not os.path.exists(yaml_path):
             self.get_logger().warn(f"Invalid noise profile path: '{yaml_path}', using ideal defaults.")
             from slam_backend.sensor_models.noise_profiles import NoiseProfile
             self.profile = NoiseProfile().pressure
-            seed = -1
+            profile_seed = -1
         else:
             full_profile = load_noise_profile(yaml_path)
             self.profile = full_profile.pressure
-            seed = full_profile.seed
-            
+            profile_seed = full_profile.seed
+
+        seed = resolve_seed(profile_seed, self.get_parameter('noise_seed').value, SEED_OFFSET)
         if seed != -1:
             np.random.seed(seed)
             
