@@ -79,6 +79,14 @@ def generate_launch_description():
         PythonExpression(["'false' if '", LaunchConfiguration('slam'), "' == 'slam' else 'true'"]),
     )
 
+    # Same propagation trick for the sonar noise model (pointcloud.launch.py):
+    # only meaningful once there's a ground-truth map to compare the noisy
+    # belief map against, i.e. slam:=slam (see sonar_noise.py, gt_map.launch.py).
+    set_sonar_noise = SetLaunchConfiguration(
+        'sonar_noise',
+        PythonExpression(["'true' if '", LaunchConfiguration('slam'), "' == 'slam' else 'false'"]),
+    )
+
     stonefish_gt_mapping_share = get_package_share_directory('stonefish_groundtruth_mapping')
     frontier_slam_share = get_package_share_directory('frontier_slam')
     slam_backend_share = get_package_share_directory('slam_backend')
@@ -153,7 +161,8 @@ def generate_launch_description():
             'slam=slam: pose_graph.py is now the sole broadcaster of '
             'world_ned -> bluerov2/base_link (odom_tf_sync is suppressed). '
             'noise_profile=', LaunchConfiguration('noise_profile'),
-            ' — see eval/runs/<timestamp>/ for ATE/RPE logs. A second, '
+            ' (also drives the sonar noise model on /cloud_in) — see '
+            'eval/runs/<timestamp>/ for ATE/RPE logs. A second, '
             'ground-truth-only map is also running under /gt/... '
             '(demo_slam.rviz overlays it against the belief map).',
         ],
@@ -203,7 +212,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         mode_arg, motion_arg, mapper_arg, rviz_arg, slam_arg, noise_profile_arg,
-        set_use_gt_tf,
+        set_use_gt_tf, set_sonar_noise,
         octomap_stack, tsdf_stack, gt_map_stack,
         slam_stack, eval_stack, slam_hint,
         teleop_hint, frontier_exploration,
