@@ -124,11 +124,11 @@ ros2 launch bringup demo.launch.py slam:=slam mapper:=tsdf map_rebuild:=true    
 ros2 launch bringup demo.launch.py slam:=slam noise_seed:=7                          # reproducible, decorrelated noise draws
 ros2 launch bringup demo.launch.py slam:=slam output_dir:=/path/to/run              # label eval output instead of a timestamp
 
-# Overnight batch evaluation (plain script, not a console_script -- needs
+# Batch evaluation (plain script, not a console_script -- needs
 # `source install/setup.bash` first so eval_tools.plot_results is importable):
-python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_smoke.yaml       # ~5min pre-flight check
-python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_overnight.yaml   # 35 runs, ~5.3h
-python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/<batch_dir>          # re-aggregate only
+python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_smoke.yaml  # ~5min pre-flight check
+python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_full.yaml   # 35 runs, ~5.3h
+python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/<batch_dir>    # re-aggregate only
 ```
 
 ## Verification status
@@ -164,11 +164,11 @@ python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/<batch_
 - ✅ **Map-quality metrics** (Phase 17): synthetic grid-alignment/IoU/coverage and
   chamfer/coverage checks; live 60s runs on both backends show sane, time-varying values
   (octomap: coverage ~0.98, IoU ~0.5; tsdf: coverage 0.89→0.82, chamfer 0.3m→0.72m).
-- ✅ **Batch orchestrator** (Phase 18): `--dry-run` on the 35-run overnight preset resolves
+- ✅ **Batch orchestrator** (Phase 18): `--dry-run` on the 35-run full matrix preset resolves
   correctly and rejects invalid configs (`motion:=wallfollow` without `mapper:=tsdf`); a real
   2-run/120s mini-batch produced complete per-run + batch-level artifacts including a clean
   back-to-back Stonefish restart.
-- 🔲 Not yet run: the actual 35-run overnight matrix (`matrix_overnight.yaml`); long-duration
+- 🔲 Not yet run: the actual 35-run full matrix (`matrix_full.yaml`); long-duration
   (10+ min) single session; `evo_ape`/`evo_rpe` cross-check against the written TUM files.
 - ⚠️ The synthetic square-loop test's "70% ATE reduction" (Progress.md Phase 6) is superseded
   by the real benchmark above — its dense, easily-overlapping synthetic point clouds make loop

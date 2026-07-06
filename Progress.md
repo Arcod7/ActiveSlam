@@ -356,7 +356,7 @@ profile. Live: `/cloud_in_raw`, `/cloud_in`, `/gt/cloud_in` all publish at
 `slam/stonefish_groundtruth_mapping/launch/tsdf.launch.py`,
 `bringup/launch/demo.launch.py`
 
-**Objective**: An overnight evaluation framework needs A/B levers to actually
+**Objective**: A multi-run evaluation framework needs A/B levers to actually
 sweep — none existed. Also, the map was never re-aligned after a loop
 closure moved keyframe poses (integrated scans stayed wherever they were
 first placed), a known limitation from Phase 6 that was worth turning into
@@ -422,16 +422,16 @@ backends produced sane, time-varying values (octomap: coverage ~0.98,
 IoU ~0.5; tsdf: coverage 0.89 -> 0.82, chamfer 0.3 m -> 0.72 m as drift
 accumulates) with zero non-shutdown exceptions.
 
-## Phase 18 — Overnight batch evaluation framework
+## Phase 18 — Batch evaluation framework
 
 **Date**: 2026-07-06
 **Files**: `eval/eval_tools/scripts/run_matrix.py` (new),
-`eval/eval_tools/config/matrix_{overnight,smoke}.yaml` (new)
+`eval/eval_tools/config/matrix_{full,smoke}.yaml` (new)
 
 **Objective**: Comparing approaches (mapper, next-pose policy, loop closure
 on/off, noise conditions) meant launching and eyeballing runs by hand, one
-at a time — no way to leave a comparison running overnight and come back to
-a result.
+at a time — no way to queue a long multi-run comparison unattended and come
+back to a result.
 
 **What changed**: `run_matrix.py`, a plain script (not a ROS node) reading
 a YAML matrix (configs x seeds), launches `bringup/demo.launch.py` headless
@@ -448,10 +448,10 @@ call; one retry only fires when a run produced literally zero data (a
 failed start, not a real result). At the batch level: `summary.csv` (one
 row per run — final ATE/RPE/coverage/IoU/chamfer/loop-closure count/rebuild
 count/traceback count) plus per-axis comparison boxplots.
-`matrix_overnight.yaml` bundles all four requested axes into one 35-run
+`matrix_full.yaml` bundles all four requested axes into one 35-run
 preset (~5.3 h); `matrix_smoke.yaml` is a 2-run/120 s pre-flight check.
 
-**Observed impact**: ✅ `--dry-run` on the overnight preset prints exactly
+**Observed impact**: ✅ `--dry-run` on the full matrix preset prints exactly
 35 resolved commands and rejects a `motion:=wallfollow` + `mapper:=octomap`
 config at load time; caught and fixed a bug where dry-run was still
 creating empty run directories (verified fixed: identical directory count

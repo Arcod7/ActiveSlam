@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Overnight batch-evaluation orchestrator: runs bringup/demo.launch.py over a
-matrix of (config x seed) combinations, headless, one at a time, and
-aggregates the results.
+"""Batch evaluation orchestrator: runs bringup/demo.launch.py over a matrix of
+(config x seed) combinations, headless, one at a time, and aggregates the
+results.
 
 Not a ROS node / console_script -- a plain script, run directly with python3
 inside the ros2-jazzy distrobox (needs `source install/setup.bash` first, so
 `eval_tools.plot_results` is importable):
 
-  python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_overnight.yaml
+  python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_full.yaml
   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_smoke.yaml --dry-run
-  python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/overnight_20260706_2200
+  python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/full_20260706_2200
 
 There is no natural end-of-run signal anywhere in the stack (frontier
 exploration keeps spinning after "no frontiers found" rather than publishing

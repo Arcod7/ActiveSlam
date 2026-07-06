@@ -104,8 +104,8 @@ orchestrator (a plain script, run directly with `python3` after sourcing
 and the example matrices in [`eval/eval_tools/config/`](eval/eval_tools/config)):
 
 ```bash
-python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_smoke.yaml     # ~5min pre-flight check
-python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_overnight.yaml # 35 runs, ~5.3h
+python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_smoke.yaml  # ~5min pre-flight check
+python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_full.yaml   # 35 runs, ~5.3h
 ```
 
 RViz view switches automatically with `mapper`/`slam` (`slam:=slam` wins if both
