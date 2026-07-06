@@ -56,6 +56,7 @@ class PoseGraphNode(Node):
         self.declare_parameter('camera_frame', 'bluerov2/Dcam')
         self.declare_parameter('keyframe_dist_m', 1.0)
         self.declare_parameter('keyframe_angle_rad', 0.3)
+        self.declare_parameter('loop_closure_enabled', True)
         self.declare_parameter('loop_closure_radius_m', 5.0)
         self.declare_parameter('loop_closure_min_gap', 10)
         self.declare_parameter('min_inlier_ratio', 0.3)
@@ -74,6 +75,7 @@ class PoseGraphNode(Node):
         self.camera_frame = p('camera_frame').value
         self.keyframe_dist_m = p('keyframe_dist_m').value
         self.keyframe_angle_rad = p('keyframe_angle_rad').value
+        self.loop_closure_enabled = p('loop_closure_enabled').value
         self.loop_closure_radius_m = p('loop_closure_radius_m').value
         self.loop_closure_min_gap = p('loop_closure_min_gap').value
         self.min_inlier_ratio = p('min_inlier_ratio').value
@@ -128,7 +130,8 @@ class PoseGraphNode(Node):
 
         self.get_logger().info(
             f"PoseGraph started. noise_profile={profile.name}, "
-            f"keyframe_dist={self.keyframe_dist_m}m, keyframe_angle={self.keyframe_angle_rad}rad")
+            f"keyframe_dist={self.keyframe_dist_m}m, keyframe_angle={self.keyframe_angle_rad}rad, "
+            f"loop_closure_enabled={self.loop_closure_enabled}")
 
     # ------------------------------------------------------------------
     # GTSAM setup
@@ -262,8 +265,11 @@ class PoseGraphNode(Node):
         T_prior[2, 3] = T_odom[2, 3]
         graph.addPriorPose3(sym, gtsam.Pose3(T_prior), self._att_depth_noise)
 
-        # 4) Loop closure detection (against the pre-update world estimate)
-        lc_factors = self._detect_loop_closures(n, cloud_body, T_world_est)
+        # 4) Loop closure detection (against the pre-update world estimate).
+        # Disabled entirely (A/B benchmarking) still lets _find_moved_keyframes
+        # run below -- poses stay current for path/viz even without closures.
+        lc_factors = (self._detect_loop_closures(n, cloud_body, T_world_est)
+                      if self.loop_closure_enabled else [])
         for lc_idx, lc_T, lc_err in lc_factors:
             graph.add(gtsam.BetweenFactorPose3(
                 self._keyframes[lc_idx].symbol, sym, gtsam.Pose3(lc_T),

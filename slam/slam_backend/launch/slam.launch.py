@@ -24,6 +24,10 @@ def generate_launch_description():
         'noise_profile', default_value='realistic',
         description='Noise profile to use (ideal, realistic, degraded)'
     )
+    loop_closure_arg = DeclareLaunchArgument(
+        'loop_closure', default_value='true',
+        description='Enable loop-closure detection (false = odometry+scan-matching only, for A/B benchmarking)',
+    )
 
     pkg_share = FindPackageShare('slam_backend')
     noise_file = PathJoinSubstitution([
@@ -44,11 +48,14 @@ def generate_launch_description():
         executable='pose_graph',
         name='pose_graph',
         output='screen',
-        parameters=[{'noise_profile_path': noise_file}],
+        parameters=[{
+            'noise_profile_path': noise_file,
+            'loop_closure_enabled': LaunchConfiguration('loop_closure'),
+        }],
     )
 
     return LaunchDescription([
-        noise_profile_arg,
+        noise_profile_arg, loop_closure_arg,
         sensors,
         pose_graph_node,
     ])

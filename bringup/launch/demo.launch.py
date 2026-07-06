@@ -67,6 +67,10 @@ def generate_launch_description():
         'noise_profile', default_value='realistic', choices=['ideal', 'realistic', 'degraded'],
         description='Sensor noise profile for slam:=slam (ignored otherwise)',
     )
+    loop_closure_arg = DeclareLaunchArgument(
+        'loop_closure', default_value='true', choices=['true', 'false'],
+        description='Enable loop-closure detection for slam:=slam (A/B benchmarking switch)',
+    )
 
     # tf.launch.py (included further below via octomap/tsdf -> pointcloud -> tf)
     # declares use_gt_tf with its own default of 'true'; DeclareLaunchArgument only
@@ -145,7 +149,10 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(slam_backend_share, 'launch', 'slam.launch.py')
         ),
-        launch_arguments={'noise_profile': LaunchConfiguration('noise_profile')}.items(),
+        launch_arguments={
+            'noise_profile': LaunchConfiguration('noise_profile'),
+            'loop_closure': LaunchConfiguration('loop_closure'),
+        }.items(),
         condition=LaunchConfigurationEquals('slam', 'slam'),
     )
 
@@ -211,7 +218,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        mode_arg, motion_arg, mapper_arg, rviz_arg, slam_arg, noise_profile_arg,
+        mode_arg, motion_arg, mapper_arg, rviz_arg, slam_arg, noise_profile_arg, loop_closure_arg,
         set_use_gt_tf, set_sonar_noise,
         octomap_stack, tsdf_stack, gt_map_stack,
         slam_stack, eval_stack, slam_hint,
