@@ -10,6 +10,7 @@ Tune H_COEF and YAW_COEF to control drift rate.
 """
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 from rclpy.time import Time
@@ -137,11 +138,11 @@ def main(args=None):
     node = OdomToTfNoisy()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

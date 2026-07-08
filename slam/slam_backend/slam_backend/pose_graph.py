@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.time import Time
 from nav_msgs.msg import Odometry, Path
@@ -431,7 +432,9 @@ class PoseGraphNode(Node):
             f"({n_moved} moved, max move {max_dist:.2f}m / {np.degrees(max_angle):.1f}deg)")
 
     def _drain_rebuild_queue(self):
-        if not self._rebuild_queue:
+        # rclpy.ok() guard: this timer can fire while the context is tearing
+        # down mid-drain, and publishing then raises RCLError out of spin.
+        if not self._rebuild_queue or not rclpy.ok():
             return
         kf = self._rebuild_queue.pop(0)
         R, t = kf.T_world[:3, :3], kf.T_world[:3, 3]
@@ -618,9 +621,13 @@ def orthonormalize_pose(T: np.ndarray) -> np.ndarray:
 def main(args=None):
     rclpy.init(args=args)
     node = PoseGraphNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

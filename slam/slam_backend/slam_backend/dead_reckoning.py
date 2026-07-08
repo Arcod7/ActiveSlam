@@ -14,6 +14,7 @@ This gives the same XYH-relative / ZPR-absolute split used by Suresh et al.
 fusion level instead of only inside the pose graph's noise models.
 """
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PointStamped, QuaternionStamped, TwistStamped
@@ -98,9 +99,13 @@ class DeadReckoningNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = DeadReckoningNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

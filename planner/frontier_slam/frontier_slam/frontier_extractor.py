@@ -17,6 +17,7 @@ import os
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from geometry_msgs.msg import PointStamped, PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
@@ -258,7 +259,9 @@ def main(args=None):
     node = FrontierExtractor()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
         node._log.close()
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()

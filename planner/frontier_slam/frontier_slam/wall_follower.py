@@ -41,6 +41,7 @@ import os
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image, PointCloud2, PointField
@@ -337,7 +338,9 @@ def main(args=None) -> None:
     node = WallFollower()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
         node._log.close()
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
