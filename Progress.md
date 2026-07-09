@@ -515,3 +515,92 @@ ATE **0.5356 m**, final instantaneous error 0.7908 m, mean RPE (translation)
 0.1137 m, coverage 0.9651, IoU 0.5194, 35 loop closures over 94 metrics rows —
 all 35 loop closures were, again, opportunistic (no autonomous revisit
 behavior exists yet).
+
+## Phase 20 — Uncertainty-triggered revisit planner (Week 3 v1)
+
+**Date**: 2026-07-09
+**Files**: `planner/frontier_slam/frontier_slam/revisit_planner.py` (new),
+`frontier_extractor.py` (suspend switch), `bringup/demo.launch.py`,
+`planner/frontier_slam/launch/frontier_slam.launch.py`,
+`eval/eval_tools/eval_tools/benchmark.py`, `eval/eval_tools/scripts/run_matrix.py`,
+`eval/eval_tools/config/matrix_revisit.yaml` (new), `slam/slam_backend/slam_backend/pose_graph.py`
+
+**Objective**: Close the Week 3 gap identified in Phase 19 — loop closure was
+opportunistic-only, the robot never deliberately revisits anything. New node
+`revisit_planner.py` watches `/slam/dopt` (D-optimality of the latest keyframe's
+marginal covariance — the only live-correct uncertainty signal available) and,
+when it crosses a threshold, suspends frontier exploration and drives to a
+scored candidate among past keyframes (density of nearby old keyframes minus
+travel cost), preferring dense, distant, unrevisited clusters. Explicitly out of
+v1, deferred to future work per `docs/ROADMAP.md` Week 3's open bullets: FPFH
+submap saliency (still just geometric density, no descriptor-based
+distinctiveness) and mirror-graph covariance propagation *along candidate
+paths* (v1 reacts to the live D-optimality value rather than projecting it
+forward for each candidate).
+
+**What changed**: `frontier_extractor` gained a `/frontier_slam/suspend` (Bool)
+switch — while suspended it stops publishing its own goal (it republishes every
+2 s, so a race rather than a suspend would just have the two goal sources
+fight) but keeps replanning its A* path toward whatever goal is currently
+adopted, including externally-published ones on `/frontier_slam/goal`. The new
+`revisit_planner` node is a plain state machine (`RevisitStateMachine`,
+rclpy-free, unit-tested) — EXPLORING → REVISITING on trigger (suspend, pick
+target, republish goal), → COOLDOWN on any of {loop closure count rose, dopt
+dropped back below resume threshold, timeout, arrived-and-dwelled with no
+closure}, → EXPLORING after a cooldown period. Wired into `demo.launch.py`
+(`revisit:=true`, requires `slam:=slam`) and the eval stack (`revisit_count`
+column, `matrix_revisit.yaml` A/B preset).
+
+While reading the closure counter to interpret the batch results below, found
+and fixed a real bug in `pose_graph.py`: `/slam/loop_closure_count` summed each
+keyframe's own `loop_closures` list, but a closure was only ever recorded under
+the *newer* keyframe at initial detection. When the *older* keyframe of the
+pair later moved (any optimizer update shifting it >0.1 m/0.05 rad) and
+triggered `_redetect_and_apply`, it re-discovered and re-added the same
+physical pair under itself — a genuine duplicate `BetweenFactorPose3` edge into
+iSAM2, not just a display artifact. Fixed with a run-lifetime `_closed_pairs`
+set (keyed on the unordered keyframe-index pair) gating both the initial-
+detection and redetect call sites. **Definition to quote alongside any
+lc_count figure**: *lc_count = number of accepted loop-closure edges
+(BetweenFactorPose3) added to the pose graph, one per unique keyframe pair.*
+Figures from before this fix (the Phase 19 baseline's 35, and the batch below)
+predate the dedup and should be read as edge counts inflated by an unknown
+amount from the redetect-duplicate bug, not exact closure-event tallies —
+not directly comparable to future runs.
+
+Also classified post-SIGINT tracebacks that land during launch teardown but
+raise something other than `KeyboardInterrupt` (e.g. an rclpy pybind11
+teardown race) as benign — phase (before/after the SIGINT marker in the log),
+not exception type, is the principled signal; see `run_matrix.py`.
+
+**Observed impact**: ✅ Forced-trigger live test (`ros2 param set
+/revisit_planner dopt_trigger 0.002`): state → revisiting, suspend → true,
+frontier_extractor went silent, robot drove to the selected target, lc_count
+rose, dopt dropped, state → cooldown → exploring. ✅ Loop-closure dedup fix
+live-verified on a 140 s run: 7 `Loop closure: node X <-> [...]` log lines,
+final lc_count exactly 7 — including a redetect cascade over 21 moved
+keyframes that correctly found zero new pairs.
+
+⚠️ Natural-trigger A/B batch (`matrix_revisit.yaml`, 480 s, seeds 101–102, no
+forced params) — a **mechanism demonstration, not an ATE-improvement claim**
+(n=2, and end-of-run ATE on trajectories that have diverged differently is not
+apples-to-apples):
+
+| run | status | final ATE | abs err | coverage | IoU | lc_count | revisits |
+|---|---|---|---|---|---|---|---|
+| baseline s101 | ok | 0.450 | 0.253 | 0.959 | 0.547 | 433 | 0 |
+| baseline s102 | ok | 0.672 | 1.068 | 0.955 | 0.534 | 200 | 0 |
+| revisit s101 | ok | 1.190 | 1.103 | 0.923 | 0.502 | 308 | 2 |
+| revisit s102 | crashed_soft\* | 0.590 | 0.083 | 0.973 | 0.507 | 452 | 2 |
+
+The mechanism fired naturally in both revisit runs (2 revisits each, full 480 s
+completed). Mixed at n=2: s102 favours revisit on every pose metric (ATE 0.590
+vs 0.672, abs err 0.083 vs 1.068, coverage up, more closures); s101 favours
+baseline (ATE 1.190 vs 0.450, fewer closures). All `lc_count` values in this
+table predate the dedup fix above — treat as inflated, not exact. \*The s102
+`crashed_soft` label is teardown noise, not a run failure: its traceback (an
+rclpy pybind11 `RuntimeError` during shutdown) landed ~25 log lines after
+launch's SIGINT marker; all 480 s of metrics were written and are trustworthy.
+A dedicated multi-seed batch (needed for a defensible ATE statement) and a
+combined revisit+rebuild eval column are open, user-scheduled follow-ups, not
+done here.

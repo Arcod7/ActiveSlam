@@ -112,6 +112,22 @@ published used `ideal`, so no quoted numbers are affected. Override with `noise_
 | `rebuild_min_move_m` / `rebuild_min_move_rad` | 0.3 / 0.15 | Min keyframe shift to trigger a rebuild |
 | `rebuild_min_interval_s` | 30.0 | Throttle between rebuild triggers |
 
+### `revisit_planner.py` key parameters (defaults; `*` = live-read via `get_parameter`
+every tick, so `ros2 param set` takes effect without a restart)
+| Parameter | Value | Purpose |
+|---|---|---|
+| `dopt_trigger` * | 0.02 | D-optimality above this → suspend + revisit (~p95 of the Phase 19 baseline; median 0.009) |
+| `dopt_resume` * | 0.01 | D-optimality below this while revisiting → cooldown |
+| `min_keyframes` | 15 | Minimum keyframe count before a revisit can trigger |
+| `min_index_gap` | 10 | Candidate keyframes must be at least this many indices old |
+| `candidate_radius_m` | 5.0 | Neighbourhood radius used to score candidate density |
+| `min_target_dist_m` | 3.0 | Candidates closer than this to the robot are excluded |
+| `w_density` / `w_travel` | 1.0 / 0.2 | Target score = density − w_travel·dist |
+| `revisit_timeout_s` * | 120 | Give up and cooldown if a revisit hasn't resolved by then |
+| `arrival_radius_m` | 2.5 | "Arrived at target" threshold |
+| `arrival_dwell_s` | 30 | Time spent at an arrived target with no closure before cooldown |
+| `cooldown_s` | 60 | COOLDOWN → EXPLORING delay |
+
 ### Launch usage
 ```bash
 ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic mode:=frontier
@@ -123,6 +139,7 @@ ros2 launch bringup demo.launch.py slam:=slam loop_closure:=false               
 ros2 launch bringup demo.launch.py slam:=slam mapper:=tsdf map_rebuild:=true         # rebuild belief TSDF after big closures
 ros2 launch bringup demo.launch.py slam:=slam noise_seed:=7                          # reproducible, decorrelated noise draws
 ros2 launch bringup demo.launch.py slam:=slam output_dir:=/path/to/run              # label eval output instead of a timestamp
+ros2 launch bringup demo.launch.py slam:=slam mode:=frontier revisit:=true          # Week 3: uncertainty-triggered revisit
 
 # Batch evaluation (plain script, not a console_script -- needs
 # `source install/setup.bash` first so eval_tools.plot_results is importable):
@@ -191,11 +208,25 @@ python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/<batch_
 - ⚠️ The synthetic square-loop test's "70% ATE reduction" (Progress.md Phase 6) is superseded
   by the real benchmark above — its dense, easily-overlapping synthetic point clouds make loop
   closure fire far more readily than real depth-camera data does. Use the 0.58 m figure, not 70%.
+- ✅ **Uncertainty-triggered revisit planner** (Phase 20, `revisit:=true`): forced-trigger
+  live test (`ros2 param set /revisit_planner dopt_trigger 0.002`) went through the full
+  cycle — suspend, drive to target, loop closure fires, dopt drops, resume. Natural-trigger
+  A/B batch (`matrix_revisit.yaml`, 480 s × seeds 101/102) fired the mechanism naturally
+  (2 revisits/run) but is a **mechanism demo, not an ATE-improvement claim** (n=2, mixed
+  result — see Progress.md Phase 20 for the per-seed table). v1 scope cuts vs. `docs/ROADMAP.md`
+  Week 3 (FPFH saliency, per-candidate covariance propagation) are future work.
+- ✅ **Loop-closure edge dedup** (Phase 20, `pose_graph.py`): `/slam/loop_closure_count` was
+  double-counting — a pair could be recorded once at initial detection (under the newer
+  keyframe) and again under the older keyframe if it was later redetected after moving,
+  inserting a genuine duplicate `BetweenFactorPose3` into iSAM2. Fixed with a run-lifetime
+  closed-pairs set; live-verified 7 closure log lines = final lc_count 7 exactly on a 140 s
+  run, including a 21-keyframe redetect cascade that correctly found no new pairs. lc_count
+  figures from before this fix (the Phase 19 baseline's 35; the Phase 20 batch's 200–452) are
+  inflated by an unknown amount and aren't directly comparable to future runs.
 
 ## Not yet implemented (Week 3 prep only — see docs/SLAM_PLAN.md Part 11)
 
-- Mirror `NonlinearFactorGraph`/`Values` for virtual-factor uncertainty propagation along candidate revisit paths — not built; `pose_graph.py` only maintains the live iSAM2 graph
-- Explore-vs-revisit decision rule (D-optimality threshold trigger) — `/slam/dopt` is published and logged, nothing consumes it yet
-- Submap saliency (FPFH descriptors) — keyframe clouds are stored in body frame, ready to feed a descriptor pipeline, none built
+- Mirror `NonlinearFactorGraph`/`Values` for virtual-factor uncertainty propagation along candidate revisit paths — not built; `revisit_planner.py` (Phase 20) reacts to the live `/slam/dopt` value, it does not project uncertainty forward per candidate
+- Submap saliency (FPFH descriptors) — keyframe clouds are stored in body frame, ready to feed a descriptor pipeline, none built; `revisit_planner.py`'s v1 target scoring uses plain keyframe density instead
 - Map rebuild after a large loop closure — **implemented for TSDF** (Phase 16, parameterized
   `map_rebuild:=true`); still not supported for OctoMap (see Verification status above)
