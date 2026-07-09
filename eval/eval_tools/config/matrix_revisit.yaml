@@ -1,0 +1,26 @@
+# Focused A/B for the uncertainty-triggered revisit planner: passive
+# frontier-only exploration vs. revisit:=true, 2 configs x 2 seeds = 4 runs,
+# ~10 min each -> ~40 min total. Not a statistically powered comparison (2
+# seeds) -- a mechanism-demonstration batch, see docs/ROADMAP.md Week 3
+# done-when criteria.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_revisit.yaml
+batch_name: revisit
+duration_s: 480
+settle_s: 15
+seeds: [101, 102]
+
+common_args:
+  slam: slam
+  mode: frontier
+  rviz: 'false'
+  noise_profile: realistic
+  loop_closure: 'true'
+  map_rebuild: 'false'
+  mapper: octomap
+
+runs:
+  - name: baseline
+    args: {}
+  - name: revisit_on
+    args: {revisit: 'true'}

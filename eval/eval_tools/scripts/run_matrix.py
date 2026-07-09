@@ -45,7 +45,7 @@ DEFAULT_BATCH_ROOT = os.path.join(REPO_ROOT, 'eval', 'runs')
 # demo.launch.py arguments the matrix is allowed to set (bringup/launch/demo.launch.py).
 VALID_KEYS = {
     'slam', 'mode', 'motion', 'mapper', 'noise_profile', 'loop_closure',
-    'map_rebuild', 'rviz',
+    'map_rebuild', 'rviz', 'revisit',
 }
 
 
@@ -308,7 +308,7 @@ def aggregate(batch_dir: str, manifests: list = None) -> None:
 
     fieldnames = ['name', 'seed', 'status', 'final_ate', 'mean_rpe_trans',
                   'final_abs_error', 'final_coverage', 'final_iou', 'final_chamfer',
-                  'lc_count', 'rebuild_count', 'tracebacks']
+                  'lc_count', 'rebuild_count', 'revisit_count', 'tracebacks']
     rows = []
     for m in manifests:
         run_dir = m['run_dir']
@@ -324,6 +324,7 @@ def aggregate(batch_dir: str, manifests: list = None) -> None:
             'final_chamfer': _last(map_csv, 'chamfer'),
             'lc_count': _last(metrics_csv, 'lc_count'),
             'rebuild_count': _last(metrics_csv, 'rebuild_count'),
+            'revisit_count': _last(metrics_csv, 'revisit_count'),
             'tracebacks': m.get('tracebacks', 0),
         })
 

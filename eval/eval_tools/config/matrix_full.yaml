@@ -1,5 +1,5 @@
-# Full evaluation matrix: 7 configs x 5 seeds = 35 runs, ~8 min each
-# (480s sim + ~50s launch/teardown/plot + 15s settle) -> ~5.3h total.
+# Full evaluation matrix: 8 configs x 5 seeds = 40 runs, ~8 min each
+# (480s sim + ~50s launch/teardown/plot + 15s settle) -> ~6h total.
 #
 #   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_full.yaml
 batch_name: full
@@ -49,3 +49,8 @@ runs:
     args: {noise_profile: ideal}
   - name: noise_degraded
     args: {noise_profile: degraded}
+
+  # Uncertainty-triggered revisit planner (the Week 3 active-SLAM
+  # contribution) vs. passive frontier-only exploration.
+  - name: revisit_on
+    args: {revisit: 'true'}
