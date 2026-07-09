@@ -138,7 +138,12 @@ def _count_tracebacks(log_path: str) -> tuple:
     A traceback whose final line is KeyboardInterrupt is benign: a second
     SIGINT arriving during shutdown can land anywhere (even inside a
     library call in a callback) and does not indicate a fault -- see the
-    node teardown fix in pose_graph.py and friends. Anything else, or a
+    node teardown fix in pose_graph.py and friends. Any traceback whose
+    header appears after launch's "user interrupted with ctrl-c (SIGINT)"
+    line is also benign regardless of exception type: teardown races that
+    live upstream (e.g. rclpy's pybind11 layer) can raise other exception
+    types too, and phase (before/after the SIGINT was issued) is the
+    principled signal, not the exception class. Everything else, or a
     traceback that never resolves before EOF, is counted harmful
     (conservative). Log lines are grouped by their `[proc-name-N]` prefix
     so interleaved output from concurrent processes doesn't confuse the
@@ -149,7 +154,9 @@ def _count_tracebacks(log_path: str) -> tuple:
 
     harmful = 0
     benign = 0
-    in_traceback: dict = {}   # prefix -> bool
+    in_traceback: dict = {}         # prefix -> bool
+    after_sigint: dict = {}         # prefix -> bool (traceback header seen post-SIGINT)
+    sigint_seen = False
 
     with open(log_path, errors='replace') as f:
         for raw_line in f:
@@ -159,6 +166,9 @@ def _count_tracebacks(log_path: str) -> tuple:
             else:
                 prefix, content = '', line
 
+            if 'user interrupted with ctrl-c (SIGINT)' in content:
+                sigint_seen = True
+
             if in_traceback.get(prefix):
                 # Blank lines occur mid-traceback too (e.g. a frame whose
                 # source line can't be looked up, such as a C-implemented
@@ -167,7 +177,7 @@ def _count_tracebacks(log_path: str) -> tuple:
                 if content == '' or content.startswith((' ', '\t')):
                     continue
                 in_traceback[prefix] = False   # first non-indented line = exception summary
-                if content.startswith('KeyboardInterrupt'):
+                if content.startswith('KeyboardInterrupt') or after_sigint.get(prefix):
                     benign += 1
                 else:
                     harmful += 1
@@ -175,6 +185,7 @@ def _count_tracebacks(log_path: str) -> tuple:
 
             if content == 'Traceback (most recent call last):':
                 in_traceback[prefix] = True
+                after_sigint[prefix] = sigint_seen
 
     harmful += sum(1 for unresolved in in_traceback.values() if unresolved)
     return harmful, benign
