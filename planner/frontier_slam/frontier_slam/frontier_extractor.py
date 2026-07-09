@@ -11,6 +11,16 @@ On each tick it:
 The goal's Z is set to the robot's current Z — but only for marker placement.
 The waypoint controller maintains its own fixed depth setpoint and ignores
 goal.point.z.
+
+/frontier_slam/suspend (std_msgs/Bool) lets an external planner (see
+revisit_planner.py) take over goal publication temporarily: while suspended,
+_update stops publishing its own goal and mutating GoalManager state (so it
+can't fight the external planner), but _replan keeps running at REPLAN_HZ so
+the externally-adopted goal still gets an obstacle-aware A* path. The
+external goal is adopted from the same /frontier_slam/goal topic this node
+itself publishes to — own-publication callbacks are ignored while not
+suspended, since rclpy delivers a node's own publications to its own
+subscriptions.
 """
 import math
 import os
@@ -21,6 +31,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from geometry_msgs.msg import PointStamped, PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
+from std_msgs.msg import Bool
 
 from frontier_slam.control_utils import yaw_from_quat
 from frontier_slam.frontier_detection import find_frontier_clusters
@@ -64,6 +75,7 @@ class FrontierExtractor(Node):
         self._last_stuck_pct: int = 0
         self._astar_fail_count: int = 0
         self._astar_fail_goal: np.ndarray | None = None
+        self._suspended: bool = False
 
         self._goals = GoalManager(
             min_explore_dist=3.0,
@@ -79,6 +91,8 @@ class FrontierExtractor(Node):
 
         self.create_subscription(OccupancyGrid, '/projected_map', self._map_cb,  1)
         self.create_subscription(Odometry,      odom_topic,      self._odom_cb, 10)
+        self.create_subscription(Bool, '/frontier_slam/suspend', self._suspend_cb, 1)
+        self.create_subscription(PointStamped, '/frontier_slam/goal', self._external_goal_cb, 1)
         self._goal_pub = self.create_publisher(PointStamped, '/frontier_slam/goal', 1)
         self._path_pub = self.create_publisher(Path,         '/frontier_slam/path', 1)
         self._viz      = FrontierVisualizer(self)
@@ -99,6 +113,18 @@ class FrontierExtractor(Node):
         v = msg.twist.twist.linear
         self._robot_speed = math.hypot(v.x, v.y)
 
+    def _suspend_cb(self, msg: Bool) -> None:
+        if msg.data != self._suspended:
+            self.get_logger().info(
+                'Goal publication suspended — external planner active' if msg.data
+                else 'Goal publication resumed')
+        self._suspended = msg.data
+
+    def _external_goal_cb(self, msg: PointStamped) -> None:
+        if not self._suspended:
+            return   # not suspended: this is our own publication looping back, ignore
+        self._current_goal_xy = np.array([msg.point.x, msg.point.y])
+
     def _now(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
 
@@ -116,6 +142,8 @@ class FrontierExtractor(Node):
     def _update(self) -> None:
         if self._map is None or self._robot_pos is None:
             return
+        if self._suspended:
+            return   # external planner owns goal publication and GoalManager state
 
         free_cells, occ_cells, mapped_cells = self._map_stats()
 
