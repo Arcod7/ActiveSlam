@@ -8,6 +8,7 @@ Usage:
   ros2 launch bringup demo.launch.py mode:=frontier mapper:=tsdf
   ros2 launch bringup demo.launch.py motion:=wallfollow mapper:=tsdf   # wall-normal following
   ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic  # SLAM pose + error viz
+  ros2 launch bringup demo.launch.py slam:=slam mode:=frontier revisit:=true  # break off exploration to close loops
   ros2 launch bringup demo.launch.py rviz:=false              # headless (e.g. CI, remote box)
 
 `mode`, `motion`, `mapper`, and `slam` are independent axes — the sim+mapping core is
@@ -86,6 +87,12 @@ def generate_launch_description():
         description='Directory for the eval stack to write TUM/CSV output to '
                     '(slam:=slam; default: a timestamped dir under eval/runs/)',
     )
+    revisit_arg = DeclareLaunchArgument(
+        'revisit', default_value='false', choices=['true', 'false'],
+        description='Uncertainty-triggered revisit planner: suspends frontier '
+                    'exploration to revisit mapped areas when pose uncertainty '
+                    '(D-optimality) exceeds a threshold (mode:=frontier + slam:=slam only)',
+    )
 
     # tf.launch.py (included further below via octomap/tsdf -> pointcloud -> tf)
     # declares use_gt_tf with its own default of 'true'; DeclareLaunchArgument only
@@ -156,6 +163,9 @@ def generate_launch_description():
             'odom_topic': PythonExpression(
                 ["'/slam/odometry' if '", LaunchConfiguration('slam'), "' == 'slam' "
                  "else '/StoneFish/Odometry'"]),
+            'revisit': PythonExpression(
+                ["'true' if '", LaunchConfiguration('revisit'), "' == 'true' and '",
+                 LaunchConfiguration('slam'), "' == 'slam' else 'false'"]),
         }.items(),
         condition=LaunchConfigurationEquals('mode', 'frontier'),
     )
@@ -213,6 +223,17 @@ def generate_launch_description():
         condition=LaunchConfigurationEquals('motion', 'wallfollow'),
     )
 
+    revisit_needs_slam_warning = LogInfo(
+        msg=(
+            'revisit=true requires slam:=slam (the trigger consumes /slam/dopt, only '
+            'published by the SLAM pose graph) — the revisit planner will not be started.'
+        ),
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('revisit'), "' == 'true' and '",
+            LaunchConfiguration('slam'), "' == 'none'",
+        ])),
+    )
+
     map_rebuild_octomap_warning = LogInfo(
         msg=(
             'map_rebuild=true has no effect with mapper:=octomap: octomap_server raycasts '
@@ -253,8 +274,13 @@ def generate_launch_description():
 
     return LaunchDescription([
         mode_arg, motion_arg, mapper_arg, rviz_arg, slam_arg, noise_profile_arg,
-        loop_closure_arg, noise_seed_arg, map_rebuild_arg, output_dir_arg,
+        loop_closure_arg, noise_seed_arg, map_rebuild_arg, output_dir_arg, revisit_arg,
         set_use_gt_tf, set_sonar_noise,
+        # revisit_needs_slam_warning reads the top-level 'revisit'/'slam' configs and
+        # must be visited BEFORE frontier_exploration: that include temporarily
+        # rescopes 'revisit' (Push/Pop) for its own sub-launch, and the Pop isn't
+        # guaranteed to have completed by the time a later list entry is visited.
+        revisit_needs_slam_warning,
         octomap_stack, tsdf_stack, gt_map_stack,
         slam_stack, eval_stack, slam_hint,
         teleop_hint, frontier_exploration,

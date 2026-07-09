@@ -82,6 +82,7 @@ ros2 launch bringup demo.launch.py slam:=slam loop_closure:=false             # 
 ros2 launch bringup demo.launch.py slam:=slam mapper:=tsdf map_rebuild:=true  # rebuild belief TSDF after big closures
 ros2 launch bringup demo.launch.py slam:=slam noise_seed:=7                   # reproducible, decorrelated noise draws
 ros2 launch bringup demo.launch.py slam:=slam output_dir:=/path/to/run       # label eval output instead of a timestamp
+ros2 launch bringup demo.launch.py slam:=slam mode:=frontier revisit:=true   # break off exploration to close loops when uncertainty grows
 ```
 
 `slam:=none` (default) broadcasts pose from ground truth, as before.
