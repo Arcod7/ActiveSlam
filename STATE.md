@@ -1,6 +1,6 @@
 # ActiveSlam SLAM Backend — Current State
 
-Mutable snapshot. Overwrite, never append. Last updated: 2026-07-06.
+Mutable snapshot. Overwrite, never append. Last updated: 2026-07-09.
 
 Change log → `Progress.md`. Detailed design + as-built deltas → `docs/SLAM_PLAN.md`.
 
@@ -136,13 +136,17 @@ python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/<batch_
 - ✅ Sensor fusion chain (pressure+IMU+DVL→dead_reckoning): profile-dependent drift confirmed via standalone rclpy harness
 - ✅ `ScanMatcher` gating: correctly rejects a synthetic zero-overlap match despite `converged=True`
 - ✅ Pose graph + loop closure logic: synthetic square-loop test (wiring/logic sanity check only, not representative of real numbers — see caveat below)
-- ✅ **Real benchmark** (`demo.launch.py slam:=slam mode:=frontier noise_profile:=realistic`,
-  real Stonefish sim, 157s / 116 keyframes / 12 loop closures, zero exceptions): final
-  cumulative ATE **0.58 m**, peak instantaneous error 0.95 m, mean RPE (translation) 0.12 m.
-  All 12 closures fired in two early clusters; zero in the final ~63s (frontier exploration
-  moved past the 5 m loop-closure radius) — loop closure is opportunistic-only, it never makes
-  the robot revisit anything. One run, one unseeded noise draw, predates both the re-detect fix
-  (Phase 6/audit) and the Phase 15 sonar noise model — due for a rerun with both in place.
+- ✅ **Real benchmark, refreshed** (`demo.launch.py slam:=slam mode:=frontier
+  noise_profile:=realistic noise_seed:=42`, real Stonefish sim, 600s / 94 metrics
+  rows / 35 loop closures, post re-detect fix and incl. the Phase 15 sonar noise
+  model): final cumulative ATE **0.5356 m**, final instantaneous error 0.7908 m,
+  mean RPE (translation) 0.1137 m, map coverage 0.9651, occupied-cell IoU 0.5194.
+  Seeded and reproducible (`noise_seed:=42`). The earlier 0.58 m / 157 s figure is
+  superseded — it predated both the re-detect fix and the sonar noise model, so
+  the two numbers happen to land close but aren't measuring the same system.
+  Loop closure remains opportunistic-only — the robot never revisits anything
+  on its own; closing this gap is the Week 3 active-SLAM contribution (see
+  "Not yet implemented" below).
 - ✅ Regression check: `slam:=none` (default) unchanged, no SLAM nodes started, `odom_tf_sync` still the TF source
 - ✅ Ground-truth reference map (`gt_map.launch.py`): live-verified both `mapper:=octomap`
   and `mapper:=tsdf`. Not yet visually confirmed in RViz (headless verification only, no GUI here).
@@ -168,8 +172,22 @@ python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/<batch_
   correctly and rejects invalid configs (`motion:=wallfollow` without `mapper:=tsdf`); a real
   2-run/120s mini-batch produced complete per-run + batch-level artifacts including a clean
   back-to-back Stonefish restart.
-- 🔲 Not yet run: the actual 35-run full matrix (`matrix_full.yaml`); long-duration
-  (10+ min) single session; `evo_ape`/`evo_rpe` cross-check against the written TUM files.
+- ✅ The 35-run full matrix (`matrix_full.yaml`, 7 configs × 5 seeds) has been run;
+  results directly motivated two follow-on fixes: loop closure barely moved ATE at
+  this course/duration (the revisit planner addresses this), and `map_rebuild`
+  measurably hurt TSDF map quality (coverage 0.77→0.5, chamfer roughly doubled) —
+  a rebuild-fidelity fix is in progress. A 10+ minute single session is also now
+  done (the 600 s baseline above). Still open: `evo_ape`/`evo_rpe` cross-check
+  against the written TUM files.
+- ✅ **Teardown hardening**: every node now tolerates a second SIGINT during
+  shutdown without printing a traceback (previously a stray `KeyboardInterrupt`
+  inside `destroy_node()`'s `finally` block would escape uncaught), and
+  `run_matrix.py`'s validity check classifies a traceback ending in
+  `KeyboardInterrupt` as benign rather than `crashed_soft`. This means the prior
+  full-matrix batch's `crashed_soft` statuses were an artifact of teardown noise,
+  not real failures — the fresh 600 s baseline confirms zero harmful tracebacks
+  under the same shutdown sequence. `run_matrix` statuses are now meaningful going
+  forward; old manifests are left as historical record, not retroactively fixed.
 - ⚠️ The synthetic square-loop test's "70% ATE reduction" (Progress.md Phase 6) is superseded
   by the real benchmark above — its dense, easily-overlapping synthetic point clouds make loop
   closure fire far more readily than real depth-camera data does. Use the 0.58 m figure, not 70%.

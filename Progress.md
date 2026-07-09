@@ -459,3 +459,59 @@ before/after). A real mini-batch (2 runs x 120 s) produced every expected
 per-run artifact plus a valid summary/comparison at the batch level,
 including a clean back-to-back Stonefish restart; `--aggregate-only`
 re-runs cleanly against existing manifests.
+
+## Phase 19 — Teardown hardening + refreshed 600 s baseline
+
+**Date**: 2026-07-09
+**Files**: all 17 node `main()` functions (`slam/slam_backend/slam_backend/`,
+`planner/frontier_slam/frontier_slam/`, `eval/eval_tools/eval_tools/`,
+`slam/stonefish_groundtruth_mapping/stonefish_groundtruth_mapping/`),
+`eval/eval_tools/scripts/run_matrix.py`, root `STATE.md`
+
+**Objective**: The full 35-run matrix from Phase 18 came back with every single
+run marked `crashed_soft`. Every node in the stack printed a teardown traceback
+on `ros2 launch`'s SIGINT — `ExternalShutdownException` escaping an unguarded
+`rclpy.spin()`, then a second, unconditional `rclpy.shutdown()` call raising
+`RCLError: rcl_shutdown already called`. None of it was a real fault, but
+`run_matrix.py` couldn't tell the difference, so `crashed_soft` was
+meaningless noise on every batch run to date.
+
+**What changed**: All 17 node `main()`s were rewritten to a uniform pattern —
+`except (KeyboardInterrupt, ExternalShutdownException): pass` around `spin()`,
+then `finally: node.destroy_node(); rclpy.try_shutdown()` — which fixed the
+common case. Live testing then surfaced a second, rarer race: a *second* SIGINT
+landing while a node was still inside `destroy_node()` in that `finally` block
+raised `KeyboardInterrupt` out of `main()` uncaught. Fixed by wrapping the
+`finally` body in a nested `try/except KeyboardInterrupt: pass` (also covering
+the three nodes — `frontier_extractor`, `wall_follower`, `waypoint_controller`
+— that close a CSV session log there too).
+
+Separately, `run_matrix.py`'s validity check counted *any* line containing
+`Traceback` as a crash. New `_count_tracebacks()` groups log lines by their
+`[proc-name-N]` prefix and walks each traceback block to its actual exception
+line: a block ending in `KeyboardInterrupt` is now benign (a second SIGINT
+during shutdown, not a fault), anything else — or a block that never resolves
+before EOF — stays harmful, and `status=crashed_soft` keys on harmful count
+only. Building the classifier caught a real parsing bug of its own: a blank
+line can appear mid-traceback (e.g. a C-implemented property frame with no
+source line), and the first version misread it as the exception summary,
+mislabeling several genuinely-benign `KeyboardInterrupt` cases as harmful.
+
+Finally, reran the seeded baseline properly: 600 s, `noise_seed:=42`,
+`realistic` profile (including the sonar noise model), on the now-clean
+teardown code — replacing the 157 s/unseeded/pre-sonar-noise figure from
+Phase 12.
+
+**Observed impact**: ✅ A 60 s `slam:=slam mode:=frontier mapper:=tsdf
+map_rebuild:=true` launch torn down with a single SIGINT now logs zero
+`Traceback` lines and zero `process has died` entries. The new classifier
+verified against real logs: the fresh 600 s baseline reports `(0 harmful, 1
+benign)`; an old pre-fix batch log correctly still reports harmful tracebacks
+(7, from the now-impossible double-shutdown `RCLError` chain) rather than
+being retroactively whitewashed — old manifests stay as an accurate historical
+record. Synthetic checks cover a genuine crash, an unterminated traceback at
+EOF, and interleaved concurrent-process log output. Refreshed baseline: final
+ATE **0.5356 m**, final instantaneous error 0.7908 m, mean RPE (translation)
+0.1137 m, coverage 0.9651, IoU 0.5194, 35 loop closures over 94 metrics rows —
+all 35 loop closures were, again, opportunistic (no autonomous revisit
+behavior exists yet).
