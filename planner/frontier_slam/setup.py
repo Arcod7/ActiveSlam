@@ -25,6 +25,7 @@ setup(
             'waypoint_controller = frontier_slam.waypoint_controller:main',
             'tsdf_mapper         = frontier_slam.tsdf_mapper:main',
             'wall_follower       = frontier_slam.wall_follower:main',
+            'revisit_planner     = frontier_slam.revisit_planner:main',
         ],
     },
 )
