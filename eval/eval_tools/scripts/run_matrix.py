@@ -132,13 +132,58 @@ def _count_data_rows(csv_path: str) -> int:
         return max(0, sum(1 for _ in f) - 1)   # minus header
 
 
+def _count_tracebacks(log_path: str) -> tuple:
+    """Return (harmful, benign) traceback counts from a launch.log.
+
+    A traceback whose final line is KeyboardInterrupt is benign: a second
+    SIGINT arriving during shutdown can land anywhere (even inside a
+    library call in a callback) and does not indicate a fault -- see the
+    node teardown fix in pose_graph.py and friends. Anything else, or a
+    traceback that never resolves before EOF, is counted harmful
+    (conservative). Log lines are grouped by their `[proc-name-N]` prefix
+    so interleaved output from concurrent processes doesn't confuse the
+    per-traceback state machine.
+    """
+    if not os.path.exists(log_path):
+        return 0, 0
+
+    harmful = 0
+    benign = 0
+    in_traceback: dict = {}   # prefix -> bool
+
+    with open(log_path, errors='replace') as f:
+        for raw_line in f:
+            line = raw_line.rstrip('\n')
+            if line.startswith('[') and '] ' in line:
+                prefix, content = line.split('] ', 1)
+            else:
+                prefix, content = '', line
+
+            if in_traceback.get(prefix):
+                # Blank lines occur mid-traceback too (e.g. a frame whose
+                # source line can't be looked up, such as a C-implemented
+                # property) -- only a non-empty, non-indented line is the
+                # actual exception summary.
+                if content == '' or content.startswith((' ', '\t')):
+                    continue
+                in_traceback[prefix] = False   # first non-indented line = exception summary
+                if content.startswith('KeyboardInterrupt'):
+                    benign += 1
+                else:
+                    harmful += 1
+                continue
+
+            if content == 'Traceback (most recent call last):':
+                in_traceback[prefix] = True
+
+    harmful += sum(1 for unresolved in in_traceback.values() if unresolved)
+    return harmful, benign
+
+
 def _check_validity(output_dir: str, log_path: str) -> dict:
     metrics_rows = _count_data_rows(os.path.join(output_dir, 'metrics.csv'))
     map_metrics_rows = _count_data_rows(os.path.join(output_dir, 'map_metrics.csv'))
-    tracebacks = 0
-    if os.path.exists(log_path):
-        with open(log_path, errors='replace') as f:
-            tracebacks = sum(1 for line in f if 'Traceback' in line)
+    tracebacks, benign_tracebacks = _count_tracebacks(log_path)
 
     if metrics_rows == 0:
         status = 'no_data'
@@ -150,7 +195,8 @@ def _check_validity(output_dir: str, log_path: str) -> dict:
         status = 'ok'
 
     return {'metrics_rows': metrics_rows, 'map_metrics_rows': map_metrics_rows,
-            'tracebacks': tracebacks, 'status': status}
+            'tracebacks': tracebacks, 'benign_tracebacks': benign_tracebacks,
+            'status': status}
 
 
 def run_one(args: dict, output_dir: str, seed: int, duration_s: float,
