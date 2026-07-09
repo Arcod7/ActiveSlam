@@ -379,26 +379,32 @@ class PoseGraphNode(Node):
                 self._rejected_edges.append((kf.index, current_idx))
         return closures
 
+    def _refresh_pose(self, kf, T_new: np.ndarray) -> None:
+        """Overwrite kf.T_world, first recording the pose it had as of the
+        last rebuild baseline (or, absent one yet, the first time this
+        keyframe is refreshed here) into _rebuild_old_poses -- the rebuild
+        trigger needs both endpoints to interpolate a correction from. This
+        is the ONLY place kf.T_world may be assigned outside keyframe
+        creation: _find_moved_keyframes and _redetect_and_apply's bulk
+        iSAM2 refresh both funnel through it, since either one silently
+        moving a keyframe without this capture would leave a later rebuild
+        computing its correction against a stale baseline."""
+        self._rebuild_old_poses.setdefault(kf.index, kf.T_world.copy())
+        kf.T_world = T_new
+
     def _find_moved_keyframes(self, result_values, threshold_m=0.1, threshold_rad=0.05):
         """Returns [(index, dist, angle), ...] for keyframes that shifted more
         than the threshold; dist/angle are also read by the map-rebuild
         trigger (a coarser threshold on the same numbers, see _add_keyframe)."""
         moved = []
         for kf in self._keyframes:
-            # Record the pose as of the last rebuild baseline (or, absent one
-            # yet, the first time this keyframe is seen here) before the
-            # in-place overwrite below loses it -- the rebuild trigger needs
-            # both endpoints to interpolate a correction from, and a run of
-            # small per-update deltas each under threshold_m/rad could still
-            # sum past it between rebuilds if this weren't unconditional.
-            self._rebuild_old_poses.setdefault(kf.index, kf.T_world.copy())
             T_new = result_values.atPose3(kf.symbol).matrix()
             T_delta = np.linalg.inv(kf.T_world) @ T_new
             dist = np.linalg.norm(T_delta[:3, 3])
             angle = np.arccos(np.clip((np.trace(T_delta[:3, :3]) - 1) / 2, -1, 1))
             if dist > threshold_m or angle > threshold_rad:
                 moved.append((kf.index, dist, angle))
-            kf.T_world = T_new
+            self._refresh_pose(kf, T_new)
         return moved
 
     def _redetect_and_apply(self, moved_indices):
@@ -422,7 +428,7 @@ class PoseGraphNode(Node):
             self._isam.update(lc_graph, gtsam.Values())
             result_values = self._isam.calculateEstimate()
             for kf in self._keyframes:
-                kf.T_world = result_values.atPose3(kf.symbol).matrix()
+                self._refresh_pose(kf, result_values.atPose3(kf.symbol).matrix())
 
     # ------------------------------------------------------------------
     # Map rebuild (parameterized; see module docstring / STATE.md)
