@@ -150,6 +150,10 @@ class PoseGraphNode(Node):
         self._path_dr_msgs = []
         self._path_slam_msgs = []
         self._rejected_edges = []   # [(idx_a, idx_b)] for viz only, cleared each keyframe
+        self._closed_pairs: set = set()   # frozenset({i, j}) per accepted closure edge --
+        # dedupes a pair across initial detection (recorded only under the newer
+        # keyframe) and _redetect_and_apply (which re-scans from an older keyframe's
+        # side and would otherwise re-add the same physical edge under it too).
 
         self.get_logger().info(
             f"PoseGraph started. noise_profile={profile.name}, "
@@ -353,6 +357,9 @@ class PoseGraphNode(Node):
                 continue
             if abs(current_idx - kf.index) < self.loop_closure_min_gap:
                 continue
+            pair = frozenset((current_idx, kf.index))
+            if pair in self._closed_pairs:
+                continue
             dist = np.linalg.norm(current_pos - kf.T_world[:3, 3])
             if dist > self.loop_closure_radius_m:
                 continue
@@ -362,6 +369,7 @@ class PoseGraphNode(Node):
             if ScanMatcher.is_acceptable(result, self.min_inlier_ratio,
                                           self.min_inlier_count, self.max_error_per_inlier):
                 closures.append((kf.index, result['T_target_source'], result['error_per_inlier']))
+                self._closed_pairs.add(pair)
             else:
                 self._rejected_edges.append((kf.index, current_idx))
         return closures
@@ -389,11 +397,9 @@ class PoseGraphNode(Node):
         lc_graph = gtsam.NonlinearFactorGraph()
         for idx in moved_indices:
             kf = self._keyframes[idx]
-            already = {i for i, _, _ in kf.loop_closures}
-            new_lcs = [
-                lc for lc in self._detect_loop_closures(idx, kf.cloud, kf.T_world)
-                if lc[0] not in already
-            ]
+            # _detect_loop_closures already excludes pairs in self._closed_pairs,
+            # so no separate "already found" filter is needed here.
+            new_lcs = self._detect_loop_closures(idx, kf.cloud, kf.T_world)
             for lc_idx, lc_T, lc_err in new_lcs:
                 lc_graph.add(gtsam.BetweenFactorPose3(
                     self._keyframes[lc_idx].symbol, kf.symbol, gtsam.Pose3(lc_T),
