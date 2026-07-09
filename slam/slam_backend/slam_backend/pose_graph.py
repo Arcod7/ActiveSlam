@@ -19,9 +19,9 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.time import Time
 from nav_msgs.msg import Odometry, Path
-from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Point
-from sensor_msgs.msg import PointCloud2, PointField
-from std_msgs.msg import Float64, Int32, ColorRGBA, Header
+from geometry_msgs.msg import PoseWithCovarianceStamped, Point
+from sensor_msgs.msg import PointCloud2
+from std_msgs.msg import Float64, Int32, ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
 from sensor_msgs_py import point_cloud2
@@ -89,9 +89,10 @@ class PoseGraphNode(Node):
         self.cov_ellipsoid_stride = p('cov_ellipsoid_stride').value
         self.cov_ellipsoid_n_sigma = p('cov_ellipsoid_n_sigma').value
         self.map_rebuild_enabled = p('map_rebuild_enabled').value
-        self.rebuild_min_move_m = p('rebuild_min_move_m').value
-        self.rebuild_min_move_rad = p('rebuild_min_move_rad').value
-        self.rebuild_min_interval_s = p('rebuild_min_interval_s').value
+        # rebuild_min_move_m/rad and rebuild_min_interval_s are intentionally
+        # NOT cached here -- they're read live via get_parameter() at point of
+        # use so `ros2 param set` takes effect without a restart (needed for
+        # forced-trigger tests).
 
         yaml_path = p('noise_profile_path').value
         if not yaml_path or not os.path.exists(yaml_path):
@@ -134,18 +135,20 @@ class PoseGraphNode(Node):
         self.pub_dopt = self.create_publisher(Float64, '/slam/dopt', 10)
 
         # Map rebuild (parameterized, off by default): after a big loop
-        # closure moves keyframes, stream every keyframe's cloud back out at
-        # its CORRECTED world pose so a mapper (tsdf_mapper.py) can clear and
-        # re-integrate from scratch instead of keeping stale pre-closure
-        # geometry. Paced by a timer rather than published in one burst.
+        # closure moves keyframes, publish only the per-keyframe pose
+        # corrections (old + new path, equal length, paired by index) --
+        # tsdf_mapper.py keeps its own full scan cache and replays it with
+        # these corrections applied, rather than pose_graph streaming every
+        # keyframe scan back out (that only replayed keyframes, ~1/m, and
+        # discarded everything in between -- see docs/plans/
+        # WP0_WP1_WP2_revisit_rebuild.md WP2).
         self.pub_rebuild_begin = self.create_publisher(Int32, '/slam/rebuild/begin', 10)
-        self.pub_rebuild_scan = self.create_publisher(PointCloud2, '/slam/rebuild/scan', 512)
-        self.pub_rebuild_origin = self.create_publisher(PoseStamped, '/slam/rebuild/origin', 512)
+        self.pub_rebuild_path_old = self.create_publisher(Path, '/slam/rebuild/path_old', 10)
+        self.pub_rebuild_path_new = self.create_publisher(Path, '/slam/rebuild/path_new', 10)
         self.pub_rebuild_count = self.create_publisher(Int32, '/slam/rebuild_count', 10)
-        self._rebuild_queue: list = []
         self._rebuild_count = 0
         self._last_rebuild_time = None
-        self.create_timer(0.02, self._drain_rebuild_queue)
+        self._rebuild_old_poses: dict = {}   # idx -> T_world at last correction, cleared per rebuild
 
         self._path_dr_msgs = []
         self._path_slam_msgs = []
@@ -328,7 +331,9 @@ class PoseGraphNode(Node):
         if self.map_rebuild_enabled and moved:
             max_dist = max(dist for _, dist, _ in moved)
             max_angle = max(angle for _, _, angle in moved)
-            if max_dist > self.rebuild_min_move_m or max_angle > self.rebuild_min_move_rad:
+            rebuild_min_move_m = float(self.get_parameter('rebuild_min_move_m').value)
+            rebuild_min_move_rad = float(self.get_parameter('rebuild_min_move_rad').value)
+            if max_dist > rebuild_min_move_m or max_angle > rebuild_min_move_rad:
                 self._maybe_trigger_rebuild(max_dist, max_angle, len(moved))
 
         # Marginal covariance is queried only for the node just added — walking
@@ -380,6 +385,13 @@ class PoseGraphNode(Node):
         trigger (a coarser threshold on the same numbers, see _add_keyframe)."""
         moved = []
         for kf in self._keyframes:
+            # Record the pose as of the last rebuild baseline (or, absent one
+            # yet, the first time this keyframe is seen here) before the
+            # in-place overwrite below loses it -- the rebuild trigger needs
+            # both endpoints to interpolate a correction from, and a run of
+            # small per-update deltas each under threshold_m/rad could still
+            # sum past it between rebuilds if this weren't unconditional.
+            self._rebuild_old_poses.setdefault(kf.index, kf.T_world.copy())
             T_new = result_values.atPose3(kf.symbol).matrix()
             T_delta = np.linalg.inv(kf.T_world) @ T_new
             dist = np.linalg.norm(T_delta[:3, 3])
@@ -416,64 +428,38 @@ class PoseGraphNode(Node):
     # Map rebuild (parameterized; see module docstring / STATE.md)
     # ------------------------------------------------------------------
     def _maybe_trigger_rebuild(self, max_dist: float, max_angle: float, n_moved: int):
-        """Snapshot every keyframe's cloud at its CURRENT (corrected) world
-        pose and queue it for paced publishing to /slam/rebuild/{scan,origin}.
-        Non-keyframe scans between keyframes are not replayed and are lost on
-        rebuild — accepted, since keyframes are ~1/m or ~17 deg apart and the
-        live /cloud_in stream keeps integrating into the fresh volume
-        throughout the drain (tsdf_mapper.py)."""
-        if self._rebuild_queue:
-            return   # still draining a previous rebuild
+        """Publish the per-keyframe pose correction (old world pose -> new
+        corrected world pose) as two paired nav_msgs/Path messages, equal
+        length, index-for-index. tsdf_mapper.py keeps its own cache of every
+        integrated scan and re-integrates it with these corrections applied --
+        pose_graph no longer streams scans itself, so every scan between
+        keyframes is preserved on rebuild, not just the keyframe ones."""
         now = self.get_clock().now().nanoseconds * 1e-9
+        rebuild_min_interval_s = float(self.get_parameter('rebuild_min_interval_s').value)
         if (self._last_rebuild_time is not None
-                and now - self._last_rebuild_time < self.rebuild_min_interval_s):
+                and now - self._last_rebuild_time < rebuild_min_interval_s):
             return
         self._last_rebuild_time = now
         self._rebuild_count += 1
         self.pub_rebuild_count.publish(Int32(data=self._rebuild_count))
-        self._rebuild_queue = list(self._keyframes)
-        self.pub_rebuild_begin.publish(Int32(data=len(self._rebuild_queue)))
+
+        stamp = self._keyframes[-1].stamp
+        path_old, path_new = Path(), Path()
+        path_old.header.stamp = path_new.header.stamp = stamp
+        path_old.header.frame_id = path_new.header.frame_id = self.world_frame
+        for kf in self._keyframes:
+            T_old = self._rebuild_old_poses.get(kf.index, kf.T_world)
+            path_old.poses.append(matrix_to_pose_stamped(T_old, kf.stamp, self.world_frame))
+            path_new.poses.append(matrix_to_pose_stamped(kf.T_world, kf.stamp, self.world_frame))
+
+        self.pub_rebuild_begin.publish(Int32(data=len(self._keyframes)))
+        self.pub_rebuild_path_old.publish(path_old)
+        self.pub_rebuild_path_new.publish(path_new)
+        self._rebuild_old_poses.clear()   # next rebuild's corrections compose on top of this one
+
         self.get_logger().info(
-            f"Map rebuild #{self._rebuild_count}: {len(self._rebuild_queue)} keyframes "
+            f"Map rebuild #{self._rebuild_count}: {len(self._keyframes)} keyframe corrections "
             f"({n_moved} moved, max move {max_dist:.2f}m / {np.degrees(max_angle):.1f}deg)")
-
-    def _drain_rebuild_queue(self):
-        # rclpy.ok() guard: this timer can fire while the context is tearing
-        # down mid-drain, and publishing then raises RCLError out of spin.
-        if not self._rebuild_queue or not rclpy.ok():
-            return
-        kf = self._rebuild_queue.pop(0)
-        R, t = kf.T_world[:3, :3], kf.T_world[:3, 3]
-        points_world = (R @ kf.cloud.T).T + t
-        origin = R @ self._T_base_cam[:3, 3] + t
-
-        header = Header()
-        header.stamp = kf.stamp
-        header.frame_id = self.world_frame
-
-        scan_msg = PointCloud2()
-        scan_msg.header = header
-        scan_msg.height = 1
-        scan_msg.width = len(points_world)
-        scan_msg.is_dense = True
-        scan_msg.is_bigendian = False
-        scan_msg.point_step = 12
-        scan_msg.row_step = 12 * len(points_world)
-        scan_msg.fields = [
-            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
-            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
-            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
-        ]
-        scan_msg.data = points_world.astype(np.float32).tobytes()
-        self.pub_rebuild_scan.publish(scan_msg)
-
-        origin_msg = PoseStamped()
-        origin_msg.header = header
-        origin_msg.pose.position.x = float(origin[0])
-        origin_msg.pose.position.y = float(origin[1])
-        origin_msg.pose.position.z = float(origin[2])
-        origin_msg.pose.orientation.w = 1.0
-        self.pub_rebuild_origin.publish(origin_msg)
 
     # ------------------------------------------------------------------
     # Publishing
