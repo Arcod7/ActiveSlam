@@ -33,17 +33,21 @@ Published topics:
                            observation floor, green = heavily observed.
 """
 
+from collections import OrderedDict
+
 import numpy as np
 import rclpy
+import small_gicp
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point, PoseStamped
+from nav_msgs.msg import Path
 from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import ColorRGBA, Header, Int32
 from visualization_msgs.msg import Marker, MarkerArray
 import tf2_ros
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Rotation, Slerp
 from vdbfusion import VDBVolume
 
 
@@ -76,6 +80,10 @@ class TSDFMapper(Node):
         # and never set true on the ground-truth instance (tsdf_mapper_gt) --
         # only the belief map should ever be reset+re-integrated.
         self.declare_parameter('enable_rebuild', False)
+        self.declare_parameter('cache_voxel_size', 0.1)
+        self.declare_parameter('cache_max_scans', 6000)
+        self.declare_parameter('rebuild_chunk_scans', 10)
+        self.declare_parameter('rebuild_tick_s', 0.02)
 
         self._world_frame  = self.get_parameter('world_frame').value
         self._cloud_frame  = self.get_parameter('cloud_frame').value
@@ -116,15 +124,26 @@ class TSDFMapper(Node):
         self.create_subscription(PointCloud2, '/cloud_in', self._cloud_cb, 5)
 
         self._enable_rebuild = bool(self.get_parameter('enable_rebuild').value)
-        self._rebuild_expected = 0
-        self._rebuild_done = 0
-        self._rebuild_pending = {}   # stamp key -> {'scan': (N,3) array, 'origin': (3,) array}
+        self._cache_voxel_size = float(self.get_parameter('cache_voxel_size').value)
+        self._cache_max_scans = int(self.get_parameter('cache_max_scans').value)
+        self._rebuild_chunk_scans = int(self.get_parameter('rebuild_chunk_scans').value)
+        # stamp key (sec, nsec) -> [pts_cam_f32 (M,3) downsampled, T_world_cam (4,4)].
+        # Points are cached in CAMERA frame, not world -- a rebuild correction
+        # only ever needs to update T (see _write_back_cache), the cached
+        # points themselves are frame-invariant until re-projected at replay.
+        self._scan_cache: OrderedDict = OrderedDict()
+        self._pending_path_old = None
+        self._pending_path_new = None
+        self._replay_queue: list = []
         if self._enable_rebuild:
             self.create_subscription(Int32, '/slam/rebuild/begin', self._rebuild_begin_cb, 10)
-            self.create_subscription(PointCloud2, '/slam/rebuild/scan', self._rebuild_scan_cb, 512)
-            self.create_subscription(PoseStamped, '/slam/rebuild/origin', self._rebuild_origin_cb, 512)
+            self.create_subscription(Path, '/slam/rebuild/path_old', self._rebuild_path_old_cb, 10)
+            self.create_subscription(Path, '/slam/rebuild/path_new', self._rebuild_path_new_cb, 10)
+            rebuild_tick_s = float(self.get_parameter('rebuild_tick_s').value)
+            self.create_timer(rebuild_tick_s, self._replay_tick)
             self.get_logger().info(
-                'Map rebuild consumer enabled: will reset+re-integrate on /slam/rebuild/begin')
+                'Map rebuild consumer enabled: will reset+re-integrate cached scans '
+                'on a validated /slam/rebuild/path_old + path_new pair')
 
         self._cloud_pub   = self.create_publisher(PointCloud2, '/tsdf/surface_cloud',   1)
         self._normals_pub = self.create_publisher(MarkerArray, '/tsdf/surface_normals',  1)
@@ -185,65 +204,99 @@ class TSDFMapper(Node):
 
         self._volume.integrate(pts_world, origin)
 
+        if self._enable_rebuild:
+            self._cache_scan(msg.header.stamp, pts_cam, T)
+
         self.get_logger().info(
             f'Integrated {len(pts_world)} pts  cam=({t[0]:.2f},{t[1]:.2f},{t[2]:.2f})',
             throttle_duration_sec=2.0)
 
+    def _cache_scan(self, stamp, pts_cam: np.ndarray, T_world_cam: np.ndarray) -> None:
+        """Downsample and store this scan (camera frame) + its capture pose,
+        FIFO-evicting the oldest entry once over cache_max_scans. Downsampled
+        here (not raw) to bound memory: ~6-30 KB/scan at cache_voxel_size=0.1
+        depending on scene density, so cache_max_scans=6000 caps this well
+        under cache_max_scans * 30 KB ~= 180 MB worst case."""
+        cloud, _tree = small_gicp.preprocess_points(
+            pts_cam, downsampling_resolution=self._cache_voxel_size)
+        pts_down = cloud.points()[:, :3].astype(np.float32)
+        key = (stamp.sec, stamp.nanosec)
+        self._scan_cache[key] = (pts_down, T_world_cam)
+        _evict_fifo(self._scan_cache, self._cache_max_scans)
+
     # ────────────────────────────────────────────────────────────────────
     # Map rebuild consumer (pose_graph.py is the publisher side)
     #
-    # /slam/rebuild/begin gives the bundle size and resets the volume; each
-    # keyframe then arrives as a (scan, origin) pair on /slam/rebuild/scan +
-    # /slam/rebuild/origin, matched by identical header.stamp. Both clouds
-    # are already in world_ned (pose_graph corrected them before publishing),
-    # so no TF lookup is needed here -- integrate() takes them as-is, same
-    # call as the live _cloud_cb path. The live /cloud_in stream keeps
-    # integrating into the same (fresh) volume concurrently throughout.
+    # pose_graph publishes only the per-keyframe pose correction (old world
+    # pose -> new corrected world pose), not scans -- this node keeps its own
+    # cache of every integrated scan (_cache_scan, camera frame) and replays
+    # ALL of them with an interpolated correction applied, not just the ~1/m
+    # keyframe scans. /slam/rebuild/begin is informational only (logs the
+    # expected keyframe count); the actual trigger is a validated
+    # path_old/path_new pair of equal, nonzero length.
     # ────────────────────────────────────────────────────────────────────
 
     def _rebuild_begin_cb(self, msg: Int32) -> None:
-        n = int(msg.data)
-        if n <= 0:
-            self.get_logger().warn(f'Rebuild begin with N={n}, ignoring')
+        self.get_logger().info(f'Map rebuild starting: {int(msg.data)} keyframes moved')
+
+    def _rebuild_path_old_cb(self, msg: Path) -> None:
+        self._pending_path_old = msg
+        self._maybe_process_rebuild()
+
+    def _rebuild_path_new_cb(self, msg: Path) -> None:
+        self._pending_path_new = msg
+        self._maybe_process_rebuild()
+
+    def _maybe_process_rebuild(self) -> None:
+        path_old, path_new = self._pending_path_old, self._pending_path_new
+        if path_old is None or path_new is None:
             return
-        self._rebuild_expected = n
-        self._rebuild_done = 0
-        self._rebuild_pending = {}
+        self._pending_path_old = None
+        self._pending_path_new = None
+        if len(path_old.poses) != len(path_new.poses) or len(path_old.poses) == 0:
+            self.get_logger().warn(
+                f'Rebuild path pair mismatched (old={len(path_old.poses)}, '
+                f'new={len(path_new.poses)}), ignoring')
+            return
+
+        keyframe_ts = np.array(
+            [_stamp_to_float(p.header.stamp) for p in path_old.poses])
+        order = np.argsort(keyframe_ts)
+        keyframe_ts = keyframe_ts[order]
+        T_olds = [_posestamped_to_matrix(path_old.poses[i]) for i in order]
+        T_news = [_posestamped_to_matrix(path_new.poses[i]) for i in order]
+        corrections = _compute_corrections(T_olds, T_news)
+
+        self._write_back_cache(keyframe_ts, corrections)
+
         self._volume = VDBVolume(self._voxel_size, self._trunc, space_carving=self._space_carving)
-        self.get_logger().info(f'Map rebuild starting: expecting {n} keyframe scans')
+        self._replay_queue = list(self._scan_cache.keys())
+        self.get_logger().info(
+            f'Map rebuild: {len(keyframe_ts)} keyframe corrections, replaying '
+            f'{len(self._replay_queue)} cached scans')
 
-    def _rebuild_scan_cb(self, msg: PointCloud2) -> None:
-        if self._rebuild_expected == 0:
-            return
-        pts = _parse_pointcloud2(msg)
-        key = (msg.header.stamp.sec, msg.header.stamp.nanosec)
-        self._rebuild_pending.setdefault(key, {})['scan'] = (
-            pts if pts is not None else np.zeros((0, 3)))
-        self._maybe_integrate_rebuild_pair(key)
+    def _write_back_cache(self, keyframe_ts: np.ndarray, corrections: np.ndarray) -> None:
+        for key, (pts, T) in self._scan_cache.items():
+            t = key[0] + key[1] * 1e-9
+            A = _interpolate_correction(t, keyframe_ts, corrections)
+            self._scan_cache[key] = (pts, A @ T)
 
-    def _rebuild_origin_cb(self, msg: PoseStamped) -> None:
-        if self._rebuild_expected == 0:
+    def _replay_tick(self) -> None:
+        if not self._replay_queue:
             return
-        key = (msg.header.stamp.sec, msg.header.stamp.nanosec)
-        p = msg.pose.position
-        self._rebuild_pending.setdefault(key, {})['origin'] = np.array(
-            [p.x, p.y, p.z], dtype=np.float64)
-        self._maybe_integrate_rebuild_pair(key)
-
-    def _maybe_integrate_rebuild_pair(self, key) -> None:
-        entry = self._rebuild_pending.get(key)
-        if entry is None or 'scan' not in entry or 'origin' not in entry:
-            return
-        pts, origin = entry['scan'], entry['origin']
-        del self._rebuild_pending[key]
-        if len(pts) > 0:
-            self._volume.integrate(pts, origin)
-        self._rebuild_done += 1
-        if self._rebuild_done >= self._rebuild_expected:
-            self.get_logger().info(
-                f'Map rebuild complete: {self._rebuild_done}/{self._rebuild_expected} '
-                f'scans re-integrated')
-            self._rebuild_expected = 0
+        chunk, self._replay_queue = (
+            self._replay_queue[:self._rebuild_chunk_scans],
+            self._replay_queue[self._rebuild_chunk_scans:])
+        for key in chunk:
+            entry = self._scan_cache.get(key)
+            if entry is None:
+                continue   # evicted between snapshot and replay
+            pts_cam, T = entry
+            R, t = T[:3, :3], T[:3, 3]
+            pts_world = pts_cam.astype(np.float64) @ R.T + t
+            self._volume.integrate(pts_world, t)
+        if not self._replay_queue:
+            self.get_logger().info('Map rebuild replay complete')
 
     # ────────────────────────────────────────────────────────────────────
     # Surface cloud + normals (marching cubes via VDBFusion)
@@ -369,6 +422,62 @@ def _tf_to_matrix(tf_transform) -> np.ndarray:
     T[:3, :3] = R
     T[:3,  3] = [t.x, t.y, t.z]
     return T
+
+
+def _evict_fifo(cache: OrderedDict, max_size: int) -> None:
+    """Pop oldest entries (insertion order) until cache fits max_size.
+    Pure function, no rclpy -- unit-testable in isolation."""
+    while len(cache) > max_size:
+        cache.popitem(last=False)
+
+
+def _posestamped_to_matrix(msg: PoseStamped) -> np.ndarray:
+    p, q = msg.pose.position, msg.pose.orientation
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+    T[:3, 3] = [p.x, p.y, p.z]
+    return T
+
+
+def _stamp_to_float(stamp) -> float:
+    return stamp.sec + stamp.nanosec * 1e-9
+
+
+def _compute_corrections(T_olds: list, T_news: list) -> np.ndarray:
+    """Per-keyframe correction A_i = T_new_i @ inv(T_old_i). Returns (K,4,4).
+    Pure function, no rclpy -- unit-testable in isolation."""
+    return np.array([T_new @ np.linalg.inv(T_old)
+                      for T_old, T_new in zip(T_olds, T_news)])
+
+
+def _interpolate_correction(t: float, keyframe_ts: np.ndarray,
+                            corrections: np.ndarray) -> np.ndarray:
+    """Correction A(t) for an arbitrary scan stamp, by lerping translation and
+    Slerp-ing rotation between the two keyframes bracketing t (nearest-
+    keyframe assignment would step by >voxel size mid-segment and re-create
+    the double-surface artifact this whole cache exists to avoid). Clamped to
+    the nearest end correction for t outside [keyframe_ts[0], keyframe_ts[-1]].
+    keyframe_ts must be sorted ascending. Pure function, no rclpy."""
+    k = len(keyframe_ts)
+    if k == 1 or t <= keyframe_ts[0]:
+        return corrections[0]
+    if t >= keyframe_ts[-1]:
+        return corrections[-1]
+
+    i = int(np.searchsorted(keyframe_ts, t, side='right') - 1)
+    i = min(max(i, 0), k - 2)
+    t0, t1 = keyframe_ts[i], keyframe_ts[i + 1]
+    u = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+
+    A0, A1 = corrections[i], corrections[i + 1]
+    translation = (1.0 - u) * A0[:3, 3] + u * A1[:3, 3]
+    slerp = Slerp([0.0, 1.0], Rotation.from_matrix([A0[:3, :3], A1[:3, :3]]))
+    rotation = slerp(u).as_matrix()
+
+    A = np.eye(4, dtype=np.float64)
+    A[:3, :3] = rotation
+    A[:3, 3] = translation
+    return A
 
 
 def _extract_voxels(tsdf_grid, weights_grid, voxel_size: float,
