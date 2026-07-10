@@ -45,7 +45,7 @@ DEFAULT_BATCH_ROOT = os.path.join(REPO_ROOT, 'eval', 'runs')
 # demo.launch.py arguments the matrix is allowed to set (bringup/launch/demo.launch.py).
 VALID_KEYS = {
     'slam', 'mode', 'motion', 'mapper', 'noise_profile', 'loop_closure',
-    'map_rebuild', 'rviz', 'revisit',
+    'map_rebuild', 'rviz', 'revisit', 'scenario', 'scenario_out_dx', 'scenario_out_dy',
 }
 
 
