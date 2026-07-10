@@ -9,6 +9,12 @@ chance to fire. Reuses frontier_extractor's own external-goal interface
 revisit_planner.py uses — so no planner or controller changes are needed.
 Reproducibility comes from the launch's existing noise_seed argument; the
 waypoint sequence itself is deterministic.
+
+After the return leg, the correction from a loop closure lands within a
+few seconds (confirmed on a live run: abs_error dropped 90%+ within ~2s of
+the closure) — RELEASE_DWELL_S just gives one redetect cycle a moment to
+settle before handing goal publication back to frontier_extractor, rather
+than holding the robot in place indefinitely.
 """
 import os
 from enum import Enum
@@ -37,11 +43,13 @@ class ScenarioState(Enum):
     OUTBOUND = 'outbound'
     RETURN = 'return'
     DONE = 'done'
+    RELEASED = 'released'
 
 
 class DriftReturnScenario(Node):
     GOAL_REPUBLISH_S = 2.0   # matches revisit_planner's own cadence
     TICK_HZ = 1.0
+    RELEASE_DWELL_S = 12.0   # hold at start this long after arrival, then resume exploration
 
     def __init__(self):
         super().__init__('drift_return_scenario')
@@ -61,6 +69,7 @@ class DriftReturnScenario(Node):
         self._target_out_xy: np.ndarray | None = None
         self._robot_xyz: np.ndarray | None = None
         self._last_goal_pub_time: float | None = None
+        self._done_since: float | None = None
 
         self._log = open_session_log('drift_return', CSV_COLUMNS, _LOG_DIR)
 
@@ -92,7 +101,10 @@ class DriftReturnScenario(Node):
     def _tick(self) -> None:
         if self._robot_xyz is None or self._state == ScenarioState.WAIT_ODOM:
             return
+        if self._state == ScenarioState.RELEASED:
+            return   # frontier_extractor owns goal publication again — stay out of the way
 
+        now = self._now()
         self._suspend_pub.publish(Bool(data=True))
 
         target_xy = (self._target_out_xy if self._state == ScenarioState.OUTBOUND
@@ -110,16 +122,30 @@ class DriftReturnScenario(Node):
             self.get_logger().info('Outbound leg complete — returning to start')
         elif self._state == ScenarioState.RETURN and dist < self._arrival_radius_m:
             self._state = ScenarioState.DONE
+            self._done_since = now
             event = 'RETURN_ARRIVED'
-            self.get_logger().info('Return leg complete — scenario done, holding position')
+            self.get_logger().info(
+                f'Return leg complete — holding {self.RELEASE_DWELL_S:.0f}s for the '
+                'correction to land, then resuming exploration'
+            )
+        elif (self._state == ScenarioState.DONE
+              and now - self._done_since >= self.RELEASE_DWELL_S):
+            self._state = ScenarioState.RELEASED
+            event = 'RELEASED'
+            self._suspend_pub.publish(Bool(data=False))
+            self.get_logger().info(
+                'Releasing control back to frontier_extractor — resuming exploration'
+            )
+            self._log.write([now, self._state.value,
+                             float(self._robot_xyz[0]), float(self._robot_xyz[1]),
+                             float(target_xy[0]), float(target_xy[1]), dist, event])
+            return
 
-        now = self._now()
-        if self._state != ScenarioState.DONE or event == 'RETURN_ARRIVED':
-            if (self._last_goal_pub_time is None
-                    or now - self._last_goal_pub_time >= self.GOAL_REPUBLISH_S
-                    or event):
-                self._publish_goal(target_xy)
-                self._last_goal_pub_time = now
+        if (self._last_goal_pub_time is None
+                or now - self._last_goal_pub_time >= self.GOAL_REPUBLISH_S
+                or event):
+            self._publish_goal(target_xy)
+            self._last_goal_pub_time = now
 
         self._log.write([now, self._state.value,
                          float(self._robot_xyz[0]), float(self._robot_xyz[1]),

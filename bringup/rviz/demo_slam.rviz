@@ -362,6 +362,18 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /eval/markers
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: LiveDriftArrow
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /eval/markers_live
+      Value: true
     - Class: rviz_default_plugins/PoseWithCovariance
       Color: 30; 120; 255
       Covariance:

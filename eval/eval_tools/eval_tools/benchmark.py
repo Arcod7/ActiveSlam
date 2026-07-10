@@ -80,6 +80,8 @@ class TimestampBuffer:
 
 
 class BenchmarkNode(Node):
+    LIVE_ARROW_HZ = 10.0   # /slam/odometry updates every dead-reckoning tick, not just per keyframe
+
     def __init__(self, **kwargs):
         super().__init__('benchmark', **kwargs)
 
@@ -112,11 +114,13 @@ class BenchmarkNode(Node):
         self._latest_lc_count = 0
         self._latest_rebuild_count = 0
         self._latest_revisit_count = 0
+        self._latest_slam_odom: PoseSample | None = None
 
         gt_topic = self.get_parameter('gt_topic').value
         self.create_subscription(Odometry, gt_topic, self._gt_cb, 50)
         self.create_subscription(PoseWithCovarianceStamped, '/slam/pose', self._slam_cb, 10)
         self.create_subscription(Odometry, '/slam/sensors/dead_reckoned_odom', self._dr_cb, 10)
+        self.create_subscription(Odometry, '/slam/odometry', self._slam_odom_cb, 10)
         self.create_subscription(Float64, '/slam/dopt', self._dopt_cb, 10)
         self.create_subscription(Int32, '/slam/keyframe_count', self._kf_count_cb, 10)
         self.create_subscription(Int32, '/slam/loop_closure_count', self._lc_count_cb, 10)
@@ -129,6 +133,9 @@ class BenchmarkNode(Node):
         self.pub_rpe_rot = self.create_publisher(Float64, '/eval/rpe_rot', 10)
         self.pub_dr_error = self.create_publisher(Float64, '/eval/dr_error', 10)
         self.pub_markers = self.create_publisher(MarkerArray, '/eval/markers', 10)
+        self.pub_markers_live = self.create_publisher(MarkerArray, '/eval/markers_live', 10)
+
+        self.create_timer(1.0 / self.LIVE_ARROW_HZ, self._publish_live_arrow)
 
         self.get_logger().info(f'Benchmark node started. Writing to {out_dir}')
 
@@ -151,6 +158,9 @@ class BenchmarkNode(Node):
         sample = _odom_to_sample(msg)
         self._gt_buffer.add(sample)
         self._gt_tum.write_pose(sample.t, sample.pos, sample.quat)
+
+    def _slam_odom_cb(self, msg: Odometry):
+        self._latest_slam_odom = _odom_to_sample(msg)
 
     def _dr_cb(self, msg: Odometry):
         sample = _odom_to_sample(msg)
@@ -231,6 +241,45 @@ class BenchmarkNode(Node):
         markers.markers.append(text)
 
         self.pub_markers.publish(markers)
+
+    def _publish_live_arrow(self):
+        """Continuously-updating GT-vs-SLAM-belief arrow, sourced from
+        /slam/odometry (published on every dead-reckoning tick, already
+        loop-closure-corrected) rather than /slam/pose (only published per
+        keyframe, i.e. roughly every keyframe_dist_m of travel) — the
+        eval_drift arrow above is precise but visibly jumps in steps; this
+        one is for watching the correction happen in real time.
+
+        GT is looked up by nearest-timestamp to the estimate sample (like
+        _slam_cb does), not just "whatever GT sample is freshest right now"
+        — the two topics publish on independent, unsynchronized clocks, so
+        pairing the latest of each independently left the arrow pointing
+        along a stale phase-lag offset instead of the true instantaneous
+        drift, especially visible while the robot is moving."""
+        if self._latest_slam_odom is None:
+            return
+        est = self._latest_slam_odom
+        gt = self._gt_buffer.nearest(est.t)
+        if gt is None:
+            return
+
+        arrow = Marker()
+        arrow.header.frame_id = 'world_ned'
+        arrow.header.stamp = self.get_clock().now().to_msg()
+        arrow.ns = 'eval_drift_live'
+        arrow.id = 0
+        arrow.type = Marker.ARROW
+        arrow.action = Marker.ADD
+        arrow.points = [Point(x=gt.pos[0], y=gt.pos[1], z=gt.pos[2]),
+                        Point(x=est.pos[0], y=est.pos[1], z=est.pos[2])]
+        arrow.scale.x = 0.08   # shaft diameter
+        arrow.scale.y = 0.16   # head diameter
+        arrow.scale.z = 0.20   # head length
+        arrow.color = ColorRGBA(r=1.0, g=0.85, b=0.0, a=0.9)
+
+        markers = MarkerArray()
+        markers.markers.append(arrow)
+        self.pub_markers_live.publish(markers)
 
     def _update_rpe(self, gt_sample: PoseSample, est_sample: PoseSample):
         self._matched_pairs.append((gt_sample, est_sample))
