@@ -9,6 +9,7 @@ Usage:
   ros2 launch bringup demo.launch.py motion:=wallfollow mapper:=tsdf   # wall-normal following
   ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic  # SLAM pose + error viz
   ros2 launch bringup demo.launch.py slam:=slam mode:=frontier revisit:=true  # break off exploration to close loops
+  ros2 launch bringup demo.launch.py slam:=slam mode:=frontier scenario:=drift_return  # scripted leave-and-return
   ros2 launch bringup demo.launch.py rviz:=false              # headless (e.g. CI, remote box)
 
 `mode`, `motion`, `mapper`, and `slam` are independent axes — the sim+mapping core is
@@ -92,6 +93,20 @@ def generate_launch_description():
         description='Uncertainty-triggered revisit planner: suspends frontier '
                     'exploration to revisit mapped areas when pose uncertainty '
                     '(D-optimality) exceeds a threshold (mode:=frontier + slam:=slam only)',
+    )
+    scenario_arg = DeclareLaunchArgument(
+        'scenario', default_value='none', choices=['none', 'drift_return'],
+        description='Scripted evaluation scenario (docs/plans/plan.md T1.1): drift_return '
+                    'leaves the start position, then returns to it to watch loop closure '
+                    'fire (mode:=frontier only)',
+    )
+    scenario_out_dx_arg = DeclareLaunchArgument(
+        'scenario_out_dx', default_value='15.0',
+        description='drift_return: outbound leg X offset (m) from the captured start position',
+    )
+    scenario_out_dy_arg = DeclareLaunchArgument(
+        'scenario_out_dy', default_value='0.0',
+        description='drift_return: outbound leg Y offset (m) from the captured start position',
     )
 
     # tf.launch.py (included further below via octomap/tsdf -> pointcloud -> tf)
@@ -199,6 +214,9 @@ def generate_launch_description():
             'revisit': PythonExpression(
                 ["'true' if '", LaunchConfiguration('revisit'), "' == 'true' and '",
                  LaunchConfiguration('slam'), "' == 'slam' else 'false'"]),
+            'scenario': LaunchConfiguration('scenario'),
+            'scenario_out_dx': LaunchConfiguration('scenario_out_dx'),
+            'scenario_out_dy': LaunchConfiguration('scenario_out_dy'),
         }.items(),
         condition=LaunchConfigurationEquals('mode', 'frontier'),
     )
@@ -267,6 +285,17 @@ def generate_launch_description():
         ])),
     )
 
+    scenario_needs_frontier_warning = LogInfo(
+        msg=(
+            'scenario=drift_return requires mode:=frontier (it drives via '
+            'frontier_extractor/waypoint_controller) — the scenario node will not be started.'
+        ),
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('scenario'), "' == 'drift_return' and '",
+            LaunchConfiguration('mode'), "' != 'frontier'",
+        ])),
+    )
+
     map_rebuild_octomap_warning = LogInfo(
         msg=(
             'map_rebuild=true has no effect with mapper:=octomap: octomap_server raycasts '
@@ -308,12 +337,14 @@ def generate_launch_description():
     return LaunchDescription([
         mode_arg, motion_arg, mapper_arg, rviz_arg, slam_arg, noise_profile_arg,
         loop_closure_arg, noise_seed_arg, map_rebuild_arg, output_dir_arg, revisit_arg,
+        scenario_arg, scenario_out_dx_arg, scenario_out_dy_arg,
         set_use_gt_tf, set_sonar_noise,
-        # revisit_needs_slam_warning reads the top-level 'revisit'/'slam' configs and
-        # must be visited BEFORE frontier_exploration: that include temporarily
-        # rescopes 'revisit' (Push/Pop) for its own sub-launch, and the Pop isn't
-        # guaranteed to have completed by the time a later list entry is visited.
-        revisit_needs_slam_warning,
+        # revisit_needs_slam_warning/scenario_needs_frontier_warning read top-level
+        # configs and must be visited BEFORE frontier_exploration: that include
+        # temporarily rescopes those configs (Push/Pop) for its own sub-launch, and
+        # the Pop isn't guaranteed to have completed by the time a later list entry
+        # is visited.
+        revisit_needs_slam_warning, scenario_needs_frontier_warning,
         octomap_stack, tsdf_stack, octomap_planning_map, dual_map_hint, gt_map_stack,
         slam_stack, eval_stack, slam_hint,
         teleop_hint, frontier_exploration,

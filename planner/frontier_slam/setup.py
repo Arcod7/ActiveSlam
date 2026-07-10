@@ -26,6 +26,7 @@ setup(
             'tsdf_mapper         = frontier_slam.tsdf_mapper:main',
             'wall_follower       = frontier_slam.wall_follower:main',
             'revisit_planner     = frontier_slam.revisit_planner:main',
+            'drift_return_scenario = frontier_slam.drift_return_scenario:main',
         ],
     },
 )

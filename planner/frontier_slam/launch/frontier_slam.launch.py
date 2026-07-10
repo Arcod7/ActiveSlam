@@ -10,6 +10,10 @@ This adds:
   - revisit_planner (revisit:=true only): /slam/dopt → suspends frontier_extractor
     and drives a forced revisit to close a loop when pose uncertainty grows
     (needs a SLAM pose source — see revisit_planner.py)
+  - drift_return_scenario (scenario:=drift_return only): a fixed, scripted
+    leave-and-return waypoint sequence for watching loop closure fire on
+    return (docs/plans/plan.md T1.1) — same suspend/goal interface as
+    revisit_planner, see drift_return_scenario.py
 
 Optional arguments:
   depth       Target depth in NED metres (Z-down, so positive = below surface).
@@ -18,12 +22,17 @@ Optional arguments:
               Default: /StoneFish/Odometry (ground truth)
               Noisy:   /StoneFish/Odometry/noisy (requires odom_to_tf_noisy running)
   revisit     Start revisit_planner. Default: false.
+  scenario    Scripted evaluation scenario: none or drift_return. Default: none.
+  scenario_out_dx/scenario_out_dy
+              Outbound leg offset (m) from the start position for
+              scenario:=drift_return. Default: 15.0 / 0.0.
 
 Examples:
   ros2 launch frontier_slam frontier_slam.launch.py
   ros2 launch frontier_slam frontier_slam.launch.py depth:=8.0
   ros2 launch frontier_slam frontier_slam.launch.py odom_topic:=/StoneFish/Odometry/noisy
   ros2 launch frontier_slam frontier_slam.launch.py revisit:=true
+  ros2 launch frontier_slam frontier_slam.launch.py scenario:=drift_return
 
 Visualise in RViz2:
   - MarkerArray  /frontier_slam/frontiers  (cyan = candidates, red = active goal)
@@ -32,7 +41,7 @@ Visualise in RViz2:
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, LaunchConfigurationEquals
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -56,6 +65,22 @@ def generate_launch_description():
         default_value='false',
         description='Start revisit_planner (needs a SLAM pose source, e.g. bringup slam:=slam).',
     )
+    scenario_arg = DeclareLaunchArgument(
+        'scenario',
+        default_value='none',
+        choices=['none', 'drift_return'],
+        description='Scripted evaluation scenario: none or drift_return (docs/plans/plan.md T1.1).',
+    )
+    scenario_out_dx_arg = DeclareLaunchArgument(
+        'scenario_out_dx',
+        default_value='15.0',
+        description='drift_return: outbound leg X offset (m) from the captured start position.',
+    )
+    scenario_out_dy_arg = DeclareLaunchArgument(
+        'scenario_out_dy',
+        default_value='0.0',
+        description='drift_return: outbound leg Y offset (m) from the captured start position.',
+    )
     depth = LaunchConfiguration('depth')
     odom_topic = LaunchConfiguration('odom_topic')
 
@@ -63,6 +88,9 @@ def generate_launch_description():
         depth_arg,
         odom_topic_arg,
         revisit_arg,
+        scenario_arg,
+        scenario_out_dx_arg,
+        scenario_out_dy_arg,
         Node(
             package='frontier_slam',
             executable='frontier_extractor',
@@ -84,5 +112,17 @@ def generate_launch_description():
             output='screen',
             parameters=[{'odom_topic': odom_topic}],
             condition=IfCondition(LaunchConfiguration('revisit')),
+        ),
+        Node(
+            package='frontier_slam',
+            executable='drift_return_scenario',
+            name='drift_return_scenario',
+            output='screen',
+            parameters=[{
+                'odom_topic': odom_topic,
+                'out_dx': LaunchConfiguration('scenario_out_dx'),
+                'out_dy': LaunchConfiguration('scenario_out_dy'),
+            }],
+            condition=LaunchConfigurationEquals('scenario', 'drift_return'),
         ),
     ])
