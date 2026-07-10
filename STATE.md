@@ -1,6 +1,6 @@
 # ActiveSlam SLAM Backend — Current State
 
-Mutable snapshot. Overwrite, never append. Last updated: 2026-07-09.
+Mutable snapshot. Overwrite, never append. Last updated: 2026-07-10.
 
 Change log → `Progress.md`. Detailed design + as-built deltas → `docs/SLAM_PLAN.md`.
 
@@ -190,12 +190,21 @@ python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/<batch_
   2-run/120s mini-batch produced complete per-run + batch-level artifacts including a clean
   back-to-back Stonefish restart.
 - ✅ The 35-run full matrix (`matrix_full.yaml`, 7 configs × 5 seeds) has been run;
-  results directly motivated two follow-on fixes: loop closure barely moved ATE at
-  this course/duration (the revisit planner addresses this), and `map_rebuild`
-  measurably hurt TSDF map quality (coverage 0.77→0.5, chamfer roughly doubled) —
-  a rebuild-fidelity fix is in progress. A 10+ minute single session is also now
-  done (the 600 s baseline above). Still open: `evo_ape`/`evo_rpe` cross-check
-  against the written TUM files.
+  results directly motivated one follow-on fix: loop closure barely moved ATE at
+  this course/duration (the revisit planner addresses this). The matrix's
+  `tsdf`/`tsdf_rebuild` rows were configured as `mode:frontier mapper:tsdf`,
+  which had no map source for frontier detection (`frontier_extractor`
+  subscribes to `/projected_map`, published only by `octomap_server`, which
+  wasn't included under `mapper:=tsdf`) — the robot spun in place for the
+  full run instead of exploring. The map-quality-degradation finding this
+  produced is an artifact of that bug, not a rebuild-fidelity result, and is
+  invalidated (Phase 21). Fix landed:
+  `demo.launch.py` now also launches `octomap_server` as a planning-only map
+  source under `mode:=frontier mapper:=tsdf` (dual-map with TSDF as the map
+  product). The `tsdf`/`tsdf_rebuild` rows still need re-specifying and
+  re-running on a moving robot before any rebuild-fidelity claim can be made.
+  A 10+ minute single session is also now done (the 600 s baseline above).
+  Still open: `evo_ape`/`evo_rpe` cross-check against the written TUM files.
 - ✅ **Teardown hardening**: every node now tolerates a second SIGINT during
   shutdown without printing a traceback (previously a stray `KeyboardInterrupt`
   inside `destroy_node()`'s `finally` block would escape uncaught), and

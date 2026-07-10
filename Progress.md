@@ -604,3 +604,61 @@ launch's SIGINT marker; all 480 s of metrics were written and are trustworthy.
 A dedicated multi-seed batch (needed for a defensible ATE statement) and a
 combined revisit+rebuild eval column are open, user-scheduled follow-ups, not
 done here.
+
+## Phase 21 — Frontier+TSDF spinning-robot discovery; dual-map fix; Phase 18 rebuild finding invalidated
+
+**Date**: 2026-07-10
+**Files**: `bringup/launch/demo.launch.py`, `bringup/package.xml`
+
+**Discovery**: `frontier_extractor.py` subscribes to `/projected_map`, which
+only `octomap_server` publishes. `demo.launch.py` previously included the
+octomap stack only under `mapper:=octomap`, so `mode:=frontier mapper:=tsdf`
+had no map source for frontier detection: goal selection silently returned
+every tick (no goal, no error, no log line), and the robot rotated in place
+for the entire run instead of exploring. Diagnostic signature for spotting
+this in any past or future run: `lc_count` in the thousands (co-located
+keyframes from pure rotation closing loops with each other), suspiciously low
+final ATE (no translation ⇒ no drift), coverage stuck at whatever is visible
+from spawn, and `waypoint_controller`/`frontier_extractor` silent after
+startup in the launch log.
+
+**Consequence — Phase 18 finding invalidated**: The Phase 18 result quoted
+above and in `STATE.md` ("`map_rebuild` measurably hurt TSDF map quality —
+coverage 0.77→0.5, chamfer roughly doubled") was measured with
+`matrix_full.yaml`'s `tsdf`/`tsdf_rebuild` rows configured as
+`mode:frontier mapper:tsdf` — i.e. on a spinning robot. The result is an
+artifact of the missing map source, not a rebuild-fidelity measurement.
+Whether `map_rebuild` helps or hurts map quality on a robot that actually
+explores is unmeasured; the `tsdf`/`tsdf_rebuild` matrix rows need
+re-specifying and re-running before any conclusion can be drawn. The rebuild
+plumbing and correction math (Phase 20-era `pose_graph.py`/`tsdf_mapper.py`
+work) were still exercised live and are mechanism-verified — only the
+map-fidelity result on a moving robot is in question.
+
+**Deleted data (user instruction, 2026-07-09)**:
+`eval/runs/full_20260706_1406/tsdf_s101..105` and `tsdf_rebuild_s101..105`
+(10 dirs; `summary.csv` re-aggregated to the remaining 25 rows);
+`eval/runs/rebuild_20260709_1603/` (partial re-run batch); earlier same-day
+`rebuild_20260709_1500` and `rebuild_20260709_1503`. Deleted numbers
+preserved for the record (all from spinning robots — not directly comparable
+to future runs): `tsdf` s101–105 ATE 0.10–0.34, coverage 0.74–0.80, chamfer
+0.89–1.02, lc 4135–5718; `tsdf_rebuild` s101–105 ATE 0.09–0.36, coverage
+0.26–0.58, chamfer 1.64–2.17, lc 4324–5172, rebuilds 1–5.
+
+**Fix**: `demo.launch.py` now also launches a bare `octomap_server` node
+(not `octomap.launch.py`'s include, which would double-launch
+`stonefish_simulator`/`tf`/pointcloud) when `mode:=frontier mapper:=tsdf`,
+feeding `/projected_map` to `frontier_extractor` for planning while
+`tsdf_mapper` stays the map product — a dual-map setup, announced with a
+`LogInfo`. `octomap_server` added to `bringup/package.xml` exec_depend (was
+only reached transitively before).
+
+**Observed impact**: ✅ Watched run `mode:=frontier mapper:=tsdf slam:=none`:
+robot translated (5.5,-8.3)→(17.0,-0.6) over the log window instead of
+spinning in place, `frontier_extractor`/A* operating on real mapped cells,
+`ros2 node list | sort | uniq -d` empty, exactly one `stonefish_simulator`
+process, clean SIGINT teardown with no orphans. RViz confirmed showing the
+TSDF surface (octomap has no display in `demo_tsdf.rviz` by design — a
+TSDF-focused view). `matrix_full.yaml`'s `tsdf`/`tsdf_rebuild` rows and
+`matrix_smoke.yaml`'s `tsdf_rebuild` row remain invalid as currently
+configured pending re-specification against the dual-map setup.
