@@ -133,6 +133,39 @@ def generate_launch_description():
         condition=LaunchConfigurationEquals('mapper', 'tsdf'),
     )
 
+    # Bare node, not octomap.launch.py's include: that would double-launch
+    # stonefish_simulator/tf/pointcloud, which tsdf_stack already provides.
+    dual_map_condition = IfCondition(PythonExpression([
+        "'", LaunchConfiguration('mode'), "' == 'frontier' and '",
+        LaunchConfiguration('mapper'), "' == 'tsdf'",
+    ]))
+
+    octomap_planning_map = Node(
+        package='octomap_server',
+        executable='octomap_server_node',
+        name='octomap_server',
+        output='screen',
+        parameters=[{
+            'frame_id':               'world_ned',
+            'resolution':             0.2,
+            'sensor_model/max_range': 15.0,
+            'latch':                  True,
+        }],
+        remappings=[
+            ('cloud_in', '/cloud_in'),
+        ],
+        condition=dual_map_condition,
+    )
+
+    dual_map_hint = LogInfo(
+        msg=(
+            'mode=frontier mapper=tsdf: octomap_server is also running as the '
+            'frontier-detection planning map (/projected_map); tsdf_mapper remains '
+            'the map product.'
+        ),
+        condition=dual_map_condition,
+    )
+
     # Second, parallel map built from the exact simulator pose (not the SLAM
     # estimate) so belief vs. reality can be visually compared in RViz.
     # Only meaningful once pose_graph.py can actually diverge from ground
@@ -281,7 +314,7 @@ def generate_launch_description():
         # rescopes 'revisit' (Push/Pop) for its own sub-launch, and the Pop isn't
         # guaranteed to have completed by the time a later list entry is visited.
         revisit_needs_slam_warning,
-        octomap_stack, tsdf_stack, gt_map_stack,
+        octomap_stack, tsdf_stack, octomap_planning_map, dual_map_hint, gt_map_stack,
         slam_stack, eval_stack, slam_hint,
         teleop_hint, frontier_exploration,
         wall_follow, wallfollow_hint, map_rebuild_octomap_warning,
