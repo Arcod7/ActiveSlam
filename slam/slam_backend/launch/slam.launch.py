@@ -22,7 +22,7 @@ from ament_index_python.packages import get_package_share_directory
 def generate_launch_description():
     noise_profile_arg = DeclareLaunchArgument(
         'noise_profile', default_value='realistic',
-        description='Noise profile to use (ideal, sonar_only, realistic, degraded)'
+        description='Noise profile to use (ideal, sonar_only, odom_pos_only, odom_only, realistic, degraded)'
     )
     loop_closure_arg = DeclareLaunchArgument(
         'loop_closure', default_value='true',

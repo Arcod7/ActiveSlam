@@ -4,12 +4,16 @@ pressure:
   sigma_depth_m: 0.05
   bias_m: 0.02
   publish_rate_hz: 10.0
-imu:
+imu:                         # degraded gyro-integrated attitude
   sigma_roll_rad: 0.05
   sigma_pitch_rad: 0.05
-  sigma_yaw_rad: 0.20        # ~11.5° — heavy magnetic interference
+  sigma_yaw_rad: 0.05        # ~2.9° short-term gyro attitude
   gyro_bias_drift_rad_s: 0.001
   publish_rate_hz: 50.0
+compass:                     # magnetic interference dominates absolute heading
+  sigma_yaw_rad: 0.20        # ~11.5°
+  bias_drift_rad_s: 0.001
+  publish_rate_hz: 10.0
 dvl:
   sigma_pct: 0.03            # 3% — degraded bottom-lock
   sigma_floor_m_s: 0.005

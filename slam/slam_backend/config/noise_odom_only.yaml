@@ -1,6 +1,6 @@
-name: realistic
-seed: -1
-pressure:
+name: odom_only
+seed: 42
+pressure:                    # realistic nav sensors (as noise_realistic.yaml)
   sigma_depth_m: 0.02        # Bar30: ±2cm resolution
   bias_m: 0.0
   publish_rate_hz: 10.0
@@ -20,14 +20,12 @@ dvl:
   bias_m_s: 0.001
   scale_error_pct: 0.002     # 0.2% constant scale error (sampled once per run)
   publish_rate_hz: 10.0
-sonar:                       # WaterLinked Sonar 3D-15, 1.2MHz mode datasheet
-  range_quant_m: 0.0015      # range resolution
-  range_sigma0_m: 0.005      # noise floor ~ a few x range resolution
-  range_sigma_k: 0.001       # speckle/SNR term, ~0.1% of range
-  lat_sigma_h_per_m: 0.003   # 0.5 x tan(0.35 deg beam separation)
-  lat_sigma_v_per_m: 0.005   # 0.5 x tan(0.60 deg beam separation)
-  dropout_p0: 0.02           # oblique-incidence / low-reflectivity no-returns
-  dropout_p_range: 0.05      # extra dropout growth toward max range
-  outlier_p: 0.002           # sparse multipath returns
-  outlier_range_min_m: 0.3
-  outlier_range_max_m: 3.0
+sonar:                       # ground-truth (as noise_ideal.yaml)
+  range_quant_m: 0.0
+  range_sigma0_m: 0.0
+  range_sigma_k: 0.0
+  lat_sigma_h_per_m: 0.0
+  lat_sigma_v_per_m: 0.0
+  dropout_p0: 0.0
+  dropout_p_range: 0.0
+  outlier_p: 0.0

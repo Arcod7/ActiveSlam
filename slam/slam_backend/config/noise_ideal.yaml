@@ -10,6 +10,10 @@ imu:
   sigma_yaw_rad: 0.005
   gyro_bias_drift_rad_s: 0.0
   publish_rate_hz: 50.0
+compass:
+  sigma_yaw_rad: 0.005
+  bias_drift_rad_s: 0.0
+  publish_rate_hz: 10.0
 dvl:
   sigma_pct: 0.001
   sigma_floor_m_s: 0.0001

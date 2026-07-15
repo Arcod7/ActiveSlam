@@ -15,6 +15,15 @@ class IMUNoise:
     gyro_bias_drift_rad_s: float = 0.0
     publish_rate_hz: float = 50.0
 
+
+@dataclass
+class CompassNoise:
+    """Absolute magnetic-heading measurement noise and slowly varying bias."""
+
+    sigma_yaw_rad: float = 0.05
+    bias_drift_rad_s: float = 0.0
+    publish_rate_hz: float = 10.0
+
 @dataclass
 class DVLNoise:
     sigma_pct: float = 0.01          # velocity noise as fraction of speed
@@ -45,6 +54,7 @@ class NoiseProfile:
     seed: int = -1                    # -1 = random; fixed seed for reproducible runs
     pressure: PressureNoise = field(default_factory=PressureNoise)
     imu: IMUNoise = field(default_factory=IMUNoise)
+    compass: CompassNoise = field(default_factory=CompassNoise)
     dvl: DVLNoise = field(default_factory=DVLNoise)
     sonar: SonarNoise = field(default_factory=SonarNoise)
 
@@ -57,6 +67,8 @@ def load_noise_profile(yaml_path: str) -> NoiseProfile:
         profile.pressure = PressureNoise(**data['pressure'])
     if 'imu' in data:
         profile.imu = IMUNoise(**data['imu'])
+    if 'compass' in data:
+        profile.compass = CompassNoise(**data['compass'])
     if 'dvl' in data:
         profile.dvl = DVLNoise(**data['dvl'])
     if 'sonar' in data:

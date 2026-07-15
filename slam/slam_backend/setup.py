@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'pressure_sim    = slam_backend.sensor_models.pressure_sim:main',
             'imu_sim         = slam_backend.sensor_models.imu_sim:main',
+            'compass_sim     = slam_backend.sensor_models.compass_sim:main',
             'dvl_sim         = slam_backend.sensor_models.dvl_sim:main',
             'sonar_noise     = slam_backend.sensor_models.sonar_noise:main',
             'dead_reckoning  = slam_backend.dead_reckoning:main',

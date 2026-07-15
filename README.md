@@ -73,7 +73,7 @@ ros2 launch bringup demo.launch.py mapper:=octomap|tsdf           # map backend
 ros2 launch bringup demo.launch.py mode:=frontier motion:=walloriented \
   wall_orientation_offset_deg:=30                                 # follow path, look toward nearest wall
 ros2 launch bringup demo.launch.py slam:=none|slam                # pose source
-ros2 launch bringup demo.launch.py noise_profile:=ideal|sonar_only|realistic|degraded  # slam:=slam only
+ros2 launch bringup demo.launch.py noise_profile:=ideal|sonar_only|odom_pos_only|odom_only|realistic|degraded  # slam:=slam only
 ros2 launch bringup demo.launch.py rviz:=false                    # headless
 ```
 

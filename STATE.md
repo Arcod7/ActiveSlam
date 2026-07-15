@@ -85,13 +85,17 @@ depth_image_proc ─► /cloud_in_raw ─► sonar_noise ─► /cloud_in (5Hz) 
 - `noise_ideal.yaml`: near-perfect sensors (sanity checks); sonar section all-zero (exact passthrough)
 - `noise_sonar_only.yaml`: sonar section from `realistic`, nav sensors from `ideal`, seed 42 —
   isolates sonar noise from dead-reckoning drift
-- `noise_realistic.yaml`: matches Bar30 pressure + Pathfinder DVL + typical MEMS IMU; sonar section
+- `noise_odom_pos_only.yaml`: realistic DVL/pressure position, exact Stonefish IMU+compass
+  orientation, and exact sonar passthrough — isolates position drift from attitude and sonar error
+- `noise_odom_only.yaml`: realistic DVL/pressure/IMU+compass navigation with exact sonar passthrough
+- `noise_realistic.yaml`: matches Bar30 pressure + Pathfinder DVL + gyro/compass attitude; sonar section
   derived from the WaterLinked Sonar 3D-15 datasheet (`ActiveSlam-Resources/3d-sonar`)
 - `noise_degraded.yaml`: turbid water / magnetic interference / degraded bottom-lock; sonar section
   worse-than-datasheet (full beam-separation lateral jitter, higher dropout/outlier rates)
 
-Each profile's `seed:` (42 for `ideal`/`sonar_only`, -1/random for `realistic`/`degraded`) is combined with a
-per-sensor offset (imu +1, dvl +2, pressure +3, sonar +4) before seeding, so co-launched sims no
+Each profile's `seed:` (42 for `ideal`/`sonar_only`/`odom_pos_only`/`odom_only`,
+-1/random for `realistic`/`degraded`) is combined with a per-sensor offset
+(imu +1, dvl +2, pressure +3, sonar +4, compass +5) before seeding, so co-launched sims no
 longer draw identical RNG streams off one shared seed — this changed `ideal`'s exact per-sensor
 draws vs. pre-Phase-16 runs (same seed, different effective value per node); nothing previously
 published used `ideal`, so no quoted numbers are affected. Override with `noise_seed:=<int>`

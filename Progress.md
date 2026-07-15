@@ -739,3 +739,49 @@ Verified in the ROS Jazzy container: `colcon test --packages-select
 frontier_slam` passes all 46 tests (incl. `test_wall_heading.py` and
 `test_wall_oriented.py`). A watched live simulation is still required to
 tune/confirm the default offsets and blend weights.
+
+## Phase 25 — Compass-corrected attitude, and two odometry noise profiles
+
+**Date**: 2026-07-15
+**Files**: `slam/slam_backend/slam_backend/attitude_filter.py` (new),
+`slam/slam_backend/slam_backend/sensor_models/compass_sim.py` (new),
+`slam/slam_backend/slam_backend/dead_reckoning.py`,
+`slam/slam_backend/slam_backend/sensor_models/noise_profiles.py`,
+`slam/slam_backend/config/noise_{ideal,realistic,degraded,sonar_only}.yaml`,
+`slam/slam_backend/config/noise_odom_pos_only.yaml` (new),
+`slam/slam_backend/config/noise_odom_only.yaml` (new),
+`slam/slam_backend/launch/sensors_only.launch.py`,
+`slam/slam_backend/package.xml`, `slam/slam_backend/setup.py`,
+`slam/slam_backend/test/test_attitude_filter.py` (new),
+`slam/slam_backend/test/test_noise_profiles.py` (new),
+`README.md`, `STATE.md`
+
+Attitude fusion no longer treats IMU orientation as absolute. Roll/pitch
+still come straight from the IMU, but yaw is now propagated from IMU
+increments and corrected by a separate, lower-rate absolute compass heading
+through a wrapped-angle Kalman filter (`YawKalmanFilter` in the new
+`attitude_filter.py`). A new `compass_sim` node publishes that absolute
+heading from ground truth with its own noise/bias model
+(`CompassNoise` in `noise_profiles.py`); `dead_reckoning.py` and
+`sensors_only.launch.py` wire it in alongside pressure/IMU/DVL. Every
+existing profile gained a `compass:` block, and `noise_realistic.yaml` /
+`noise_degraded.yaml` reinterpret `imu.sigma_yaw_rad` as short-term
+gyro noise (with heading error now carried by the compass) rather than
+the old absolute-heading value; seed offsetting picks up a `compass +5`
+slot alongside the existing per-sensor offsets.
+
+Two new noise profiles isolate odometry from sonar error, the position
+counterpart to Phase 22's `sonar_only`: `odom_pos_only` keeps realistic
+DVL/pressure position noise while passing Stonefish attitude (IMU + compass)
+and sonar through exactly, isolating position drift from attitude and map
+error; `odom_only` keeps the full realistic nav stack (position and
+attitude) with an exact sonar passthrough, isolating all odometry error
+from sonar noise. `demo.launch.py`'s `noise_profile` choices and the three
+noise-profile-consuming launch files gain both names.
+
+Verified in the ROS Jazzy container: `colcon build --symlink-install
+--packages-select slam_backend` succeeds cleanly; `colcon test
+--packages-select slam_backend` passes all 5 tests, including
+`test_attitude_filter.py`'s Kalman-filter propagation/correction/wraparound
+cases and `test_noise_profiles.py`'s check that `odom_pos_only` matches
+`realistic` position noise with zero-sigma attitude and exact sonar.

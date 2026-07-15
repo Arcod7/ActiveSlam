@@ -7,7 +7,7 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     noise_profile_arg = DeclareLaunchArgument(
         'noise_profile', default_value='realistic',
-        description='Noise profile to use (ideal, sonar_only, realistic, degraded)'
+        description='Noise profile to use (ideal, sonar_only, odom_pos_only, odom_only, realistic, degraded)'
     )
     noise_seed_arg = DeclareLaunchArgument(
         'noise_seed', default_value='-1',
@@ -40,6 +40,16 @@ def generate_launch_description():
         }]
     )
 
+    compass_node = Node(
+        package='slam_backend',
+        executable='compass_sim',
+        name='compass_sim',
+        parameters=[{
+            'noise_profile_path': noise_file,
+            'noise_seed': LaunchConfiguration('noise_seed'),
+        }]
+    )
+
     dvl_node = Node(
         package='slam_backend',
         executable='dvl_sim',
@@ -54,12 +64,15 @@ def generate_launch_description():
         package='slam_backend',
         executable='dead_reckoning',
         name='dead_reckoning',
+        parameters=[{
+            'noise_profile_path': noise_file,
+        }],
     )
 
     return LaunchDescription([
         noise_profile_arg, noise_seed_arg,
         pressure_node,
-        imu_node,
+        imu_node, compass_node,
         dvl_node,
         dead_reckoning_node,
     ])

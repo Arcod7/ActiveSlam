@@ -1,0 +1,31 @@
+name: odom_pos_only
+seed: 42
+pressure:                    # realistic depth position (as noise_realistic.yaml)
+  sigma_depth_m: 0.02        # Bar30: +/-2 cm resolution
+  bias_m: 0.0
+  publish_rate_hz: 10.0
+imu:                         # exact Stonefish orientation
+  sigma_roll_rad: 0.0
+  sigma_pitch_rad: 0.0
+  sigma_yaw_rad: 0.0
+  gyro_bias_drift_rad_s: 0.0
+  publish_rate_hz: 50.0
+compass:                     # exact Stonefish heading
+  sigma_yaw_rad: 0.0
+  bias_drift_rad_s: 0.0
+  publish_rate_hz: 10.0
+dvl:                         # realistic integrated XY position (as noise_realistic.yaml)
+  sigma_pct: 0.01            # Pathfinder DVL: +/-1% of speed + 0.1 cm/s
+  sigma_floor_m_s: 0.001
+  bias_m_s: 0.001
+  scale_error_pct: 0.002     # 0.2% constant scale error (sampled once per run)
+  publish_rate_hz: 10.0
+sonar:                       # exact passthrough (as noise_ideal.yaml)
+  range_quant_m: 0.0
+  range_sigma0_m: 0.0
+  range_sigma_k: 0.0
+  lat_sigma_h_per_m: 0.0
+  lat_sigma_v_per_m: 0.0
+  dropout_p0: 0.0
+  dropout_p_range: 0.0
+  outlier_p: 0.0

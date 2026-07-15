@@ -40,7 +40,7 @@ def generate_launch_description():
     )
     noise_profile_arg = DeclareLaunchArgument(
         'noise_profile', default_value='realistic',
-        description='Noise profile for sonar_noise (ideal, sonar_only, realistic, degraded)',
+        description='Noise profile for sonar_noise (ideal, sonar_only, odom_pos_only, odom_only, realistic, degraded)',
     )
     noise_seed_arg = DeclareLaunchArgument(
         'noise_seed', default_value='-1',
