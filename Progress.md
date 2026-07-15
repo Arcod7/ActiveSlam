@@ -703,3 +703,39 @@ GUI path.
 Verified: `colcon build --symlink-install --packages-select stonefish_ros2`
 succeeds cleanly. Not yet confirmed against a live sim run (no GPU/RViz
 session in this pass) — flagged for the next visual check.
+
+## Phase 24 — Wall-guided motion executors: orientation blend + forward controller
+
+**Date**: 2026-07-14 to 2026-07-15
+**Files**: `planner/frontier_slam/frontier_slam/wall_follower.py`,
+`planner/frontier_slam/frontier_slam/wall_oriented_controller.py` (new),
+`planner/frontier_slam/launch/frontier_slam.launch.py`,
+`planner/frontier_slam/launch/wall_follow.launch.py`,
+`planner/frontier_slam/setup.py`,
+`planner/frontier_slam/test/test_wall_heading.py` (new),
+`planner/frontier_slam/test/test_wall_oriented.py` (new), `README.md`
+
+Two path executors now sit on top of the BLOCKED motion-status protocol
+(Phase prior): `motion:=walllooking` (`wall_follower`) and
+`motion:=walloriented` (the new `wall_oriented_controller`).
+
+`wall_follower` separates translation and viewing controls. `path_influence`
+blends wall-tangent and planner-path travel; viewing builds a path-derived
+heading (`path_look_offset_deg`, toward the wall) and a wall-derived heading
+(`wall_normal_offset_deg`, toward the route), then blends them over the
+shortest circular arc with `path_heading_weight` (0 = wall-derived, 1 =
+path-derived). A new SWITCH state turns to observe the goal side and selects
+an alternative wall when no path progress is made within
+`progress_timeout_s`; both states now report `BLOCKED` to the planner instead
+of stalling silently.
+
+`wall_oriented_controller` is a simpler sibling: it follows the same
+goal/path as the ordinary waypoint controller, holonomically projecting route
+velocity onto surge/sway, while yawing `look_offset_deg` toward whichever
+side the nearest mapped surface point falls on. It does not estimate wall
+normals, regulate standoff, or alter the route.
+
+Verified in the ROS Jazzy container: `colcon test --packages-select
+frontier_slam` passes all 46 tests (incl. `test_wall_heading.py` and
+`test_wall_oriented.py`). A watched live simulation is still required to
+tune/confirm the default offsets and blend weights.

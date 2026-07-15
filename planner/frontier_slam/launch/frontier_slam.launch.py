@@ -44,6 +44,12 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition, LaunchConfigurationEquals
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+
+
+def _float_parameter(name: str) -> ParameterValue:
+    """Resolve a launch argument as a ROS double, including whole numbers."""
+    return ParameterValue(LaunchConfiguration(name), value_type=float)
 
 
 def generate_launch_description():
@@ -81,6 +87,63 @@ def generate_launch_description():
         default_value='0.0',
         description='drift_return: outbound leg Y offset (m) from the captured start position.',
     )
+    motion_arg = DeclareLaunchArgument(
+        'motion', default_value='forward',
+        choices=['forward', 'walloriented', 'walllooking'],
+        description='Selected motion executor for the planner path.',
+    )
+    wall_orientation_offset_arg = DeclareLaunchArgument(
+        'wall_orientation_offset_deg', default_value='30.0',
+        description='walloriented: fixed yaw offset from the path toward the nearest wall.',
+    )
+    wall_orientation_lookahead_arg = DeclareLaunchArgument(
+        'wall_orientation_lookahead_m', default_value='0.0',
+        description=(
+            'walloriented: look-heading radius along the A* path in metres; '
+            '0 preserves the current-position heading.'),
+    )
+    wall_orientation_speed_scale_arg = DeclareLaunchArgument(
+        'wall_orientation_speed_scale', default_value='0.9',
+        description='walloriented: path speed scale (default 0.9 = 10% slower).',
+    )
+    wall_points_topic_arg = DeclareLaunchArgument(
+        'wall_points_topic', default_value='/octomap_point_cloud_centers',
+        description=(
+            'walloriented: XYZ map cloud used to choose left/right. Use '
+            '/tsdf/surface_cloud with the TSDF mapper.'),
+    )
+    wall_standoff_arg = DeclareLaunchArgument(
+        'wall_standoff', default_value='1.5',
+        description='Wall-follow target standoff in metres.',
+    )
+    wall_switch_goal_distance_arg = DeclareLaunchArgument(
+        'wall_switch_goal_distance', default_value='6.0',
+        description='Try a turn-and-select-another-wall search when the goal is within this many metres.',
+    )
+    wall_switch_scan_angle_arg = DeclareLaunchArgument(
+        'wall_switch_scan_angle', default_value='3.14159',
+        description='Wall-switch sweep angle in radians (default: 180 degrees).',
+    )
+    wall_switch_scan_yaw_arg = DeclareLaunchArgument(
+        'wall_switch_scan_yaw', default_value='0.08',
+        description='Yaw command used for the wall-switch sweep.',
+    )
+    wall_path_influence_arg = DeclareLaunchArgument(
+        'wall_path_influence', default_value='0.70',
+        description='Wall-looking travel blend: 0=wall tangent, 1=planned path direction.',
+    )
+    wall_path_look_offset_arg = DeclareLaunchArgument(
+        'wall_path_look_offset_deg', default_value='30.0',
+        description='Degrees to turn from the planner bearing toward the selected wall.',
+    )
+    wall_normal_offset_arg = DeclareLaunchArgument(
+        'wall_normal_offset_deg', default_value='0.0',
+        description='Degrees to turn from the wall-facing normal toward the planner bearing.',
+    )
+    wall_path_heading_weight_arg = DeclareLaunchArgument(
+        'wall_path_heading_weight', default_value='0.35',
+        description='Orientation blend: 0=wall-derived look heading, 1=path-derived look heading.',
+    )
     depth = LaunchConfiguration('depth')
     odom_topic = LaunchConfiguration('odom_topic')
 
@@ -91,6 +154,19 @@ def generate_launch_description():
         scenario_arg,
         scenario_out_dx_arg,
         scenario_out_dy_arg,
+        motion_arg,
+        wall_orientation_offset_arg,
+        wall_orientation_lookahead_arg,
+        wall_orientation_speed_scale_arg,
+        wall_points_topic_arg,
+        wall_standoff_arg,
+        wall_switch_goal_distance_arg,
+        wall_switch_scan_angle_arg,
+        wall_switch_scan_yaw_arg,
+        wall_path_influence_arg,
+        wall_path_look_offset_arg,
+        wall_normal_offset_arg,
+        wall_path_heading_weight_arg,
         Node(
             package='frontier_slam',
             executable='frontier_extractor',
@@ -104,6 +180,41 @@ def generate_launch_description():
             name='waypoint_controller',
             output='screen',
             parameters=[{'depth_setpoint': depth, 'odom_topic': odom_topic}],
+            condition=LaunchConfigurationEquals('motion', 'forward'),
+        ),
+        Node(
+            package='frontier_slam',
+            executable='wall_oriented_controller',
+            name='wall_oriented_controller',
+            output='screen',
+            parameters=[{
+                'depth_setpoint': _float_parameter('depth'),
+                'odom_topic': odom_topic,
+                'look_offset_deg': _float_parameter('wall_orientation_offset_deg'),
+                'lookahead_m': _float_parameter('wall_orientation_lookahead_m'),
+                'speed_scale': _float_parameter('wall_orientation_speed_scale'),
+                'map_points_topic': LaunchConfiguration('wall_points_topic'),
+            }],
+            condition=LaunchConfigurationEquals('motion', 'walloriented'),
+        ),
+        Node(
+            package='frontier_slam',
+            executable='wall_follower',
+            name='wall_follower',
+            output='screen',
+            parameters=[{
+                'depth_setpoint': _float_parameter('depth'),
+                'odom_topic': odom_topic,
+                'standoff_m': _float_parameter('wall_standoff'),
+                'switch_goal_distance_m': _float_parameter('wall_switch_goal_distance'),
+                'switch_scan_angle_rad': _float_parameter('wall_switch_scan_angle'),
+                'switch_scan_yaw': _float_parameter('wall_switch_scan_yaw'),
+                'path_influence': _float_parameter('wall_path_influence'),
+                'path_look_offset_deg': _float_parameter('wall_path_look_offset_deg'),
+                'wall_normal_offset_deg': _float_parameter('wall_normal_offset_deg'),
+                'path_heading_weight': _float_parameter('wall_path_heading_weight'),
+            }],
+            condition=LaunchConfigurationEquals('motion', 'walllooking'),
         ),
         Node(
             package='frontier_slam',
