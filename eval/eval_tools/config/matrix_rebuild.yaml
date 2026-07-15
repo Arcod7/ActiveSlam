@@ -1,7 +1,7 @@
 # Focused A/B for map-rebuild fidelity (cache + correction replay, see
-# pose_graph.py / tsdf_mapper.py and docs/plans/WP0_WP1_WP2_revisit_rebuild.md
-# WP2): plain TSDF vs TSDF with rebuild-on-big-closure, 2 configs x 3 seeds =
-# 6 runs, ~8 min each -> ~1.6h total.
+# pose_graph.py / tsdf_mapper.py and docs/plans/plan.md Phase 2 T2.1): plain
+# TSDF vs TSDF with rebuild-on-big-closure, 2 configs x 5 seeds = 10 runs,
+# ~8 min each -> ~2.6h total.
 #
 #   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_rebuild.yaml
 #
@@ -10,7 +10,7 @@
 batch_name: rebuild
 duration_s: 480
 settle_s: 15
-seeds: [101, 102, 103]
+seeds: [101, 102, 103, 104, 105]
 
 common_args:
   slam: slam
