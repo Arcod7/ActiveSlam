@@ -80,6 +80,12 @@ class WaypointController(Node):
 
         self.declare_parameter('odom_topic', '/StoneFish/Odometry')
         odom_topic = str(self.get_parameter('odom_topic').value)
+        self.declare_parameter('goal_topic', '/frontier_slam/goal')
+        self.declare_parameter('path_topic', '/frontier_slam/path')
+        self.declare_parameter('thruster_topic', '/bluerov2/controller/thruster_setpoints_sim')
+        goal_topic = str(self.get_parameter('goal_topic').value)
+        path_topic = str(self.get_parameter('path_topic').value)
+        thruster_topic = str(self.get_parameter('thruster_topic').value)
 
         self._goal: np.ndarray | None = None
         self._pose: np.ndarray | None = None
@@ -96,16 +102,18 @@ class WaypointController(Node):
 
         self._log = open_session_log('controller', CSV_COLUMNS, _LOG_DIR)
 
-        self.create_subscription(PointStamped, '/frontier_slam/goal',        self._goal_cb,  1)
-        self.create_subscription(Path,         '/frontier_slam/path',        self._path_cb,  1)
+        self.create_subscription(PointStamped, goal_topic,                   self._goal_cb,  1)
+        self.create_subscription(Path,         path_topic,                   self._path_cb,  1)
         self.create_subscription(Odometry,     odom_topic,                   self._odom_cb,  10)
         self.create_subscription(Image,        '/sensor_msgs/image_depth',   self._depth_cb, 1)
         self._thrust_pub = self.create_publisher(
-            Float64MultiArray, '/bluerov2/controller/thruster_setpoints_sim', 1,
+            Float64MultiArray, thruster_topic, 1,
         )
 
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
-        self.get_logger().info(f'waypoint_controller ready — logging to {self._log.path}')
+        self.get_logger().info(
+            f'waypoint_controller ready — goal_topic={goal_topic} path_topic={path_topic} '
+            f'— logging to {self._log.path}')
 
     # ------------------------------------------------------------------
     # ROS callbacks

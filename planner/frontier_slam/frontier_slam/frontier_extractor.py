@@ -31,7 +31,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from geometry_msgs.msg import PointStamped, PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 
 from frontier_slam.control_utils import yaw_from_quat
 from frontier_slam.frontier_detection import find_frontier_clusters
@@ -63,7 +63,9 @@ class FrontierExtractor(Node):
         super().__init__('frontier_extractor')
 
         self.declare_parameter('odom_topic', '/StoneFish/Odometry')
+        self.declare_parameter('motion_status_topic', '/motion/status')
         odom_topic = str(self.get_parameter('odom_topic').value)
+        motion_status_topic = str(self.get_parameter('motion_status_topic').value)
 
         self._map: OccupancyGrid | None = None
         self._robot_pos: np.ndarray | None = None
@@ -93,6 +95,7 @@ class FrontierExtractor(Node):
         self.create_subscription(Odometry,      odom_topic,      self._odom_cb, 10)
         self.create_subscription(Bool, '/frontier_slam/suspend', self._suspend_cb, 1)
         self.create_subscription(PointStamped, '/frontier_slam/goal', self._external_goal_cb, 1)
+        self.create_subscription(String, motion_status_topic, self._motion_status_cb, 1)
         self._goal_pub = self.create_publisher(PointStamped, '/frontier_slam/goal', 1)
         self._path_pub = self.create_publisher(Path,         '/frontier_slam/path', 1)
         self._viz      = FrontierVisualizer(self)
@@ -124,6 +127,28 @@ class FrontierExtractor(Node):
         if not self._suspended:
             return   # not suspended: this is our own publication looping back, ignore
         self._current_goal_xy = np.array([msg.point.x, msg.point.y])
+
+    def _motion_status_cb(self, msg: String) -> None:
+        """Consume a planner-agnostic motion failure report.
+
+        Motion nodes never select replacement goals.  This planner treats a
+        BLOCKED report as equivalent to repeated A* failure: blacklist the
+        committed goal and let its normal frontier selection pick the next one.
+        Other planners can publish or interpret the same topic independently.
+        """
+        if not msg.data.startswith('BLOCKED'):
+            return
+        if self._current_goal_xy is None or self._suspended:
+            return
+        gxy = self._current_goal_xy.copy()
+        self._goals.mark_unreachable(gxy, self._now())
+        self._current_goal_xy = None
+        self._current_path = []
+        self._astar_fail_count = 0
+        self._astar_fail_goal = None
+        self.get_logger().warn(
+            f'Motion reported {msg.data} for ({gxy[0]:.1f},{gxy[1]:.1f}) '
+            '— blacklisting and selecting a new frontier goal')
 
     def _now(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9

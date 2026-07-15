@@ -1,11 +1,9 @@
 # Loop-closure A/B (see matrix_lc_ab.yaml for the frontier+octomap version),
-# this time motion:=wallfollow + mapper:=tsdf: the wall follower orbits
-# whatever TSDF surface it locks onto (mode:=teleop -- wallfollow is a
-# standalone motion, not compatible with mode:=frontier, both publish
-# directly to /bluerov2/controller/thruster_setpoints_sim). Reconnaissance
-# run (2026-07-10, not part of this batch) confirmed the default world's
-# structure is within wall_follower's 8m cold-start range from the robot's
-# spawn point and a real loop closure fires within ~90s of tracking.
+# this time motion:=wallfollow + mapper:=tsdf. The selected wall motion
+# executor consumes the frontier planner's goal/path and reports BLOCKED when
+# it cannot progress; the planner then selects another frontier. A prior
+# standalone wall-follow batch is not comparable to this planner-integrated
+# configuration.
 #
 #   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_lc_ab_wallfollow.yaml
 batch_name: lc_ab_wallfollow
@@ -15,7 +13,7 @@ seeds: [42]
 
 common_args:
   slam: slam
-  mode: teleop
+  mode: frontier
   motion: wallfollow
   mapper: tsdf
   rviz: 'false'
