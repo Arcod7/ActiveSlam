@@ -25,6 +25,8 @@
 
 #include "stonefish_ros2/ROS2SimulationManager.h"
 #include "stonefish_ros2/ROS2GraphicalSimulationApp.h"
+#include <Stonefish/core/Robot.h>
+#include <Stonefish/graphics/OpenGLTrackball.h>
 
 namespace sf
 {
@@ -37,6 +39,12 @@ ROS2GraphicalSimulationApp::ROS2GraphicalSimulationApp(std::string title, std::s
 void ROS2GraphicalSimulationApp::Startup()
 {
     Init();
+
+    //Default the trackball view to follow the robot instead of the free camera
+    Robot* rob = getSimulationManager()->getRobot("bluerov2");
+    if(rob != nullptr)
+        getSimulationManager()->getTrackball()->GlueToMoving(rob->getBaseLink());
+
     StartSimulation();
 }
 

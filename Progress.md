@@ -683,3 +683,23 @@ Verified: clean rebuild of `slam_backend` (new file in the `config/*.yaml`
 `data_files` glob), `sensors_only.launch.py noise_profile:=sonar_only` starts
 all four sensor sims with ideal-grade nav values (pressure sigma 0.001 m, DVL
 scale err 0.000%).
+
+## Phase 23 — Trackball defaults to following `bluerov2`
+
+**Date**: 2026-07-13
+**Files**: `sim/stonefish_ros2/src/stonefish_ros2/ROS2GraphicalSimulationApp.cpp`
+
+Every launch previously opened Stonefish's free-floating default view; the
+GUI has a "Trackball center" dropdown to glue the camera to a robot, but it
+had to be set by hand each run. `Startup()` now looks up the `bluerov2`
+robot right after `Init()` (scenario is fully built by then — robots and the
+trackball are both constructed inside `SimulationManager::RestartScenario()`,
+which `Init()` calls synchronously) and calls
+`getTrackball()->GlueToMoving(rob->getBaseLink())` before
+`StartSimulation()`. No stonefish core (patched fork) changes needed —
+`GlueToMoving` was already public API, just never invoked outside the manual
+GUI path.
+
+Verified: `colcon build --symlink-install --packages-select stonefish_ros2`
+succeeds cleanly. Not yet confirmed against a live sim run (no GPU/RViz
+session in this pass) — flagged for the next visual check.
