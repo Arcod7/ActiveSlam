@@ -71,7 +71,7 @@ Independent switches, each defaulting to the first value:
 ros2 launch bringup demo.launch.py mode:=teleop|frontier          # operator mode
 ros2 launch bringup demo.launch.py mapper:=octomap|tsdf           # map backend
 ros2 launch bringup demo.launch.py slam:=none|slam                # pose source
-ros2 launch bringup demo.launch.py noise_profile:=ideal|realistic|degraded  # slam:=slam only
+ros2 launch bringup demo.launch.py noise_profile:=ideal|sonar_only|realistic|degraded  # slam:=slam only
 ros2 launch bringup demo.launch.py rviz:=false                    # headless
 ```
 

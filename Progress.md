@@ -662,3 +662,24 @@ TSDF surface (octomap has no display in `demo_tsdf.rviz` by design — a
 TSDF-focused view). `matrix_full.yaml`'s `tsdf`/`tsdf_rebuild` rows and
 `matrix_smoke.yaml`'s `tsdf_rebuild` row remain invalid as currently
 configured pending re-specification against the dual-map setup.
+
+## Phase 22 — `sonar_only` noise profile
+
+**Date**: 2026-07-10
+**Files**: `slam/slam_backend/config/noise_sonar_only.yaml` (new),
+`slam/slam_backend/launch/slam.launch.py`,
+`slam/slam_backend/launch/sensors_only.launch.py`,
+`slam/stonefish_groundtruth_mapping/launch/pointcloud.launch.py`
+
+New `sonar_only` noise profile: sonar block copied from `realistic`
+(WaterLinked 3D-15 datasheet values), pressure/IMU/DVL blocks from `ideal`,
+`seed: 42`. Isolates sonar noise from dead-reckoning drift — fills the gap in
+the difficulty ladder between all-ideal and all-realistic (noisy map input
+against near-ground-truth odometry, with and without loop closure). The
+three launch files only needed their description strings updated (they
+build the config path from the name, unconstrained).
+
+Verified: clean rebuild of `slam_backend` (new file in the `config/*.yaml`
+`data_files` glob), `sensors_only.launch.py noise_profile:=sonar_only` starts
+all four sensor sims with ideal-grade nav values (pressure sigma 0.001 m, DVL
+scale err 0.000%).

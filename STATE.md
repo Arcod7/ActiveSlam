@@ -83,12 +83,14 @@ depth_image_proc ─► /cloud_in_raw ─► sonar_noise ─► /cloud_in (5Hz) 
 
 ### Noise Profiles (`slam/slam_backend/config/`)
 - `noise_ideal.yaml`: near-perfect sensors (sanity checks); sonar section all-zero (exact passthrough)
+- `noise_sonar_only.yaml`: sonar section from `realistic`, nav sensors from `ideal`, seed 42 —
+  isolates sonar noise from dead-reckoning drift
 - `noise_realistic.yaml`: matches Bar30 pressure + Pathfinder DVL + typical MEMS IMU; sonar section
   derived from the WaterLinked Sonar 3D-15 datasheet (`ActiveSlam-Resources/3d-sonar`)
 - `noise_degraded.yaml`: turbid water / magnetic interference / degraded bottom-lock; sonar section
   worse-than-datasheet (full beam-separation lateral jitter, higher dropout/outlier rates)
 
-Each profile's `seed:` (42 for `ideal`, -1/random for `realistic`/`degraded`) is combined with a
+Each profile's `seed:` (42 for `ideal`/`sonar_only`, -1/random for `realistic`/`degraded`) is combined with a
 per-sensor offset (imu +1, dvl +2, pressure +3, sonar +4) before seeding, so co-launched sims no
 longer draw identical RNG streams off one shared seed — this changed `ideal`'s exact per-sensor
 draws vs. pre-Phase-16 runs (same seed, different effective value per node); nothing previously
@@ -129,6 +131,7 @@ every tick, so `ros2 param set` takes effect without a restart)
 | `cooldown_s` | 60 | COOLDOWN → EXPLORING delay |
 
 ### Launch usage
+
 ```bash
 ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic mode:=frontier
 ros2 launch bringup demo.launch.py                                       # unchanged default (slam:=none, ground truth)
