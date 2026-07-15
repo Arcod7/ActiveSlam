@@ -49,10 +49,12 @@ CSV_COLUMNS = [
 class WaypointController(Node):
     # P-gains
     KP_YAW   = 0.07
-    KP_SURGE = 0.35
-    KP_HEAVE = 0.40
+    # Keep yaw behaviour unchanged, but slow path translation by 10% to give
+    # scan matching more overlap between consecutive mapping keyframes.
+    KP_SURGE = 0.25
+    KP_HEAVE = 0.35
 
-    MAX_SURGE             = 0.35
+    MAX_SURGE             = 0.25
     GOAL_RADIUS           = 2.0    # m
     GOAL_REACHED_TIMEOUT  = 10.0   # s — clear stale goal after this long at goal
     SCAN_YAW              = 0.08   # rotation speed while scanning / at goal

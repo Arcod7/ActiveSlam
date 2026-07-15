@@ -37,15 +37,25 @@ wall, while surge+sway keep the actual travel direction on the path. It uses
 `/octomap_point_cloud_centers` with `mapper:=octomap`. If the selected map cloud
 is missing or stale, it temporarily behaves like direct forward control.
 
+With `mapper:=tsdf`, the frontier selector also rejects a 2-D frontier whose
+point at the vehicle's depth is inside a confidently solid TSDF voxel. It is a
+strict containment check, not a wall-clearance buffer, so valid frontiers on a
+surface boundary remain selectable.
+
+It also offsets each valid TSDF frontier goal by `tsdf_frontier_standoff_m`
+(default `1.0`) along the outward horizontal TSDF surface normal, keeping the
+vehicle in free space rather than targeting the surface itself. Set it to `0.0`
+to retain the original surface-centred goal.
+
 `motion:=wall_oriented` is accepted as an alias. The offset is capped below
 90 degrees so the controller remains forward-oriented.
 
-`wall_orientation_speed_scale` defaults to `0.9`, making this controller 10%
-slower than its original path speed. Set `wall_orientation_lookahead_m` to a
-positive radius (for example `3.0`) to use the tangent where that circle first
-intersects the forward A* path for wall-side and viewing heading. Translation
-still follows the current path waypoint; `0.0` keeps the exact former heading
-behaviour.
+Path translation is 10% slower (the controller constants are `0.315` rather
+than `0.35`) to give scan matching more overlap between keyframes. Yaw control
+is unchanged. Set `wall_orientation_lookahead_m` to a positive radius (for
+example `3.0`) to use the tangent where that circle first intersects the
+forward A* path for wall-side and viewing heading. Translation still follows
+the current path waypoint; `0.0` keeps the exact former heading behaviour.
 
 ## 3b. Wall-looking path execution (wall-normal/standoff controller)
 
@@ -153,11 +163,15 @@ ros2 launch bringup demo.launch.py slam:=slam mode:=frontier mapper:=tsdf \
 
 ```bash
 ros2 launch bringup demo.launch.py slam:=slam mode:=frontier mapper:=tsdf \
-    noise_profile:=realistic revisit:=true
+    noise_profile:=realistic
 ```
 
-Suspends exploration to revisit mapped area when pose uncertainty (D-optimality)
-exceeds threshold. Force it early: `ros2 param set /revisit_planner dopt_trigger 0.002`.
+`revisit:=true` is the default for `slam:=slam mode:=frontier`. It suspends
+exploration, selects a previously mapped keyframe likely to form a loop, and
+uses the normal A* path planner to return to it when pose uncertainty
+(D-optimality) exceeds the threshold. It resumes only after a loop closure,
+reduced uncertainty, timeout, or sterile arrival; use `revisit:=false` to
+disable it. Force it early: `ros2 param set /revisit_planner dopt_trigger 0.002`.
 
 ## 10. Belief-map rebuild after large closures
 
@@ -184,7 +198,7 @@ ros2 launch bringup demo.launch.py slam:=slam mode:=frontier mapper:=tsdf \
 | `motion` | `default`, `walloriented` (`wall_oriented` alias), `walllooking` (`wallfollow` alias) | `walllooking` needs `mapper:=tsdf` |
 | `wall_orientation_offset_deg` | `30.0` | `motion:=walloriented`; yaw offset toward nearest mapped wall |
 | `wall_orientation_lookahead_m` | `0.0` | `motion:=walloriented`; future path-heading radius |
-| `wall_orientation_speed_scale` | `0.9` | `motion:=walloriented`; path speed scale (10% slower) |
+| `tsdf_frontier_standoff_m` | `1.0` | `mapper:=tsdf`; free-space goal offset along outward surface normal |
 | `wall_standoff` | `1.5` | `motion:=walllooking`; target wall distance (m) |
 | `wall_switch_goal_distance` | `6.0` | `motion:=walllooking`; nearby-goal wall-switch gate (m) |
 | `wall_switch_scan_angle` | `3.14159` | `motion:=walllooking`; sweep angle (rad) |
@@ -198,7 +212,7 @@ ros2 launch bringup demo.launch.py slam:=slam mode:=frontier mapper:=tsdf \
 | `loop_closure` | `true`, `false` | `slam:=slam` |
 | `noise_seed` | `-1` (profile default), any int | `slam:=slam` |
 | `scenario` | `none`, `drift_return` | `mode:=frontier` |
-| `revisit` | `false`, `true` | `slam:=slam mode:=frontier` |
+| `revisit` | `true`, `false` | `slam:=slam mode:=frontier`; uncertainty-triggered loop-closure revisit |
 | `map_rebuild` | `false`, `true` | `slam:=slam mapper:=tsdf` |
 | `rviz` | `true`, `false` | |
 | `output_dir` | timestamped under `eval/runs/` | `slam:=slam` |

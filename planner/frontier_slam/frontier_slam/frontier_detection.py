@@ -22,6 +22,44 @@ class Cluster:
     dy: float = 0.0  # unit direction toward the unknown (world y)
 
 
+def point_inside_tsdf_solid(point_xyz: np.ndarray, solid_xyz: np.ndarray,
+                            containment_radius_m: float) -> bool:
+    """Return whether a 3-D point lies inside a published solid TSDF voxel.
+
+    ``solid_xyz`` contains centres of confidently occupied TSDF voxels, not
+    surface samples.  The radius should be about half the voxel diagonal; it
+    tests containment only, rather than creating a wall-clearance buffer that
+    would discard the occupied-boundary frontiers this planner intentionally
+    uses as exploration targets.
+    """
+    if solid_xyz is None or len(solid_xyz) == 0 or containment_radius_m <= 0.0:
+        return False
+    delta = np.asarray(solid_xyz, dtype=np.float64) - np.asarray(point_xyz, dtype=np.float64)
+    return bool(np.min(np.einsum('ij,ij->i', delta, delta))
+                <= containment_radius_m * containment_radius_m)
+
+
+def standoff_point_from_tsdf_surface(surface_xyz: np.ndarray,
+                                     normal_xyz: np.ndarray,
+                                     standoff_m: float) -> np.ndarray | None:
+    """Return a horizontal free-space standoff point from a TSDF surface.
+
+    VDBFusion's signed distance is positive in free space and negative in a
+    solid.  Its TSDF gradient therefore points outward into free space.  Only
+    the horizontal normal component is used because frontier navigation holds
+    depth.  ``None`` means the normal belongs to a floor/ceiling or is invalid.
+    """
+    surface = np.asarray(surface_xyz, dtype=np.float64)
+    normal = np.asarray(normal_xyz, dtype=np.float64)
+    if surface.shape != (3,) or normal.shape != (3,) or not np.isfinite(normal).all():
+        return None
+    horizontal = normal[:2]
+    length = float(np.linalg.norm(horizontal))
+    if length < 1e-6:
+        return None
+    return surface[:2] + max(0.0, standoff_m) * horizontal / length
+
+
 def find_frontier_clusters(grid_msg, min_cluster_cells: int = 5) -> list:
     """Return clusters of frontier cells in the OccupancyGrid.
 

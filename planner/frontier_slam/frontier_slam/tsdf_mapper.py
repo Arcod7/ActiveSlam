@@ -31,6 +31,8 @@ Published topics:
                                (0.5 at the surface d=0, 1.0 at full saturation d=-trunc)
                            color ∝ weight (log-scale): orange = just past the
                            observation floor, green = heavily observed.
+  /tsdf/occupied_voxels  (sensor_msgs/PointCloud2) confidently solid TSDF
+                           voxel centres for collision-aware goal validation
 """
 
 from collections import OrderedDict
@@ -150,6 +152,8 @@ class TSDFMapper(Node):
         self._normals_cloud_pub = self.create_publisher(
             PointCloud2, '/tsdf/surface_normals_cloud', 1)
         self._voxels_pub  = self.create_publisher(MarkerArray, '/tsdf/voxels',           1)
+        self._solid_cloud_pub = self.create_publisher(
+            PointCloud2, '/tsdf/occupied_voxels', 1)
 
         self.create_timer(1.0 / self.PUBLISH_HZ,   self._publish_surface)
         self.create_timer(1.0 / self.VOXEL_VIZ_HZ, self._publish_voxels)
@@ -346,13 +350,16 @@ class TSDFMapper(Node):
         # Only iterate voxels we'll actually show (early filtering inside):
         # confidently solid (TSDF-derived) AND observed often enough (weight).
         max_d = self._voxel_max_d if not self._show_free else None
-        pts, _d_vals, w_vals = _extract_voxels(
+        pts, d_vals, w_vals = _extract_voxels(
             self._volume.tsdf, self._volume.weights,
             self._voxel_size, min_weight=self._voxel_min_weight, max_d=max_d)
 
         now = self.get_clock().now().to_msg()
+        header = Header(stamp=now, frame_id=self._world_frame)
 
         if pts is None:
+            self._solid_cloud_pub.publish(
+                _make_pointcloud2(header, np.empty((0, 3), dtype=np.float32)))
             del_m = Marker()
             del_m.header.stamp    = now
             del_m.header.frame_id = self._world_frame
@@ -361,6 +368,12 @@ class TSDFMapper(Node):
             del_m.action = Marker.DELETE
             self._voxels_pub.publish(MarkerArray(markers=[del_m]))
             return
+
+        # This remains a solid-only cloud even if the optional voxel
+        # visualisation includes free space.  It is consumed by the frontier
+        # planner to veto only goals physically inside a TSDF solid voxel.
+        solid_pts = pts if not self._show_free else pts[d_vals <= self._voxel_max_d]
+        self._solid_cloud_pub.publish(_make_pointcloud2(header, solid_pts))
 
         n = len(pts)
         if n > self._max_viz:

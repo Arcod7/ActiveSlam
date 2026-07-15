@@ -79,10 +79,12 @@ def generate_launch_description():
             "Wall-oriented lookahead radius along the A* path, in metres; "
             "0 preserves current-position heading"),
     )
-    wall_orientation_speed_scale_arg = DeclareLaunchArgument(
-        "wall_orientation_speed_scale",
-        default_value="0.9",
-        description="Wall-oriented path speed scale (0.9 is 10% slower)",
+    tsdf_frontier_standoff_arg = DeclareLaunchArgument(
+        "tsdf_frontier_standoff_m",
+        default_value="1.0",
+        description=(
+            "TSDF frontier goal offset from its surface along the outward wall normal, "
+            "in metres"),
     )
     wall_standoff_arg = DeclareLaunchArgument(
         "wall_standoff",
@@ -181,11 +183,11 @@ def generate_launch_description():
     )
     revisit_arg = DeclareLaunchArgument(
         "revisit",
-        default_value="false",
+        default_value="true",
         choices=["true", "false"],
-        description="Uncertainty-triggered revisit planner: suspends frontier "
-        "exploration to revisit mapped areas when pose uncertainty "
-        "(D-optimality) exceeds a threshold (mode:=frontier + slam:=slam only)",
+        description="Enable uncertainty-triggered revisit by default for a "
+        "SLAM frontier run; suspends exploration to revisit mapped areas when "
+        "D-optimality exceeds a threshold (set false to disable).",
     )
     scenario_arg = DeclareLaunchArgument(
         "scenario",
@@ -352,8 +354,8 @@ def generate_launch_description():
                 "wall_orientation_offset_deg"),
             "wall_orientation_lookahead_m": LaunchConfiguration(
                 "wall_orientation_lookahead_m"),
-            "wall_orientation_speed_scale": LaunchConfiguration(
-                "wall_orientation_speed_scale"),
+            "tsdf_frontier_standoff_m": LaunchConfiguration(
+                "tsdf_frontier_standoff_m"),
             "wall_points_topic": PythonExpression(
                 [
                     "'/tsdf/surface_cloud' if '",
@@ -552,7 +554,7 @@ def generate_launch_description():
             motion_arg,
             wall_orientation_offset_arg,
             wall_orientation_lookahead_arg,
-            wall_orientation_speed_scale_arg,
+            tsdf_frontier_standoff_arg,
             wall_standoff_arg,
             wall_switch_goal_distance_arg,
             wall_switch_scan_angle_arg,

@@ -116,6 +116,7 @@ def generate_launch_description():
             ('/tsdf/surface_normals',       '/gt/tsdf/surface_normals'),
             ('/tsdf/surface_normals_cloud', '/gt/tsdf/surface_normals_cloud'),
             ('/tsdf/voxels',                '/gt/tsdf/voxels'),
+            ('/tsdf/occupied_voxels',       '/gt/tsdf/occupied_voxels'),
         ],
         condition=LaunchConfigurationEquals('mapper', 'tsdf'),
     )

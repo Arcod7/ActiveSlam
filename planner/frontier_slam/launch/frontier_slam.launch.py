@@ -22,6 +22,9 @@ Optional arguments:
               Default: /StoneFish/Odometry (ground truth)
               Noisy:   /StoneFish/Odometry/noisy (requires odom_to_tf_noisy running)
   revisit     Start revisit_planner. Default: false.
+  tsdf_frontier_standoff_m
+              TSDF-only horizontal distance to hold from a frontier surface,
+              measured along its outward normal. Default: 1.0 m.
   scenario    Scripted evaluation scenario: none or drift_return. Default: none.
   scenario_out_dx/scenario_out_dy
               Outbound leg offset (m) from the start position for
@@ -102,9 +105,9 @@ def generate_launch_description():
             'walloriented: look-heading radius along the A* path in metres; '
             '0 preserves the current-position heading.'),
     )
-    wall_orientation_speed_scale_arg = DeclareLaunchArgument(
-        'wall_orientation_speed_scale', default_value='0.9',
-        description='walloriented: path speed scale (default 0.9 = 10% slower).',
+    tsdf_frontier_standoff_arg = DeclareLaunchArgument(
+        'tsdf_frontier_standoff_m', default_value='1.0',
+        description='TSDF frontier goal offset from the surface along its outward normal, in metres.',
     )
     wall_points_topic_arg = DeclareLaunchArgument(
         'wall_points_topic', default_value='/octomap_point_cloud_centers',
@@ -157,7 +160,7 @@ def generate_launch_description():
         motion_arg,
         wall_orientation_offset_arg,
         wall_orientation_lookahead_arg,
-        wall_orientation_speed_scale_arg,
+        tsdf_frontier_standoff_arg,
         wall_points_topic_arg,
         wall_standoff_arg,
         wall_switch_goal_distance_arg,
@@ -172,7 +175,10 @@ def generate_launch_description():
             executable='frontier_extractor',
             name='frontier_extractor',
             output='screen',
-            parameters=[{'odom_topic': odom_topic}],
+            parameters=[{
+                'odom_topic': odom_topic,
+                'tsdf_frontier_standoff_m': _float_parameter('tsdf_frontier_standoff_m'),
+            }],
         ),
         Node(
             package='frontier_slam',
@@ -192,7 +198,6 @@ def generate_launch_description():
                 'odom_topic': odom_topic,
                 'look_offset_deg': _float_parameter('wall_orientation_offset_deg'),
                 'lookahead_m': _float_parameter('wall_orientation_lookahead_m'),
-                'speed_scale': _float_parameter('wall_orientation_speed_scale'),
                 'map_points_topic': LaunchConfiguration('wall_points_topic'),
             }],
             condition=LaunchConfigurationEquals('motion', 'walloriented'),

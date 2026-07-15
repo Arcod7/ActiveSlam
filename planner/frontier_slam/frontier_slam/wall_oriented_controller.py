@@ -174,10 +174,10 @@ def parse_xyz_cloud(msg: PointCloud2) -> 'np.ndarray | None':
 
 class WallOrientedController(Node):
     KP_YAW = 0.07
-    KP_SPEED = 0.35
-    KP_HEAVE = 0.40
+    KP_SPEED = 0.25
+    KP_HEAVE = 0.35
 
-    MAX_SPEED = 0.35
+    MAX_SPEED = 0.25
     GOAL_RADIUS = 2.0
     GOAL_REACHED_TIMEOUT = 10.0
     SCAN_YAW = 0.08
@@ -201,7 +201,6 @@ class WallOrientedController(Node):
         self.declare_parameter('depth_setpoint', -1.0)
         self.declare_parameter('look_offset_deg', 30.0)
         self.declare_parameter('lookahead_m', 0.0)
-        self.declare_parameter('speed_scale', 0.9)
         self.declare_parameter('map_points_topic', '/octomap_point_cloud_centers')
         self.declare_parameter('max_wall_distance_m', 8.0)
         self.declare_parameter('wall_z_band_m', 1.5)
@@ -216,8 +215,6 @@ class WallOrientedController(Node):
         self._look_offset_deg = float(np.clip(
             self.get_parameter('look_offset_deg').value, 0.0, 89.0))
         self._lookahead_m = max(0.0, float(self.get_parameter('lookahead_m').value))
-        self._speed_scale = float(np.clip(
-            self.get_parameter('speed_scale').value, 0.0, 1.0))
         self._max_wall_distance = float(self.get_parameter('max_wall_distance_m').value)
         self._wall_z_band = float(self.get_parameter('wall_z_band_m').value)
         self._side_switch_margin = float(self.get_parameter('side_switch_margin_m').value)
@@ -255,7 +252,7 @@ class WallOrientedController(Node):
 
         self.get_logger().info(
             f'wall_oriented_controller ready — offset={self._look_offset_deg:.1f}deg '
-            f'lookahead={self._lookahead_m:.1f}m speed={self._speed_scale:.0%} '
+            f'lookahead={self._lookahead_m:.1f}m '
             f'map={map_topic} goal={goal_topic} path={path_topic} '
             f'— logging to {self._log.path}')
 
@@ -351,8 +348,8 @@ class WallOrientedController(Node):
         # Reduce travel while the requested viewing heading is far away, then
         # project the unchanged route velocity onto the current body axes.
         alignment = max(0.0, math.cos(heading_error))
-        speed = float(np.clip(self.KP_SPEED * self._speed_scale * distance * alignment,
-                              0.0, self.MAX_SPEED * self._speed_scale))
+        speed = float(np.clip(self.KP_SPEED * distance * alignment,
+                              0.0, self.MAX_SPEED))
         route_in_body = wrap_angle(travel_heading - self._yaw)
         surge = speed * math.cos(route_in_body)
         sway = speed * math.sin(route_in_body)
