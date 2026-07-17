@@ -322,8 +322,8 @@ def generate_launch_description():
             "terminal (raw keyboard input needs a real TTY, which ros2 launch "
             "can't hand to a Node action):\n"
             "  ros2 run launch_tools my_keyboard\n"
-            "Then enable motion only when safe:\n"
-            "  ros2 topic pub --once /motion/enable std_msgs/msg/Bool '{data: true}'"
+            "Then use the Motion Safety panel in RViz to enable motion only "
+            "when safe (the panel does not arm/disarm ArduSub)."
         ),
         condition=LaunchConfigurationEquals("mode", "teleop"),
     )

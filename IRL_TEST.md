@@ -95,7 +95,18 @@ because the reason for stopping may be a failed computer or network.
 
 ## Gate operation
 
-The gate starts disabled by default. Monitor it with:
+The gate starts disabled by default. The project RViz layouts load a **Motion
+Safety** panel automatically. Wait for its status to show `DISABLED`, then use:
+
+- **ENABLE MOTION**: shows a confirmation prompt and publishes `true` to
+  `/motion/enable`.
+- **DISABLE NOW**: immediately publishes `false` to `/motion/enable`.
+
+The panel will not offer Enable while the gate reports a fault. Press Disable,
+correct the fault, wait for `DISABLED`, then reconsider enabling. Disable before
+closing RViz; an RViz or computer crash is not an emergency-stop mechanism.
+
+Monitor the underlying topics with:
 
 ```bash
 ros2 topic echo /motion/safety_status
@@ -103,18 +114,22 @@ ros2 topic echo /motion/body_command_safe
 ros2 topic echo /bluerov2/controller/thruster_setpoints_sim
 ```
 
-Enable only after the director completes the relevant go/no-go checklist:
+If RViz is unavailable, the equivalent fallback command after the director
+completes the relevant go/no-go checklist is:
 
 ```bash
 ros2 topic pub --once /motion/enable std_msgs/msg/Bool '{data: true}'
 ```
 
-Disable before changing parameters, moving the tether, approaching or lifting
-the vehicle, or restarting any control component:
+The fallback disable command is:
 
 ```bash
 ros2 topic pub --once /motion/enable std_msgs/msg/Bool '{data: false}'
 ```
+
+The RViz panel controls only the ROS command gate. It does not arm/disarm
+ArduSub. For any emergency, the pilot uses the ArduSub/hardware motor stop
+first; the data operator presses **DISABLE NOW** second.
 
 Every transition from disabled to enabled discards any earlier command. A new
 fresh command must arrive after enabling. The possible states are:
@@ -144,8 +159,8 @@ Complete this before booking water time.
 - [ ] Confirm `/motion/body_command_safe` is a zero Twist and the actuator topic
       contains eight zeros while the controller publishes a non-zero normalized
       Twist on `/motion/body_command`.
-- [ ] Enable the gate and confirm the expected simulation motion.
-- [ ] Disable the gate and confirm zero output and a stopped vehicle.
+- [ ] Click **ENABLE MOTION** in RViz and confirm the expected simulation motion.
+- [ ] Click **DISABLE NOW** and confirm zero output and a stopped vehicle.
 - [ ] Kill the controller while enabled; output must become zero within the
       command timeout (default 0.5 s).
 - [ ] Stop odometry while enabled; output must become zero within the odometry
@@ -243,8 +258,8 @@ the vehicle and site.
 4. Compare ROS yaw and depth against the control station while manually moving
    the vehicle. Stop on any sign or frame mismatch.
 5. Start the hardware adapter, still neutral and gated.
-6. Enable one short low-power surge pulse, then disable. Verify direction and
-   stopping distance.
+6. Use the RViz panel to enable one short low-power surge pulse, then press
+   **DISABLE NOW**. Verify direction and stopping distance.
 7. Repeat separately for reverse, sway and yaw.
 8. Test command timeout, odometry timeout and pilot takeover in the water.
 9. Test depth behaviour separately, with a strict shallow-depth limit and the

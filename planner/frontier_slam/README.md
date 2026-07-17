@@ -147,18 +147,24 @@ source install/setup.zsh
 ros2 launch frontier_slam frontier_slam.launch.py
 ```
 
-The safety gate starts disabled. After checking the active controller, scene,
-odometry and actuator output, enable it explicitly:
+The safety gate starts disabled. The project RViz layouts include a **Motion
+Safety** panel. After checking the active controller, scene, odometry and
+actuator output, wait for the panel to show `DISABLED`, then click **ENABLE
+MOTION** and confirm the prompt. Use **DISABLE NOW** before changing
+configuration or approaching the vehicle.
+
+The equivalent terminal commands remain available as a fallback:
 
 ```bash
 ros2 topic pub --once /motion/enable std_msgs/msg/Bool '{data: true}'
 ```
 
-Disable it before changing configuration or approaching the vehicle:
-
 ```bash
 ros2 topic pub --once /motion/enable std_msgs/msg/Bool '{data: false}'
 ```
+
+The RViz panel controls only this ROS gate. It does not arm/disarm ArduSub and
+must not replace the vehicle's hardware emergency stop or a manual pilot.
 
 The simulation must be running first — see the ActiveSlam repo root README for the full bring-up sequence (Stonefish + TF chain + point cloud + mapper).
 

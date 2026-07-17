@@ -35,6 +35,8 @@ Panels:
     Name: Time
     SyncMode: 0
     SyncSource: Sonar3D
+  - Class: motion_safety_rviz/MotionSafetyPanel
+    Name: Motion Safety
 Visualization Manager:
   Class: ""
   Displays:
