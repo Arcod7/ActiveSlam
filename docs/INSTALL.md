@@ -62,10 +62,10 @@ resolve because it isn't packaged for apt — install with:
 pip install -r requirements.txt   # or --break-system-packages / inside a venv
 ```
 
-`gtsam` and `small-gicp` (needed only for `slam:=slam`) are plain PyPI
-wheels and install cleanly this way on aarch64 as well as x86_64. `vdbfusion`
-(needed only for `mapper:=tsdf`) is the exception — see below, it needs a
-source build instead.
+`gtsam` and `small-gicp` (needed only for `slam:=slam`) and `pymavlink` (needed
+only for the real ArduSub adapter) are PyPI wheels and install cleanly this way
+on aarch64 as well as x86_64. `vdbfusion` (needed only for `mapper:=tsdf`) is
+the exception — see below, it needs a source build instead.
 
 **`vdbfusion` is NOT installable via this file.**
 PyPI only publishes wheels up to Python 3.10, x86_64

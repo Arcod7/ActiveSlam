@@ -98,6 +98,8 @@ frontier_slam/
 ├── safety_logic.py         # pure: fail-closed gate state machine
 ├── safety_gate.py          # ROS node: raw body demand → gated body demand
 ├── heavy_sim_mixer.py      # ROS node: gated body demand → 8 Stonefish thrusters
+├── ardusub_adapter.py      # ROS node: gated body demand → ArduSub MAVLink
+├── ardusub_control.py      # pure validation, scaling and MAVLink encoding
 ├── session_log.py          # shared: timestamped CSV logging
 ├── launch/
 │   └── frontier_slam.launch.py
@@ -122,6 +124,7 @@ frontier_slam/
 | internal | `/motion/body_command` | `Twist` | ungated normalized body demand; not SI velocity |
 | internal | `/motion/body_command_safe` | `Twist` | gated body demand for a sim or ArduSub adapter |
 | out | `/motion/safety_status` | `String` | `ACTIVE` or fail-closed reason |
+| out | `/motion/ardusub_status` | `String` | adapter authorization or inhibited reason |
 | out | `/bluerov2/controller/thruster_setpoints_sim` | `Float64MultiArray` | simulation-only 8-thruster Heavy command |
 
 ## Key parameters
@@ -167,6 +170,41 @@ The RViz panel controls only this ROS gate. It does not arm/disarm ArduSub and
 must not replace the vehicle's hardware emergency stop or a manual pilot.
 
 The simulation must be running first — see the ActiveSlam repo root README for the full bring-up sequence (Stonefish + TF chain + point cloud + mapper).
+
+## ArduSub output
+
+The hardware adapter consumes only `/motion/body_command_safe`; it never sends
+individual motor values, arms the vehicle, or changes its mode. Two backends
+are available:
+
+| Backend | MAVLink output | Required pilot-selected mode | Intended use |
+|---|---|---|---|
+| `manual_control` | `MANUAL_CONTROL` | `ALT_HOLD` | first restrained wet tests without horizontal EKF position |
+| `local_ned_velocity` | `SET_POSITION_TARGET_LOCAL_NED` | `GUIDED` | metric velocity control after ExternalNav/EKF acceptance |
+
+Install `pymavlink` through the repository `requirements.txt`. Authority and
+metric limits are in `config/ardusub.yaml`; vertical authority defaults off.
+For adapter-only hardware acceptance:
+
+```bash
+ros2 launch frontier_slam ardusub_adapter.launch.py \
+  backend:=manual_control \
+  connection_url:=udpin:0.0.0.0:14560 \
+  odom_topic:=/your/real/odometry
+```
+
+For the complete planner, select exactly one gated-command consumer:
+
+```bash
+ros2 launch frontier_slam frontier_slam.launch.py \
+  actuator_backend:=ardusub_manual \
+  mavlink_url:=udpin:0.0.0.0:14560 \
+  odom_topic:=/your/real/odometry
+```
+
+Use `actuator_backend:=ardusub_local_ned` only after ArduSub has a healthy
+underwater horizontal position/velocity solution. See the repository root
+`IRL_TEST.md` for the staged acceptance and takeover procedure.
 
 ## Session logs
 

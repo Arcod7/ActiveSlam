@@ -23,7 +23,9 @@ motion_safety_gate
         │
         ├── heavy_sim_mixer ──► 8 Stonefish thruster values
         │
-        └── future ArduSub adapter ──► MAVLink body demand
+        └── ardusub_adapter
+              ├── manual_control ──► MAVLink MANUAL_CONTROL
+              └── local_ned_velocity ──► SET_POSITION_TARGET_LOCAL_NED
 ```
 
 The gate prevents output unless it is explicitly enabled and both the command
@@ -32,12 +34,25 @@ multiple-publisher command inputs. It publishes a zero `Twist` continuously
 whenever it is not `ACTIVE`. In simulation, `heavy_sim_mixer` is the only node
 that converts that gated body demand into eight motor fractions.
 
-This is not yet a real-vehicle driver. There is currently no MAVLink/ArduSub/
-BlueOS hardware adapter in this repository. The gate's safe `Twist` is designed
-to be the adapter input; its values are normalized demands, not SI velocities.
+The MAVLink adapter is implemented but has not yet been accepted against this
+physical vehicle. It validates the safe `Twist` again, monitors ArduSub
+heartbeat, arm state and mode, and requires a fresh `ACTIVE` gate status. It
+never arms the vehicle or changes its mode. When authority is lost after active
+control, it sends a short neutral burst and then stops transmitting so the
+pilot's control station can own the pilot-input stream. Any fault during active
+control latches a reauthorization requirement: correct the fault, disable the
+ROS gate, and explicitly enable it again. A recovered link cannot silently
+resume an earlier command.
 
-**Do not remap the Stonefish thruster output directly to real ESC or servo channels. Do
-not start an autonomous wet test until a reviewed hardware adapter exists.**
+The gate's safe `Twist` contains normalized demands, not SI velocities. The
+`manual_control` backend applies a configurable fraction of the MAVLink pilot
+axis range. The `local_ned_velocity` backend applies configurable m/s and rad/s
+limits before sending velocity plus yaw-rate fields in
+`SET_POSITION_TARGET_LOCAL_NED`.
+
+**Do not remap the Stonefish thruster output directly to real ESC or servo
+channels. Do not start autonomous exploration until the adapter, frame signs,
+takeover path and ArduSub navigation estimate have passed Phase 3.**
 
 The intended real architecture is:
 
@@ -63,6 +78,13 @@ verify ArduSub's eight-motor `Vectored_6DOF` frame. The Stonefish scenario uses
 `data/robot/bluerov2_unphy.scn`, also with four horizontal and four vertical
 thrusters. The Stonefish array order is not evidence of ArduSub motor numbering;
 verify the real motor assignment with the official setup procedure.
+
+For the first wet test use `manual_control` in `ALT_HOLD`, with vertical control
+disabled. `local_ned_velocity` requires `GUIDED`, and ArduSub documents Guided
+as requiring position and depth. Do not use it underwater until a suitable
+horizontal position/velocity source (for example reviewed ROS SLAM ExternalNav
+input) is healthy in ArduSub's EKF. Merely having ROS odometry available to the
+safety gate does not put that estimate into the ArduSub EKF.
 
 Official references:
 
@@ -221,8 +243,50 @@ make a spinning thruster safe.
 
 ## Phase 3: hardware-adapter acceptance
 
-This phase begins only after the MAVLink/ArduSub adapter and real launch file
-have been implemented and reviewed.
+This phase accepts the implemented adapter against the real vehicle. Perform it
+before any autonomous trajectory.
+
+Install the non-ROS Python dependencies, build, and source the workspace:
+
+```bash
+python3 -m pip install -r requirements.txt
+colcon build --symlink-install --packages-select frontier_slam
+source install/setup.zsh
+```
+
+In BlueOS, create a dedicated external UDP endpoint targeting the test
+computer's IP and port `14560`. Keep the normal Cockpit/QGroundControl endpoint
+running. Confirm `target_system` and `target_component` in
+`config/ardusub.yaml` match the vehicle heartbeat (normally `1/1`). Start only
+the gate and adapter for acceptance—not the planner:
+
+```bash
+ros2 launch frontier_slam ardusub_adapter.launch.py \
+  backend:=manual_control \
+  connection_url:=udpin:0.0.0.0:14560 \
+  odom_topic:=/your/real/odometry
+```
+
+Monitor both layers:
+
+```bash
+ros2 topic echo /motion/safety_status
+ros2 topic echo /motion/ardusub_status
+```
+
+The adapter must remain inhibited until the gate is `ACTIVE`, the vehicle is
+armed, and the pilot has selected `ALT_HOLD`. For SITL, unarmed message
+inspection, or a powered test with the vehicle safely submerged and the site
+prepared as above, publish one low normalized demand continuously from exactly
+one source. Enable the gate only for the intended short pulse, then press
+**DISABLE NOW**. Never use this command for sustained dry thruster operation:
+
+```bash
+ros2 topic pub -r 10 /motion/body_command geometry_msgs/msg/Twist \
+  "{linear: {x: 0.1}}"
+```
+
+Stop this publisher before starting any autonomous controller.
 
 - [ ] The real launch must not start Stonefish, ground-truth odometry, or a
       simulator actuator subscriber.
@@ -233,6 +297,8 @@ have been implemented and reviewed.
       automatically on startup or reconnection.
 - [ ] Confirm the adapter outputs neutral until both pilot authorization and the
       ROS safety gate are enabled.
+- [ ] Confirm `/motion/ardusub_status` reports each inhibited cause correctly:
+      no/stale heartbeat, disabled gate, disarmed vehicle and wrong mode.
 - [ ] Confirm ROS and ArduSub agree on NED/ENU conventions, yaw sign, positive
       depth, body X forward and body Y starboard.
 - [ ] Test one body axis at a time at the lowest practical authority: surge,
@@ -241,11 +307,26 @@ have been implemented and reviewed.
       stopping odometry and disabling the gate all lead to the predefined safe
       action.
 - [ ] Confirm pilot takeover works while ROS is actively requesting motion.
+- [ ] Confirm changing out of `ALT_HOLD` inhibits the manual backend and that
+      Cockpit/QGroundControl regains sole pilot-input authority.
 
 For initial tests, let ArduSub hold attitude and depth. Command horizontal body
 motion and yaw only. Do not run the existing ROS heave P-controller against an
 ArduSub depth-hold loop until their responsibilities and signs have been tested
 and documented.
+
+Only after ExternalNav/EKF acceptance, repeat this phase with:
+
+```bash
+ros2 launch frontier_slam ardusub_adapter.launch.py \
+  backend:=local_ned_velocity \
+  connection_url:=udpin:0.0.0.0:14560 \
+  odom_topic:=/your/real/odometry
+```
+
+The pilot must select `GUIDED`. Verify the outgoing MAVLink message is number
+84, frame `MAV_FRAME_BODY_NED`, type mask `1479`, with only velocity and yaw
+rate active. Vertical velocity remains zero by default.
 
 ## Phase 4: low-power wet control
 

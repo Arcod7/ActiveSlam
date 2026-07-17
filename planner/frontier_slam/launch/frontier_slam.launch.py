@@ -23,6 +23,10 @@ Optional arguments:
   odom_topic  Odometry topic for both nodes.
               Default: /StoneFish/Odometry (ground truth)
               Noisy:   /StoneFish/Odometry/noisy (requires odom_to_tf_noisy running)
+  actuator_backend
+              stonefish (default), ardusub_manual, ardusub_local_ned, or none.
+              ArduSub never arms or changes mode and requires a dedicated
+              BlueOS MAVLink endpoint.
   revisit     Start revisit_planner. Default: false.
   tsdf_frontier_standoff_m
               TSDF-only horizontal distance to hold from a frontier surface,
@@ -44,6 +48,9 @@ Visualise in RViz2:
   - Image        /frontier_slam/debug_image
   - OccupancyGrid /frontier_slam/inflated_map
 """
+import os
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition, LaunchConfigurationEquals
@@ -83,6 +90,27 @@ def generate_launch_description():
         description=(
             'Start the motion gate enabled. Keep false for fail-closed operation; '
             'enable explicitly on /motion/enable after completing safety checks.'),
+    )
+    actuator_backend_arg = DeclareLaunchArgument(
+        'actuator_backend',
+        default_value='stonefish',
+        choices=[
+            'stonefish', 'ardusub_manual', 'ardusub_local_ned', 'none'],
+        description=(
+            'Gated-command consumer. ArduSub choices require pymavlink and a '
+            'dedicated BlueOS MAVLink endpoint.'),
+    )
+    mavlink_url_arg = DeclareLaunchArgument(
+        'mavlink_url',
+        default_value='udpin:0.0.0.0:14560',
+        description='Dedicated BlueOS/pymavlink connection URL.',
+    )
+    default_ardusub_params = os.path.join(
+        get_package_share_directory('frontier_slam'), 'config', 'ardusub.yaml')
+    ardusub_params_arg = DeclareLaunchArgument(
+        'ardusub_params_file',
+        default_value=default_ardusub_params,
+        description='ArduSub authority limits and timeout parameters.',
     )
     revisit_arg = DeclareLaunchArgument(
         'revisit',
@@ -169,6 +197,9 @@ def generate_launch_description():
         depth_arg,
         odom_topic_arg,
         safety_start_enabled_arg,
+        actuator_backend_arg,
+        mavlink_url_arg,
+        ardusub_params_arg,
         revisit_arg,
         scenario_arg,
         scenario_out_dx_arg,
@@ -201,6 +232,38 @@ def generate_launch_description():
             executable='heavy_sim_mixer',
             name='heavy_sim_mixer',
             output='screen',
+            condition=LaunchConfigurationEquals(
+                'actuator_backend', 'stonefish'),
+        ),
+        Node(
+            package='frontier_slam',
+            executable='ardusub_adapter',
+            name='ardusub_adapter',
+            output='screen',
+            parameters=[
+                LaunchConfiguration('ardusub_params_file'),
+                {
+                    'backend': 'manual_control',
+                    'connection_url': LaunchConfiguration('mavlink_url'),
+                },
+            ],
+            condition=LaunchConfigurationEquals(
+                'actuator_backend', 'ardusub_manual'),
+        ),
+        Node(
+            package='frontier_slam',
+            executable='ardusub_adapter',
+            name='ardusub_adapter',
+            output='screen',
+            parameters=[
+                LaunchConfiguration('ardusub_params_file'),
+                {
+                    'backend': 'local_ned_velocity',
+                    'connection_url': LaunchConfiguration('mavlink_url'),
+                },
+            ],
+            condition=LaunchConfigurationEquals(
+                'actuator_backend', 'ardusub_local_ned'),
         ),
         Node(
             package='frontier_slam',
