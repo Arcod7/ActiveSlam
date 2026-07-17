@@ -47,7 +47,8 @@
         <look name="Yellow" color="1.0 1.0 0.0" gray="0.5" roughness="0.3"/>
     </looks>
 
-    <include file="robot/simple_rov.scn"/>
+    <!-- Eight-thruster BlueROV2 Heavy target used by the real experiment. -->
+    <include file="robot/bluerov2_unphy.scn"/>
 
     <static name="OffShoreStation" type="model">
         <physical>

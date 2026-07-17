@@ -1,16 +1,18 @@
 """Stateless helpers for the motion controllers.
 
-Thruster mixing convention (BlueROV2 vectored, NED body frame, scn-file order):
+Thruster mixing convention (BlueROV2 Heavy, NED body frame, scn-file order):
   Index  Name        Formula
   0      FrontRight   surge - sway - yaw
   1      FrontLeft    surge + sway + yaw
   2      BackRight   -surge - sway + yaw
   3      BackLeft    -surge + sway - yaw
-  4      VertFront    heave   (negative = upward thrust in Stonefish)
-  5      VertBack     heave
+  4      DiveFrontRight  heave   (negative = upward thrust in Stonefish)
+  5      DiveFrontLeft   heave
+  6      DiveBackRight   heave
+  7      DiveBackLeft    heave
 
 Sway sign: positive = starboard (strafe right), matching teleop's E key.
-Verified against simple_rov.scn geometry: the four 45° horizontal thrusters
+Verified against bluerov2_unphy.scn geometry: the four 45° horizontal thrusters
 at [-s, +s, -s, +s] sum to a pure +Y (East-when-facing-North) body force.
 
 A note on the heave sign:
@@ -35,7 +37,7 @@ def wrap_angle(a: float) -> float:
 
 
 def mix_thrusters(surge: float, yaw: float, heave: float, sway: float = 0.0) -> list:
-    """Map (surge, yaw, heave, sway) body-frame commands to 6 BlueROV2 thrusters.
+    """Map body commands to the 8 Stonefish BlueROV2 Heavy thrusters.
 
     Output values are normalised so the peak magnitude never exceeds 1.0 — this
     preserves the requested command ratios when they would otherwise clip.
@@ -47,8 +49,10 @@ def mix_thrusters(surge: float, yaw: float, heave: float, sway: float = 0.0) -> 
         surge + sway + yaw,    # 1 FrontLeft
        -surge - sway + yaw,    # 2 BackRight
        -surge + sway - yaw,    # 3 BackLeft
-        heave,                 # 4 VertFront
-        heave,                 # 5 VertBack
+        heave,                 # 4 DiveFrontRight
+        heave,                 # 5 DiveFrontLeft
+        heave,                 # 6 DiveBackRight
+        heave,                 # 7 DiveBackLeft
     ]
     peak = max(abs(v) for v in raw)
     if peak > 1.0:

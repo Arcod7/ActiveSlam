@@ -50,6 +50,7 @@ from launch.conditions import IfCondition, LaunchConfigurationEquals
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory, get_package_prefix
 
 
@@ -59,6 +60,14 @@ def generate_launch_description():
         default_value="teleop",
         choices=["teleop", "frontier"],
         description="Operator mode: manual keyboard teleop or autonomous frontier exploration",
+    )
+    safety_start_enabled_arg = DeclareLaunchArgument(
+        "safety_start_enabled",
+        default_value="false",
+        choices=["true", "false"],
+        description=(
+            "Start the motion safety gate enabled. Keep false and explicitly "
+            "enable /motion/enable after checking the scene and controller."),
     )
     motion_arg = DeclareLaunchArgument(
         "motion",
@@ -312,8 +321,37 @@ def generate_launch_description():
             "mode=teleop: sim + mapper are up. Run teleop yourself in another "
             "terminal (raw keyboard input needs a real TTY, which ros2 launch "
             "can't hand to a Node action):\n"
-            "  ros2 run launch_tools my_keyboard"
+            "  ros2 run launch_tools my_keyboard\n"
+            "Then enable motion only when safe:\n"
+            "  ros2 topic pub --once /motion/enable std_msgs/msg/Bool '{data: true}'"
         ),
+        condition=LaunchConfigurationEquals("mode", "teleop"),
+    )
+
+    teleop_safety_gate = Node(
+        package="frontier_slam",
+        executable="motion_safety_gate",
+        name="motion_safety_gate",
+        output="screen",
+        parameters=[{
+            "odom_topic": PythonExpression(
+                [
+                    "'/slam/odometry' if '",
+                    LaunchConfiguration("slam"),
+                    "' == 'slam' else '/StoneFish/Odometry'",
+                ]
+            ),
+            "start_enabled": ParameterValue(
+                LaunchConfiguration("safety_start_enabled"), value_type=bool),
+        }],
+        condition=LaunchConfigurationEquals("mode", "teleop"),
+    )
+
+    teleop_sim_mixer = Node(
+        package="frontier_slam",
+        executable="heavy_sim_mixer",
+        name="heavy_sim_mixer",
+        output="screen",
         condition=LaunchConfigurationEquals("mode", "teleop"),
     )
 
@@ -341,6 +379,7 @@ def generate_launch_description():
             "scenario": LaunchConfiguration("scenario"),
             "scenario_out_dx": LaunchConfiguration("scenario_out_dx"),
             "scenario_out_dy": LaunchConfiguration("scenario_out_dy"),
+            "safety_start_enabled": LaunchConfiguration("safety_start_enabled"),
             "motion": PythonExpression(
                 [
                     "'walllooking' if '",
@@ -551,6 +590,7 @@ def generate_launch_description():
     return LaunchDescription(
         [
             mode_arg,
+            safety_start_enabled_arg,
             motion_arg,
             wall_orientation_offset_arg,
             wall_orientation_lookahead_arg,
@@ -592,6 +632,8 @@ def generate_launch_description():
             slam_stack,
             eval_stack,
             slam_hint,
+            teleop_safety_gate,
+            teleop_sim_mixer,
             teleop_hint,
             frontier_exploration,
             walloriented_hint,

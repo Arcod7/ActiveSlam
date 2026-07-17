@@ -24,12 +24,11 @@ import numpy as np
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import Image
-from std_msgs.msg import Float64MultiArray
 
-from frontier_slam.control_utils import mix_thrusters, wrap_angle, yaw_from_quat
+from frontier_slam.control_utils import wrap_angle, yaw_from_quat
 from frontier_slam.session_log import open_session_log
 
 
@@ -84,10 +83,10 @@ class WaypointController(Node):
         odom_topic = str(self.get_parameter('odom_topic').value)
         self.declare_parameter('goal_topic', '/frontier_slam/goal')
         self.declare_parameter('path_topic', '/frontier_slam/path')
-        self.declare_parameter('thruster_topic', '/bluerov2/controller/thruster_setpoints_sim')
+        self.declare_parameter('command_topic', '/motion/body_command')
         goal_topic = str(self.get_parameter('goal_topic').value)
         path_topic = str(self.get_parameter('path_topic').value)
-        thruster_topic = str(self.get_parameter('thruster_topic').value)
+        command_topic = str(self.get_parameter('command_topic').value)
 
         self._goal: np.ndarray | None = None
         self._pose: np.ndarray | None = None
@@ -108,9 +107,7 @@ class WaypointController(Node):
         self.create_subscription(Path,         path_topic,                   self._path_cb,  1)
         self.create_subscription(Odometry,     odom_topic,                   self._odom_cb,  10)
         self.create_subscription(Image,        '/sensor_msgs/image_depth',   self._depth_cb, 1)
-        self._thrust_pub = self.create_publisher(
-            Float64MultiArray, thruster_topic, 1,
-        )
+        self._command_pub = self.create_publisher(Twist, command_topic, 1)
 
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
         self.get_logger().info(
@@ -315,9 +312,11 @@ class WaypointController(Node):
     # ------------------------------------------------------------------
     # Output
     def _send_thrust(self, surge: float, yaw: float, heave: float) -> None:
-        msg = Float64MultiArray()
-        msg.data = [float(v) for v in mix_thrusters(surge, yaw, heave)]
-        self._thrust_pub.publish(msg)
+        msg = Twist()
+        msg.linear.x = float(surge)
+        msg.linear.z = float(heave)
+        msg.angular.z = float(yaw)
+        self._command_pub.publish(msg)
 
     def _write_csv(self, surge, yaw_cmd, heave, event,
                    dist=float('nan'), hdg_err_deg=float('nan')) -> None:

@@ -8,8 +8,8 @@ instead. The executor does not select goals and reports BLOCKED through its
 status topic when it cannot follow the requested route along a mapped wall.
 
 This adds:
-  - wall_follower: planner path + TSDF surface normals + odometry → thruster
-    setpoints. Follows the planner path, using the nearest mapped wall as a
+  - wall_follower: planner path + TSDF surface normals + odometry → normalized
+    body demand. Follows the planner path, using the nearest mapped wall as a
     soft travel and viewing preference while holding `standoff` metres off it.
 
 The executor only knows walls the TSDF has already reconstructed. If no usable
@@ -34,7 +34,7 @@ Optional arguments:
                  Look-heading blend: 0 = wall-derived; 1 = path-derived
                  (default 0.35).
 
-  goal_topic/path_topic/status_topic/thruster_topic
+  goal_topic/path_topic/status_topic/command_topic/safe_command_topic/thruster_topic
                  Configurable planner/motion interface topics.
 """
 from launch import LaunchDescription
@@ -47,6 +47,11 @@ from launch_ros.parameter_descriptions import ParameterValue
 def _float_parameter(name: str) -> ParameterValue:
     """Resolve a launch argument as a ROS double, including whole numbers."""
     return ParameterValue(LaunchConfiguration(name), value_type=float)
+
+
+def _bool_parameter(name: str) -> ParameterValue:
+    """Resolve a launch argument as a ROS boolean."""
+    return ParameterValue(LaunchConfiguration(name), value_type=bool)
 
 
 def generate_launch_description():
@@ -84,7 +89,20 @@ def generate_launch_description():
     )
     thruster_topic_arg = DeclareLaunchArgument(
         'thruster_topic', default_value='/bluerov2/controller/thruster_setpoints_sim',
-        description='Thruster command topic.',
+        description='Safety-gated actuator output topic.',
+    )
+    command_topic_arg = DeclareLaunchArgument(
+        'command_topic', default_value='/motion/body_command',
+        description='Normalized body demand consumed by the safety gate.',
+    )
+    safe_command_topic_arg = DeclareLaunchArgument(
+        'safe_command_topic', default_value='/motion/body_command_safe',
+        description='Gated body demand consumed by the simulation mixer.',
+    )
+    safety_start_enabled_arg = DeclareLaunchArgument(
+        'safety_start_enabled', default_value='false',
+        choices=['true', 'false'],
+        description='Start the safety gate enabled (false is the safe default).',
     )
     path_influence_arg = DeclareLaunchArgument(
         'path_influence', default_value='0.70',
@@ -106,8 +124,31 @@ def generate_launch_description():
     return LaunchDescription([
         standoff_arg, tangent_speed_arg, direction_arg, depth_arg, odom_topic_arg,
         goal_topic_arg, path_topic_arg, status_topic_arg, thruster_topic_arg,
+        command_topic_arg, safe_command_topic_arg, safety_start_enabled_arg,
         path_influence_arg, path_look_offset_arg, wall_normal_offset_arg,
         path_heading_weight_arg,
+        Node(
+            package='frontier_slam',
+            executable='motion_safety_gate',
+            name='motion_safety_gate',
+            output='screen',
+            parameters=[{
+                'command_topic': LaunchConfiguration('command_topic'),
+                'output_topic': LaunchConfiguration('safe_command_topic'),
+                'odom_topic': LaunchConfiguration('odom_topic'),
+                'start_enabled': _bool_parameter('safety_start_enabled'),
+            }],
+        ),
+        Node(
+            package='frontier_slam',
+            executable='heavy_sim_mixer',
+            name='heavy_sim_mixer',
+            output='screen',
+            parameters=[{
+                'command_topic': LaunchConfiguration('safe_command_topic'),
+                'thruster_topic': LaunchConfiguration('thruster_topic'),
+            }],
+        ),
         Node(
             package='frontier_slam',
             executable='wall_follower',
@@ -122,7 +163,7 @@ def generate_launch_description():
                 'goal_topic':     LaunchConfiguration('goal_topic'),
                 'path_topic':     LaunchConfiguration('path_topic'),
                 'status_topic':   LaunchConfiguration('status_topic'),
-                'thruster_topic': LaunchConfiguration('thruster_topic'),
+                'command_topic':  LaunchConfiguration('command_topic'),
                 'path_influence': _float_parameter('path_influence'),
                 'path_look_offset_deg': _float_parameter('path_look_offset_deg'),
                 'wall_normal_offset_deg': _float_parameter('wall_normal_offset_deg'),

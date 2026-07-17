@@ -6,7 +6,9 @@ Prerequisites (must already be running):
 
 This adds:
   - frontier_extractor : /projected_map → /frontier_slam/goal + /frontier_slam/path
-  - waypoint_controller: /frontier_slam/path + odometry → thruster setpoints
+  - waypoint_controller: /frontier_slam/path + odometry → body command
+  - motion_safety_gate: explicit enable + freshness checks
+  - heavy_sim_mixer: gated body command → 8 Stonefish Heavy thrusters
   - revisit_planner (revisit:=true only): /slam/dopt → suspends frontier_extractor
     and drives a forced revisit to close a loop when pose uncertainty grows
     (needs a SLAM pose source — see revisit_planner.py)
@@ -55,6 +57,11 @@ def _float_parameter(name: str) -> ParameterValue:
     return ParameterValue(LaunchConfiguration(name), value_type=float)
 
 
+def _bool_parameter(name: str) -> ParameterValue:
+    """Resolve a launch argument as a ROS boolean."""
+    return ParameterValue(LaunchConfiguration(name), value_type=bool)
+
+
 def generate_launch_description():
     depth_arg = DeclareLaunchArgument(
         'depth',
@@ -68,6 +75,14 @@ def generate_launch_description():
         'odom_topic',
         default_value='/StoneFish/Odometry',
         description='Odometry topic for pose. Use /StoneFish/Odometry/noisy for noisy mode.',
+    )
+    safety_start_enabled_arg = DeclareLaunchArgument(
+        'safety_start_enabled',
+        default_value='false',
+        choices=['true', 'false'],
+        description=(
+            'Start the motion gate enabled. Keep false for fail-closed operation; '
+            'enable explicitly on /motion/enable after completing safety checks.'),
     )
     revisit_arg = DeclareLaunchArgument(
         'revisit',
@@ -153,6 +168,7 @@ def generate_launch_description():
     return LaunchDescription([
         depth_arg,
         odom_topic_arg,
+        safety_start_enabled_arg,
         revisit_arg,
         scenario_arg,
         scenario_out_dx_arg,
@@ -170,6 +186,22 @@ def generate_launch_description():
         wall_path_look_offset_arg,
         wall_normal_offset_arg,
         wall_path_heading_weight_arg,
+        Node(
+            package='frontier_slam',
+            executable='motion_safety_gate',
+            name='motion_safety_gate',
+            output='screen',
+            parameters=[{
+                'odom_topic': odom_topic,
+                'start_enabled': _bool_parameter('safety_start_enabled'),
+            }],
+        ),
+        Node(
+            package='frontier_slam',
+            executable='heavy_sim_mixer',
+            name='heavy_sim_mixer',
+            output='screen',
+        ),
         Node(
             package='frontier_slam',
             executable='frontier_extractor',

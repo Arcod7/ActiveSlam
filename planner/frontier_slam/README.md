@@ -67,6 +67,21 @@ waypoint_controller
   - surge ramp-down from 1.5 m, back-surge below 0.4 m
         │
         ▼
+/motion/body_command (normalized Twist)
+        │
+        ▼
+motion_safety_gate
+  - explicit enable
+  - command + odometry watchdogs
+  - invalid/multiple-source rejection
+        │
+        ▼
+/motion/body_command_safe
+        │
+        ▼
+heavy_sim_mixer (simulation only)
+        │
+        ▼
 /bluerov2/controller/thruster_setpoints_sim
 ```
 
@@ -75,11 +90,14 @@ waypoint_controller
 ```
 frontier_slam/
 ├── frontier_extractor.py   # ROS node: map → goal + path publisher
-├── waypoint_controller.py  # ROS node: path → thruster setpoints
+├── waypoint_controller.py  # ROS node: path → normalized body demand
 ├── frontier_detection.py   # pure: OccupancyGrid → list[Cluster]
 ├── goal_manager.py         # state: commitment, stuck detection, blacklist
 ├── path_planner.py         # pure: A* on 3-zone cost grid (CostGrid API)
 ├── control_utils.py        # pure: thruster mixing, yaw helpers
+├── safety_logic.py         # pure: fail-closed gate state machine
+├── safety_gate.py          # ROS node: raw body demand → gated body demand
+├── heavy_sim_mixer.py      # ROS node: gated body demand → 8 Stonefish thrusters
 ├── session_log.py          # shared: timestamped CSV logging
 ├── launch/
 │   └── frontier_slam.launch.py
@@ -95,12 +113,16 @@ frontier_slam/
 | in | `/projected_map` | `OccupancyGrid` | 2-D OctoMap projection |
 | in | `/StoneFish/Odometry` | `Odometry` | robot pose + velocity |
 | in | `/sensor_msgs/image_depth` | `Image` (32FC1) | forward depth camera (sonar proxy) |
+| in | `/motion/enable` | `Bool` | explicit safety-gate enable; defaults disabled |
 | out | `/frontier_slam/goal` | `PointStamped` | current exploration goal |
 | out | `/frontier_slam/path` | `Path` | A\* waypoint sequence |
 | out | `/frontier_slam/frontiers` | `MarkerArray` | RViz frontier markers |
 | out | `/frontier_slam/inflated_map` | `OccupancyGrid` | 3-zone cost map (debug) |
 | out | `/frontier_slam/debug_image` | `Image` | top-down composite view (debug) |
-| out | `/bluerov2/controller/thruster_setpoints_sim` | `Float64MultiArray` | 6 thruster commands |
+| internal | `/motion/body_command` | `Twist` | ungated normalized body demand; not SI velocity |
+| internal | `/motion/body_command_safe` | `Twist` | gated body demand for a sim or ArduSub adapter |
+| out | `/motion/safety_status` | `String` | `ACTIVE` or fail-closed reason |
+| out | `/bluerov2/controller/thruster_setpoints_sim` | `Float64MultiArray` | simulation-only 8-thruster Heavy command |
 
 ## Key parameters
 
@@ -123,6 +145,19 @@ cd <path-to-your-colcon-workspace>   # the workspace that has this repo under sr
 colcon build --symlink-install
 source install/setup.zsh
 ros2 launch frontier_slam frontier_slam.launch.py
+```
+
+The safety gate starts disabled. After checking the active controller, scene,
+odometry and actuator output, enable it explicitly:
+
+```bash
+ros2 topic pub --once /motion/enable std_msgs/msg/Bool '{data: true}'
+```
+
+Disable it before changing configuration or approaching the vehicle:
+
+```bash
+ros2 topic pub --once /motion/enable std_msgs/msg/Bool '{data: false}'
 ```
 
 The simulation must be running first — see the ActiveSlam repo root README for the full bring-up sequence (Stonefish + TF chain + point cloud + mapper).

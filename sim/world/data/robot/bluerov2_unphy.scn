@@ -371,11 +371,13 @@
 			<link name="base_link" />
 		</sensor>
 
-		<sensor name="Dcam" rate="10.0" type="depthcamera">
-		    <specs
-                resolution_x="256"
-                resolution_y="64"
-                horizontal_fov="90.0"
+			<!-- Water Linked Sonar 3D-15 proxy, 1.2 MHz / 15 m mode. -->
+			<sensor name="Dcam" rate="5.0" type="depthcamera">
+			    <specs
+			        resolution_x="257"
+			        resolution_y="67"
+			        horizontal_fov="90.0"
+			        vertical_fov="40.0"
                 depth_min="0.2"
                 depth_max="15.0"
             />

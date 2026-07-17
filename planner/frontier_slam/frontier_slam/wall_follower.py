@@ -13,7 +13,7 @@ Subscribed topics:
   /sensor_msgs/image_depth     (sensor_msgs/Image)  emergency back-off only
 
 Published topics:
-  /bluerov2/controller/thruster_setpoints_sim  (std_msgs/Float64MultiArray)
+  /motion/body_command  (geometry_msgs/Twist; normalized safety-gate input)
 
 Behaviour:
   SEARCH — no usable wall (empty/stale TSDF, or nothing wall-like within
@@ -46,12 +46,12 @@ import numpy as np
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import Image, PointCloud2, PointField
-from std_msgs.msg import Float64MultiArray, String
+from std_msgs.msg import String
 
-from frontier_slam.control_utils import mix_thrusters, wrap_angle, yaw_from_quat
+from frontier_slam.control_utils import wrap_angle, yaw_from_quat
 from frontier_slam.session_log import open_session_log
 
 
@@ -118,7 +118,7 @@ class WallFollower(Node):
         self.declare_parameter('goal_topic', '/frontier_slam/goal')
         self.declare_parameter('path_topic', '/frontier_slam/path')
         self.declare_parameter('status_topic', '/motion/status')
-        self.declare_parameter('thruster_topic', '/bluerov2/controller/thruster_setpoints_sim')
+        self.declare_parameter('command_topic', '/motion/body_command')
 
         self._standoff   = float(self.get_parameter('standoff_m').value)
         self._tan_speed  = float(self.get_parameter('tangent_speed').value)
@@ -130,7 +130,7 @@ class WallFollower(Node):
         goal_topic = str(self.get_parameter('goal_topic').value)
         path_topic = str(self.get_parameter('path_topic').value)
         status_topic = str(self.get_parameter('status_topic').value)
-        thruster_topic = str(self.get_parameter('thruster_topic').value)
+        command_topic = str(self.get_parameter('command_topic').value)
 
         self._pose: np.ndarray | None = None
         self._yaw  = 0.0
@@ -162,9 +162,7 @@ class WallFollower(Node):
         self.create_subscription(Image,       '/sensor_msgs/image_depth', self._depth_cb, 1)
         self.create_subscription(PointStamped, goal_topic, self._goal_cb, 1)
         self.create_subscription(Path, path_topic, self._path_cb, 1)
-        self._thrust_pub = self.create_publisher(
-            Float64MultiArray, thruster_topic, 1,
-        )
+        self._command_pub = self.create_publisher(Twist, command_topic, 1)
         self._status_pub = self.create_publisher(String, status_topic, 1)
 
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
@@ -556,9 +554,12 @@ class WallFollower(Node):
         return float(np.clip(-self.KP_HEAVE * depth_err, -1.0, 1.0))
 
     def _send_thrust(self, surge: float, yaw: float, heave: float, sway: float) -> None:
-        msg = Float64MultiArray()
-        msg.data = [float(v) for v in mix_thrusters(surge, yaw, heave, sway)]
-        self._thrust_pub.publish(msg)
+        msg = Twist()
+        msg.linear.x = float(surge)
+        msg.linear.y = float(sway)
+        msg.linear.z = float(heave)
+        msg.angular.z = float(yaw)
+        self._command_pub.publish(msg)
 
     def _write_csv(self, surge, sway, yaw_cmd, heave, event,
                    wall_pt=None, n=None, d=float('nan'),

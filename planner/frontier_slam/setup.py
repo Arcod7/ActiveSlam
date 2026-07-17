@@ -26,6 +26,8 @@ setup(
             'wall_oriented_controller = frontier_slam.wall_oriented_controller:main',
             'tsdf_mapper         = frontier_slam.tsdf_mapper:main',
             'wall_follower       = frontier_slam.wall_follower:main',
+            'motion_safety_gate = frontier_slam.safety_gate:main',
+            'heavy_sim_mixer    = frontier_slam.heavy_sim_mixer:main',
             'revisit_planner     = frontier_slam.revisit_planner:main',
             'drift_return_scenario = frontier_slam.drift_return_scenario:main',
         ],
