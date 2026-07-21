@@ -32,6 +32,57 @@ logging ATE/RPE against ground truth.
 | [`eval/eval_tools`](eval/eval_tools) | ATE/RPE benchmarking against ground truth, TUM trajectory export, offline plotting |
 | [`tools/launch_tools`](tools/launch_tools) | Keyboard teleop |
 
+## Quick start
+
+Already have ROS 2 Jazzy, the scene meshes, and a patched Stonefish build on
+`PATH`? `bootstrap.sh` installs the remaining Python/rosdep dependencies, and
+`launcher.py` is a terminal UI that runs the stack:
+
+```bash
+./bootstrap.sh
+colcon build --symlink-install && source install/setup.zsh
+python3 launcher.py
+```
+
+See `./bootstrap.sh --help` for the Stonefish clone/patch and TSDF-support
+flags, and the *Install*/*Run* sections below for the full flag reference.
+
+### The launcher
+
+`launcher.py` opens a workspace menu (**Launch · Update · Rebuild · Infos ·
+Exit**), where *Infos* summarises the technologies the project is built on.
+*Launch* opens a control screen that:
+
+- **changes options while the stack runs.** The stack is split into
+  independently restartable layers, so switching the mapper, the mode or the
+  pose source only bounces the layers that depend on that option — Stonefish,
+  the slow part, keeps running. The screen shows which groups a pending change
+  will restart before you apply it.
+- **explains each option** in a description pane as you move through them.
+- **arms motion** (press `m`) and shows the safety gate's live state in the
+  header. The gate is fail-closed and starts disabled, so nothing moves until
+  it is armed — with RViz off, this is the only way to arm it.
+- **resets the run** (press `r`): the vehicle is teleported back to its
+  scenario spawn pose via Stonefish's `respawn_robot` service, and the map,
+  SLAM pose graph, eval output and planner blacklist are all cleared. The
+  simulator keeps running throughout.
+- **includes keyboard teleop** (press `t`). It publishes to
+  `/motion/body_command` with the same keys as `ros2 run launch_tools
+  my_keyboard`, so `mode:=teleop` no longer needs a second terminal. In
+  frontier mode it suspends the planner first — the safety gate treats two
+  publishers on that topic as `MULTIPLE_COMMAND_SOURCES` and stops all motion.
+- **retunes wall-following parameters live**, via `ros2 param set`, with no
+  restart at all — those parameters are re-read every control cycle. Options
+  that support this are marked `(live)`.
+- **shuts down cleanly.** Every layer runs in its own process group and is torn
+  down with an escalating SIGINT → SIGTERM → SIGKILL, on quit, on Ctrl-C, and
+  on exit, so nothing is left running in the background.
+
+Per-layer logs are written to `logs/launcher/` (gitignored).
+
+`demo.launch.py` is unchanged and still works exactly as documented below; the
+launcher drives the same underlying launch files.
+
 ## Install
 
 Requires ROS 2 Jazzy and a patched build of Stonefish (patches + build
@@ -73,7 +124,7 @@ ros2 launch bringup demo.launch.py mapper:=octomap|tsdf           # map backend
 ros2 launch bringup demo.launch.py mode:=frontier motion:=walloriented \
   wall_orientation_offset_deg:=30                                 # follow path, look toward nearest wall
 ros2 launch bringup demo.launch.py slam:=none|slam                # pose source
-ros2 launch bringup demo.launch.py noise_profile:=ideal|sonar_only|odom_pos_only|odom_only|realistic|degraded  # slam:=slam only
+ros2 launch bringup demo.launch.py noise_profile:=realistic|ideal|sonar_only|odom_pos_only|odom_only|degraded  # slam:=slam only
 ros2 launch bringup demo.launch.py rviz:=false                    # headless
 ```
 
@@ -103,7 +154,7 @@ ros2 run eval_tools plot_results eval/runs/<timestamp>/
 
 To compare multiple configurations/seeds unattended, use the batch
 orchestrator (a plain script, run directly with `python3` after sourcing
-`install/setup.bash` — see [`eval/eval_tools/scripts/run_matrix.py`](eval/eval_tools/scripts/run_matrix.py)
+`install/setup.zsh` — see [`eval/eval_tools/scripts/run_matrix.py`](eval/eval_tools/scripts/run_matrix.py)
 and the example matrices in [`eval/eval_tools/config/`](eval/eval_tools/config)):
 
 ```bash
