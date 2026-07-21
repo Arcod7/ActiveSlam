@@ -16,9 +16,17 @@ disk with these files for the demo to run; it just never enters git history.
 | `bluerov2_ring.obj` | 17 KB | |
 | `ccw.obj` / `cw.obj` | 429–452 KB | |
 
-**Provenance:** not documented yet — TODO (Antoine): note where each mesh
-came from (stock Stonefish/BlueROV2 example assets vs. downloaded third-party
-models vs. custom) so a fresh clone knows where to re-fetch them from.
+## BlueROV2 texture atlas
+
+`texture/br2.png` is paired with `obj/bluerov2.obj`. Keep its orientation
+unchanged: rotating the atlas by 90 degrees produces apparently random black,
+grey and cyan patches because the mesh then samples unrelated UV islands.
+
+**BlueROV2 provenance:** `bluerov2*.obj`, `br2.obj`, `br2.png`, `cw.obj`, and
+`ccw.obj` come from the Apache-2.0 licensed
+[`bvibhav/stonefish_bluerov2` asset directory](https://github.com/bvibhav/stonefish_bluerov2/tree/master/data/bluerov2).
+The environment meshes (`shipwreck.obj`, `cliff.obj`, and
+`off_shore_station.obj`) still need their original sources documented.
 
 **Getting the files onto a new machine:** until a fetch script exists, copy
 `data/obj/` from an existing checkout (or wherever the canonical copies are

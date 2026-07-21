@@ -4,11 +4,12 @@
 		<look
             name="br2"
             gray="1.0"
-            roughness="0.4"
-            metalness="0.5"
+            roughness="0.45"
+            metalness="0.0"
             texture="texture/br2.png"
         />
 		<look name="blue" rgb="0.0 0.5 1.0" roughness="0.3" />
+		<look name="black" gray="0.04" roughness="0.55" metalness="0.0" />
 	</looks>
 
 	<robot name="bluerov2" fixed="false" self_collisions="false">
@@ -28,7 +29,7 @@
 					<mesh filename="obj/bluerov2.obj" scale="1" />
 					<origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0" />
 				</visual>
-				<material name="Fiberglass" />
+				<material name="HDPE" />
 				<look name="br2" />
 				<compound_transform rpy="0 0.0 0.0" xyz="-0.0 0.0 0.0" />
 				<mass value="5.9" />
@@ -44,8 +45,11 @@
 					<mesh filename="obj/bluerov2_wings.obj" scale="1" />
 					<origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0" />
 				</visual>
-				<material name="Fiberglass" />
+				<material name="HDPE" />
 				<look name="black" />
+				<!-- Lump the Heavy frame, guards and otherwise unmodelled hardware
+				     so the complete vehicle mass is the published 11.5 kg. -->
+				<mass value="0.97" />
 				<compound_transform rpy="0 0.0 0.0" xyz="-0.0 0.0 0.0" />
 			</external_part>
 
@@ -168,18 +172,22 @@
 		<actuator name="FrontRight" type="thruster">
 			<link name="base_link" />
 			<origin xyz="0.1355 0.1 0.0725" rpy="0 0 -0.7853981634" />
-			<specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
-			
+			<!-- T200 at 16 V: 3600 RPM = 376.99 rad/s. -->
+			<specs max_setpoint="376.991" inverted_setpoint="false" normalized_setpoint="true"/>
+
 			<propeller diameter="0.076" right="true">
 				<mesh filename="obj/cw.obj" scale="1.0" />
 				<material name="Neutral" />
 				<look name="blue" />
 			</propeller>
 
-			<rotor_dynamics type="zero_order"/>
-			
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.4"/>
+			</rotor_dynamics>
+
 			<thrust_model type="fluid_dynamics">
-				<thrust_coeff forward="0.167" reverse="0.12"/>
+				<!-- Fits 5.25/4.10 kgf static thrust at 3600 RPM in 1031 kg/m3 water. -->
+				<thrust_coeff forward="0.4158" reverse="0.3247"/>
 				<torque_coeff value="0.016"/>
 			</thrust_model>
 		</actuator>
@@ -188,18 +196,20 @@
 		<actuator name="FrontLeft" type="thruster">
 			<link name="base_link" />
 			<origin xyz="0.1355 -0.1 0.0725" rpy="0 0 0.7853981634" />
-			<specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
-			
-			<propeller diameter="0.076" right="true">
+			<specs max_setpoint="376.991" inverted_setpoint="true" normalized_setpoint="true"/>
+
+			<propeller diameter="0.076" right="false">
 				<mesh filename="obj/ccw.obj" scale="1.0" />
 				<material name="Neutral" />
 				<look name="blue" />
 			</propeller>
 
-			<rotor_dynamics type="zero_order"/>
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.4"/>
+			</rotor_dynamics>
 
 			<thrust_model type="fluid_dynamics">
-				<thrust_coeff forward="0.167" reverse="0.12"/>
+				<thrust_coeff forward="0.4158" reverse="0.3247"/>
 				<torque_coeff value="0.016"/>
 			</thrust_model>
 		</actuator>
@@ -208,18 +218,20 @@
 		<actuator name="BackRight" type="thruster">
 			<link name="base_link" />
 			<origin xyz="-0.1475 0.1 0.0725" rpy="0 0 -2.3561944902" />
-			<specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
-			
+			<specs max_setpoint="376.991" inverted_setpoint="false" normalized_setpoint="true"/>
+
 			<propeller diameter="0.076" right="true">
 				<mesh filename="obj/cw.obj" scale="1.0" />
 				<material name="Neutral" />
 				<look name="blue" />
 			</propeller>
 
-			<rotor_dynamics type="zero_order"/>
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.4"/>
+			</rotor_dynamics>
 
 			<thrust_model type="fluid_dynamics">
-				<thrust_coeff forward="0.167" reverse="0.12"/>
+				<thrust_coeff forward="0.4158" reverse="0.3247"/>
 				<torque_coeff value="0.016"/>
 			</thrust_model>
 		</actuator>
@@ -228,18 +240,20 @@
 		<actuator name="BackLeft" type="thruster">
 			<link name="base_link" />
 			<origin xyz="-0.1475 -0.1 0.0725" rpy="0 0 2.3561944902" />
-			<specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
-			
-			<propeller diameter="0.076" right="true">
+			<specs max_setpoint="376.991" inverted_setpoint="true" normalized_setpoint="true"/>
+
+			<propeller diameter="0.076" right="false">
 				<mesh filename="obj/ccw.obj" scale="1.0" />
 				<material name="Neutral" />
 				<look name="blue" />
 			</propeller>
 
-			<rotor_dynamics type="zero_order"/>
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.4"/>
+			</rotor_dynamics>
 
 			<thrust_model type="fluid_dynamics">
-				<thrust_coeff forward="0.167" reverse="0.12"/>
+				<thrust_coeff forward="0.4158" reverse="0.3247"/>
 				<torque_coeff value="0.016"/>
 			</thrust_model>
 		</actuator>
@@ -248,18 +262,20 @@
 		<actuator name="DiveFrontRight" type="thruster">
 			<link name="base_link" />
 			<origin xyz="0.12 0.218 0.0" rpy="0 -1.5707963268 0" />
-			<specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
-			
+			<specs max_setpoint="376.991" inverted_setpoint="false" normalized_setpoint="true"/>
+
 			<propeller diameter="0.076" right="true">
 				<mesh filename="obj/cw.obj" scale="1.0" />
 				<material name="Neutral" />
 				<look name="blue" />
 			</propeller>
 
-			<rotor_dynamics type="zero_order"/>
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.4"/>
+			</rotor_dynamics>
 
 			<thrust_model type="fluid_dynamics">
-				<thrust_coeff forward="0.167" reverse="0.12"/>
+				<thrust_coeff forward="0.4158" reverse="0.3247"/>
 				<torque_coeff value="0.016"/>
 			</thrust_model>
 		</actuator>
@@ -268,18 +284,20 @@
 		<actuator name="DiveFrontLeft" type="thruster">
 			<link name="base_link" />
 			<origin xyz="0.12 -0.218 0.0" rpy="0 -1.5707963268 0" />
-			<specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
-			
-			<propeller diameter="0.076" right="true">
+			<specs max_setpoint="376.991" inverted_setpoint="true" normalized_setpoint="true"/>
+
+			<propeller diameter="0.076" right="false">
 				<mesh filename="obj/ccw.obj" scale="1.0" />
 				<material name="Neutral" />
 				<look name="blue" />
 			</propeller>
 
-			<rotor_dynamics type="zero_order"/>
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.4"/>
+			</rotor_dynamics>
 
 			<thrust_model type="fluid_dynamics">
-				<thrust_coeff forward="0.167" reverse="0.12"/>
+				<thrust_coeff forward="0.4158" reverse="0.3247"/>
 				<torque_coeff value="0.016"/>
 			</thrust_model>
 		</actuator>
@@ -288,25 +306,27 @@
 		<actuator name="DiveBackRight" type="thruster">
 			<link name="base_link" />
 			<origin xyz="-0.12 0.218 0.0" rpy="0 -1.5707963268 0" />
-			<specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
-			
-			<propeller diameter="0.076" right="true">
+			<specs max_setpoint="376.991" inverted_setpoint="true" normalized_setpoint="true"/>
+
+			<propeller diameter="0.076" right="false">
 				<mesh filename="obj/ccw.obj" scale="1.0" />
 				<material name="Neutral" />
 				<look name="blue" />
 			</propeller>
 
-			<rotor_dynamics type="zero_order"/>
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.4"/>
+			</rotor_dynamics>
 
 			<thrust_model type="fluid_dynamics">
-				<thrust_coeff forward="0.167" reverse="0.12"/>
+				<thrust_coeff forward="0.4158" reverse="0.3247"/>
 				<torque_coeff value="0.016"/>
 			</thrust_model>
 		</actuator>
 
 		<!-- Thruster 8 -->
 		<actuator name="DiveBackLeft" type="thruster">
-			<specs max_setpoint="340.0" inverted_setpoint="false" normalized_setpoint="true"/>
+			<specs max_setpoint="376.991" inverted_setpoint="false" normalized_setpoint="true"/>
 			
 			<propeller diameter="0.076" right="true">
 				<mesh filename="obj/cw.obj" scale="1.0" />
@@ -314,39 +334,17 @@
 				<look name="blue" />
 			</propeller>
 
-			<rotor_dynamics type="zero_order"/>
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.4"/>
+			</rotor_dynamics>
 
 			<thrust_model type="fluid_dynamics">
-				<thrust_coeff forward="0.167" reverse="0.12"/>
+				<thrust_coeff forward="0.4158" reverse="0.3247"/>
 				<torque_coeff value="0.016"/>
 			</thrust_model>
 
 			<origin xyz="-0.12 -0.218 0.0" rpy="0 -1.5707963268 0" />
 			<link name="base_link" />
-		</actuator>
-
-		<link name="sonar_link" type="box" physics="submerged">
-			<dimensions xyz="0.02 0.02 0.02" />
-			<origin xyz="0 0 0" rpy="0 0 0" />
-			<material name="Neutral" />
-			<look name="blue" />
-		</link>
-
-		<joint name="base_link_to_sonar" type="revolute">
-			<parent name="base_link" />
-			<child name="sonar_link" />
-			<origin xyz="0.2 0.0 0.3" rpy="1.571 0.0 1.571" />
-			<axis xyz="0.0 0.0 1.0" />
-		</joint>
-
-		<actuator name="Servo" type="servo">
-		    <joint name="base_link_to_sonar" />
-		    <controller
-                position_gain="1.0"
-                velocity_gain="1.0"
-                max_torque="10.0"
-                max_velocity="0.1"
-            />
 		</actuator>
 
 		<sensor name="odometry" type="odometry" rate="100.0">
@@ -398,11 +396,9 @@
 
 		<ros_subscriber
             thrusters="/bluerov2/controller/thruster_setpoints_sim"
-            servos="/bluerov2/controller/sonar_servo_setpoints_sim"
         />
 		<ros_publisher
             thrusters="/bluerov2/controller/thruster_state"
-            servos="/bluerov2/controller/sonar_servo_state"
         />
 	</robot>
 </scenario>
