@@ -35,6 +35,14 @@ Optional arguments:
   scenario_out_dx/scenario_out_dy
               Outbound leg offset (m) from the start position for
               scenario:=drift_return. Default: 15.0 / 0.0.
+  scan_style  Scanning motion for waypoint_controller's INIT_SCAN/SCAN/
+              GOAL_REACHED states: sweep (default, cable-safe right-then-left,
+              docs/plans/plan.md B1 — see scan_sweep.py) or spin (legacy 360°
+              rotation, byte-identical to the pre-B1 behaviour).
+  scan_sweep_deg
+              scan_style:=sweep total sweep width in degrees, mirrored left/
+              right about the heading captured when each scan starts.
+              Default: 180.0.
 
 Examples:
   ros2 launch frontier_slam frontier_slam.launch.py
@@ -133,6 +141,19 @@ def generate_launch_description():
         default_value='0.0',
         description='drift_return: outbound leg Y offset (m) from the captured start position.',
     )
+    scan_style_arg = DeclareLaunchArgument(
+        'scan_style',
+        default_value='sweep',
+        choices=['sweep', 'spin'],
+        description=(
+            'Scanning motion for INIT_SCAN/SCAN/GOAL_REACHED: sweep (default, '
+            'cable-safe right-then-left) or spin (legacy 360° rotation).'),
+    )
+    scan_sweep_deg_arg = DeclareLaunchArgument(
+        'scan_sweep_deg',
+        default_value='180.0',
+        description='scan_style:=sweep total sweep width in degrees.',
+    )
     motion_arg = DeclareLaunchArgument(
         'motion', default_value='forward',
         choices=['forward', 'walloriented', 'walllooking'],
@@ -204,6 +225,8 @@ def generate_launch_description():
         scenario_arg,
         scenario_out_dx_arg,
         scenario_out_dy_arg,
+        scan_style_arg,
+        scan_sweep_deg_arg,
         motion_arg,
         wall_orientation_offset_arg,
         wall_orientation_lookahead_arg,
@@ -280,7 +303,12 @@ def generate_launch_description():
             executable='waypoint_controller',
             name='waypoint_controller',
             output='screen',
-            parameters=[{'depth_setpoint': depth, 'odom_topic': odom_topic}],
+            parameters=[{
+                'depth_setpoint': depth,
+                'odom_topic': odom_topic,
+                'scan_style': LaunchConfiguration('scan_style'),
+                'scan_sweep_deg': _float_parameter('scan_sweep_deg'),
+            }],
             condition=LaunchConfigurationEquals('motion', 'forward'),
         ),
         Node(

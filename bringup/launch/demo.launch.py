@@ -216,6 +216,18 @@ def generate_launch_description():
         default_value="0.0",
         description="drift_return: outbound leg Y offset (m) from the captured start position",
     )
+    scan_style_arg = DeclareLaunchArgument(
+        "scan_style",
+        default_value="sweep",
+        choices=["sweep", "spin"],
+        description="Scanning motion for waypoint_controller: sweep (default, "
+        "cable-safe right-then-left, docs/plans/plan.md B1) or spin (legacy 360° rotation)",
+    )
+    scan_sweep_deg_arg = DeclareLaunchArgument(
+        "scan_sweep_deg",
+        default_value="180.0",
+        description="scan_style:=sweep total sweep width in degrees",
+    )
 
     # tf.launch.py (included further below via octomap/tsdf -> pointcloud -> tf)
     # declares use_gt_tf with its own default of 'true'; DeclareLaunchArgument only
@@ -379,6 +391,8 @@ def generate_launch_description():
             "scenario": LaunchConfiguration("scenario"),
             "scenario_out_dx": LaunchConfiguration("scenario_out_dx"),
             "scenario_out_dy": LaunchConfiguration("scenario_out_dy"),
+            "scan_style": LaunchConfiguration("scan_style"),
+            "scan_sweep_deg": LaunchConfiguration("scan_sweep_deg"),
             "safety_start_enabled": LaunchConfiguration("safety_start_enabled"),
             "motion": PythonExpression(
                 [
@@ -615,6 +629,8 @@ def generate_launch_description():
             scenario_arg,
             scenario_out_dx_arg,
             scenario_out_dy_arg,
+            scan_style_arg,
+            scan_sweep_deg_arg,
             set_use_gt_tf,
             set_sonar_noise,
             # revisit_needs_slam_warning/scenario_needs_frontier_warning read top-level

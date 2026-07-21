@@ -10,8 +10,9 @@ path waypoints published on /frontier_slam/path.  Responsibilities:
   3. Emergency stop  — zero surge if the forward depth camera detects an
                        obstacle closer than EMERGENCY_STOP_DIST (last-resort
                        safety; A* inflation should prevent this normally).
-  4. Initial scan    — spin for INIT_SCAN_DURATION seconds on first odom so
-                       the path planner has an initial map before navigating.
+  4. Initial scan    — populate an initial map before navigating; `scan_style`
+                       picks a cable-safe sweep (default, scan_sweep.py) or
+                       the legacy spin. Same behaviour while waiting/at goal.
 
 Why a fixed depth setpoint?
   See Progress.md "Session 1 — Findings".  Locking the setpoint once on first
@@ -29,6 +30,7 @@ from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import Image
 
 from frontier_slam.control_utils import wrap_angle, yaw_from_quat
+from frontier_slam.scan_sweep import SweepScan, scan_yaw_command
 from frontier_slam.session_log import open_session_log
 
 
@@ -56,8 +58,9 @@ class WaypointController(Node):
     MAX_SURGE             = 0.25
     GOAL_RADIUS           = 2.0    # m
     GOAL_REACHED_TIMEOUT  = 10.0   # s — clear stale goal after this long at goal
-    SCAN_YAW              = 0.08   # rotation speed while scanning / at goal
+    SCAN_YAW              = 0.026  # rad/s cmd — slow, for sonar frame overlap at 5 Hz
     INIT_SCAN_DURATION    = 10.0    # s — initial spin before navigating (~1 rotation)
+    SCAN_YAW_RATE_RAD_S   = 0.22    # achieved rate at SCAN_YAW; sizes the sweep timeout
     WAYPOINT_ADVANCE_DIST = 1.5    # m — advance to next waypoint when this close
     OBS_SLOW_DIST         = 1.5    # m — begin linearly reducing surge at this distance
     EMERGENCY_STOP_DIST   = 0.4    # m — ramp reaches zero; switch to back-surge below this
@@ -87,6 +90,12 @@ class WaypointController(Node):
         goal_topic = str(self.get_parameter('goal_topic').value)
         path_topic = str(self.get_parameter('path_topic').value)
         command_topic = str(self.get_parameter('command_topic').value)
+
+        self.declare_parameter('scan_style', 'sweep')
+        self.declare_parameter('scan_sweep_deg', 180.0)
+        self._scan_style = str(self.get_parameter('scan_style').value)
+        scan_sweep_deg = float(self.get_parameter('scan_sweep_deg').value)
+        self._sweep = SweepScan(scan_sweep_deg, self.SCAN_YAW_RATE_RAD_S)
 
         self._goal: np.ndarray | None = None
         self._pose: np.ndarray | None = None
@@ -158,9 +167,13 @@ class WaypointController(Node):
                     f'depth setpoint locked from odom at {self._depth_setpoint:.2f} m'
                 )
             self._init_scan_end = self._t_ros() + self.INIT_SCAN_DURATION
-            self.get_logger().info(
-                f'initial {self.INIT_SCAN_DURATION:.0f}s scan starting'
-            )
+            if self._scan_style == 'spin':
+                self.get_logger().info(
+                    f'initial {self.INIT_SCAN_DURATION:.0f}s scan starting'
+                )
+            else:
+                self._sweep.start(self._yaw, self._t_ros())
+                self.get_logger().info('initial cable-safe sweep scan starting')
 
     def _t_ros(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
@@ -196,17 +209,28 @@ class WaypointController(Node):
         now   = self._t_ros()
         heave = self._heave_cmd()
 
-        # Initial 360° scan — spin to populate the map before first navigation
-        if self._init_scan_end is not None and now < self._init_scan_end:
-            self._send_thrust(0.0, self.SCAN_YAW, heave)
-            if write_csv:
-                self._write_csv(0.0, self.SCAN_YAW, heave, 'INIT_SCAN')
-            return
+        # Initial scan — spin, or cable-safe sweep, to populate the map before first navigation
+        if self._init_scan_end is not None:
+            if self._scan_style == 'spin':
+                if now < self._init_scan_end:
+                    self._send_thrust(0.0, self.SCAN_YAW, heave)
+                    if write_csv:
+                        self._write_csv(0.0, self.SCAN_YAW, heave, 'INIT_SCAN')
+                    return
+            elif self._sweep.active:
+                yaw_cmd = scan_yaw_command(self._sweep, self._scan_style, self._yaw, now,
+                                           self.SCAN_YAW, repeat=False)
+                self._send_thrust(0.0, yaw_cmd, heave)
+                if write_csv:
+                    self._write_csv(0.0, yaw_cmd, heave, 'INIT_SCAN')
+                return
 
         if self._goal is None:
-            self._send_thrust(0.0, self.SCAN_YAW, heave)
+            yaw_cmd = scan_yaw_command(self._sweep, self._scan_style, self._yaw, now,
+                                       self.SCAN_YAW, repeat=True)
+            self._send_thrust(0.0, yaw_cmd, heave)
             if write_csv:
-                self._write_csv(0.0, self.SCAN_YAW, heave, 'SCAN')
+                self._write_csv(0.0, yaw_cmd, heave, 'SCAN')
             return
 
         dist_xy = float(np.hypot(self._goal[0] - self._pose[0],
@@ -222,11 +246,15 @@ class WaypointController(Node):
                 )
                 self._goal = None
                 self._goal_reached_at = None
-            self._send_thrust(0.0, self.SCAN_YAW, heave)
+            yaw_cmd = scan_yaw_command(self._sweep, self._scan_style, self._yaw, now,
+                                       self.SCAN_YAW, repeat=True)
+            self._send_thrust(0.0, yaw_cmd, heave)
             self.get_logger().info('Goal reached — scanning', throttle_duration_sec=2.0)
             if write_csv:
-                self._write_csv(0.0, self.SCAN_YAW, heave, 'GOAL_REACHED', dist=dist_xy)
+                self._write_csv(0.0, yaw_cmd, heave, 'GOAL_REACHED', dist=dist_xy)
             return
+
+        self._sweep.reset()   # clear any interrupted scan before path-following resumes
 
         # Choose navigation target: current path waypoint, or raw goal as fallback
         if self._path:
