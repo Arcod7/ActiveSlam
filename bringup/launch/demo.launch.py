@@ -39,6 +39,7 @@ another terminal — the standard pattern for ROS2 keyboard teleop.
 """
 
 import os
+import sysconfig
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -52,6 +53,15 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory, get_package_prefix
+
+
+def _octomap_preload_path():
+    """Path to liboctomap.so for RViz's LD_PRELOAD, or '' if it can't be found."""
+    prefix = get_package_prefix("octomap")
+    triplet = sysconfig.get_config_var("MULTIARCH") or ""
+    candidates = [os.path.join(prefix, "lib", triplet, "liboctomap.so")] if triplet else []
+    candidates.append(os.path.join(prefix, "lib", "liboctomap.so"))
+    return next((c for c in candidates if os.path.isfile(c)), "")
 
 
 def generate_launch_description():
@@ -587,9 +597,10 @@ def generate_launch_description():
         ]
     )
 
-    octomap_lib_preload = os.path.join(
-        get_package_prefix("octomap"), "lib", "aarch64-linux-gnu", "liboctomap.so"
-    )
+    # liboctomap lives under a Debian multiarch triplet directory, so derive the
+    # triplet instead of naming one architecture. Falls back to the unsuffixed
+    # lib/ path, then to no preload at all if the library isn't where expected.
+    octomap_lib_preload = _octomap_preload_path()
 
     rviz = Node(
         package="rviz2",
