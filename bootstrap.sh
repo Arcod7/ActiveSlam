@@ -18,7 +18,15 @@ fi
 BUILD_STONEFISH=false
 STONEFISH_DIR="$REPO_ROOT/../stonefish"
 STONEFISH_UPSTREAM="https://github.com/patrykcieslak/stonefish.git"
-STONEFISH_BASE_COMMIT="09208f913daf688cc8abc775d45742c860c81f19"
+# Read from the patches README so the pin cannot drift out of sync with the
+# patches themselves when the fork is rebased.
+STONEFISH_PATCH_DIR="$REPO_ROOT/sim/stonefish_patches"
+STONEFISH_BASE_COMMIT="$(grep -oE '[0-9a-f]{40}' "$STONEFISH_PATCH_DIR/README.md" 2>/dev/null | head -1)"
+if [ -z "$STONEFISH_BASE_COMMIT" ]; then
+    echo "Could not read the Stonefish base commit from" \
+         "$STONEFISH_PATCH_DIR/README.md" >&2
+    exit 1
+fi
 
 WITH_VDBFUSION=false
 VDBFUSION_DIR="$REPO_ROOT/../vdbfusion"
