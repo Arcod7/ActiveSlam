@@ -85,6 +85,11 @@ heavy_sim_mixer (simulation only)
 /bluerov2/controller/thruster_setpoints_sim
 ```
 
+`heavy_sim_mixer` also holds zero roll and pitch because direct Stonefish does
+not run ArduSub. This loop is simulation-only. On the physical BlueROV2, the
+planner sends translation and yaw demands through the MAVLink adapter, while
+ArduSub owns attitude stabilization and final motor allocation.
+
 ## Package structure
 
 ```
