@@ -10,7 +10,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MODEL_PATH = REPO_ROOT / 'sim/world/data/robot/bluerov2_unphy.scn'
-WORLD_PATH = REPO_ROOT / 'sim/world/scnenario/waterlinked.scn'
+WORLD_PATH = REPO_ROOT / 'sim/world/scenario/waterlinked.scn'
 TEXTURE_PATH = REPO_ROOT / 'sim/world/data/texture/br2.png'
 TEXTURE_SHA256 = '13bccf98707b25e10a22933f25c1779a1003ef2b17a38b1995844c709abfe018'
 

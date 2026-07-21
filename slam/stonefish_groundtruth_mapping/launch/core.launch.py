@@ -22,7 +22,7 @@ from ament_index_python.packages import get_package_share_directory
 
 _WORLD_DIR = os.environ.get('STONEFISH_WORLD_DIR', get_package_share_directory('world'))
 WORLD_DATA = os.path.join(_WORLD_DIR, 'data')
-SCENARIO   = os.path.join(_WORLD_DIR, 'scnenario', 'waterlinked.scn')
+SCENARIO   = os.path.join(_WORLD_DIR, 'scenario', 'waterlinked.scn')
 
 
 def generate_launch_description():
