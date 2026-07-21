@@ -785,3 +785,55 @@ Verified in the ROS Jazzy container: `colcon build --symlink-install
 `test_attitude_filter.py`'s Kalman-filter propagation/correction/wraparound
 cases and `test_noise_profiles.py`'s check that `odom_pos_only` matches
 `realistic` position noise with zero-sigma attitude and exact sonar.
+
+## Phase 26 — Launcher, restartable launch layers, and install friction
+
+**Date**: 2026-07-22
+**Files**: `launcher.py` (new), `launcher_core.py` (new),
+`launcher_model.py` (new), `bootstrap.sh` (new),
+`slam/stonefish_groundtruth_mapping/launch/core.launch.py` (new),
+`slam/stonefish_groundtruth_mapping/launch/tf_only.launch.py` (new),
+`slam/stonefish_groundtruth_mapping/launch/pointcloud_only.launch.py` (new),
+`slam/stonefish_groundtruth_mapping/launch/mapper_only.launch.py` (new),
+`slam/stonefish_groundtruth_mapping/launch/{tf,pointcloud,octomap,tsdf}.launch.py`,
+`slam/stonefish_groundtruth_mapping/setup.py`,
+`bringup/launch/demo.launch.py`, `sim/world/scenario/` (renamed from
+`scnenario/`), `sim/world/setup.py`, `sim/world/run.sh`,
+`sim/world/data/obj.sha256` (new), `sim/world/data/README.md`,
+`.gitmodules` (new), `external/` (new),
+`requirements.txt`, `docs/INSTALL.md`, `README.md`,
+`{eval/eval_tools,slam/slam_backend,slam/stonefish_groundtruth_mapping}/package.xml`,
+`tools/launch_tools/{package.xml,setup.py}`,
+`planner/frontier_slam/test/test_bluerov2_model.py`
+
+The mapping stack was a strict include cascade with the simulator at the
+bottom, so changing any option restarted Stonefish. Each layer is now
+launchable on its own (`core` / `tf_only` / `pointcloud_only` /
+`mapper_only`) and the existing entry points are thin compositions of
+those, leaving `demo.launch.py` and the node sets it produces unchanged.
+
+On top of that, `launcher.py` runs the stack as independently restartable
+groups: swapping the mapper, mode or pose source bounces only the layers
+that depend on it (verified by PID — the simulator survives). It also arms
+the fail-closed motion gate, which previously had no control outside RViz's
+panel and silently left the vehicle immobile; resets a run by respawning
+the vehicle and clearing map/pose-graph/eval state; drives by keyboard
+without a second terminal; and retunes the wall parameters live via
+`ros2 param set`. Every group runs in its own process group and is torn
+down with an escalating SIGINT/SIGTERM/SIGKILL applied to the *group* —
+`ros2 launch` exiting does not mean its nodes have.
+
+Install friction: `bootstrap.sh` collapses the setup into one idempotent
+command; Stonefish and vdbfusion are pinned as submodules under `external/`
+rather than cloned and patched by hand (vdbfusion matters most on aarch64,
+where PyPI ships no wheel); numpy/scipy/matplotlib moved to rosdep keys in
+the packages that import them, leaving `requirements.txt` to what rosdep
+genuinely cannot provide; the mesh set gained a tracked `obj.sha256`
+manifest that `bootstrap.sh` verifies. The `scnenario/` misspelling is
+fixed, and `demo.launch.py` derives the octomap `LD_PRELOAD` multiarch
+triplet instead of hardcoding `aarch64-linux-gnu`, which had made the demo
+x86_64-only.
+
+Note: rosdep's `gtsam` key resolves to `ros-jazzy-gtsam`, which ships the
+C++ libraries and no Python module, so it cannot replace the PyPI wheel
+that `slam_backend` imports. Left on pip deliberately.

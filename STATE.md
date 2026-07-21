@@ -1,6 +1,6 @@
 # ActiveSlam SLAM Backend — Current State
 
-Mutable snapshot. Overwrite, never append. Last updated: 2026-07-10.
+Mutable snapshot. Overwrite, never append. Last updated: 2026-07-22.
 
 Change log → `Progress.md`. Detailed design + as-built deltas → `docs/SLAM_PLAN.md`.
 
@@ -78,6 +78,12 @@ depth_image_proc ─► /cloud_in_raw ─► sonar_noise ─► /cloud_in (5Hz) 
 
 - `slam/slam_backend/` — sensor sims (incl. `sonar_noise`), dead-reckoning fusion, pose graph, scan matcher
 - `eval/eval_tools/` — benchmark node, map_metrics node, TUM writer, offline plotting, batch orchestrator (`scripts/run_matrix.py`)
+- `slam/stonefish_groundtruth_mapping/launch/` — layered: `core` (Stonefish
+  alone) / `tf_only` / `pointcloud_only` / `mapper_only`, with
+  `tf`/`pointcloud`/`octomap`/`tsdf` as thin compositions of them. Launch a
+  single layer to restart it without dropping the simulator.
+- `external/` — pinned submodules: the patched Stonefish fork and vdbfusion.
+  Not colcon packages (`COLCON_IGNORE`); built by `./bootstrap.sh`.
 
 ## Parameters
 
@@ -135,6 +141,14 @@ every tick, so `ros2 param set` takes effect without a restart)
 | `cooldown_s` | 60 | COOLDOWN → EXPLORING delay |
 
 ### Launch usage
+
+`python3 launcher.py` (repo root) is the interactive way in: it runs the stack
+as independently restartable groups, so changing the mapper, mode or pose
+source only bounces the layers that depend on it and leaves Stonefish up. It
+also arms the fail-closed motion gate (`m`) — nothing moves until it is armed,
+and with `rviz:=false` there is no other way to do that — resets a run (`r`),
+and has keyboard teleop built in (`t`). `demo.launch.py` below is unchanged and
+drives the same launch files.
 
 ```bash
 ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic mode:=frontier
