@@ -18,6 +18,12 @@ project (~250 MB checkout) that isn't part of this repo.
    capture timestamps on the physics thread (not the GL thread) for every
    vision/sonar sensor, so ground-truth pose association isn't skewed by GPU
    render latency.
+3. `0003-fix-use-GL_LINEAR-for-texture-magnification-filter.patch` — corrects an
+   invalid OpenGL enum: `GL_TEXTURE_MAG_FILTER` was set to
+   `GL_LINEAR_MIPMAP_LINEAR`, which only `GL_TEXTURE_MIN_FILTER` accepts. The
+   call was a silent no-op (raising `GL_INVALID_ENUM`, leaving the filter at its
+   `GL_LINEAR` default); this makes it explicit. Independent upstream cleanup,
+   not something the project relies on.
 
 ## Building
 
