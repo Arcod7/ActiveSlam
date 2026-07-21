@@ -5,6 +5,7 @@ scipy>=1.11
 gtsam==4.2.1
 small-gicp
 pymavlink==2.4.49
+matplotlib
 
 # vdbfusion (mapper:=tsdf only) is NOT installable via this file: PyPI only ships wheels up
 # to cp310, on x86_64 only — no wheel exists for Python 3.11/3.12 (Ubuntu 24.04's default) on
