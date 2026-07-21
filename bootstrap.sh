@@ -15,22 +15,15 @@ else
          "for the standard layout (see docs/INSTALL.md)." >&2
 fi
 
+# Stonefish and vdbfusion are git submodules under external/, pinned to exact
+# commits, so there is nothing to clone or patch by hand and the versions cannot
+# drift from what this repo was tested against.
 BUILD_STONEFISH=false
-STONEFISH_DIR="$REPO_ROOT/../stonefish"
-STONEFISH_UPSTREAM="https://github.com/patrykcieslak/stonefish.git"
-# Read from the patches README so the pin cannot drift out of sync with the
-# patches themselves when the fork is rebased.
-STONEFISH_PATCH_DIR="$REPO_ROOT/sim/stonefish_patches"
-STONEFISH_BASE_COMMIT="$(grep -oE '[0-9a-f]{40}' "$STONEFISH_PATCH_DIR/README.md" 2>/dev/null | head -1)"
-if [ -z "$STONEFISH_BASE_COMMIT" ]; then
-    echo "Could not read the Stonefish base commit from" \
-         "$STONEFISH_PATCH_DIR/README.md" >&2
-    exit 1
-fi
+STONEFISH_DIR="$REPO_ROOT/external/stonefish"
+STONEFISH_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
 
 WITH_VDBFUSION=false
-VDBFUSION_DIR="$REPO_ROOT/../vdbfusion"
-VDBFUSION_UPSTREAM="https://github.com/PRBonn/vdbfusion.git"
+VDBFUSION_DIR="$REPO_ROOT/external/vdbfusion"
 
 MESHES_FROM=""
 
@@ -40,13 +33,17 @@ Usage: ./bootstrap.sh [options]
 
 Fast path (default): pip deps, rosdep, colcon build.
 
-  --build-stonefish        Clone + patch the pinned Stonefish commit and print
-                            its own build instructions (heavy C++ build, not
-                            run automatically — see sim/stonefish_patches/README.md).
-  --stonefish-dir <path>   Where to clone Stonefish (default: $STONEFISH_DIR).
-  --with-vdbfusion         Clone + pip install vdbfusion (needed for mapper:=tsdf;
-                            heavy — needs OpenVDB + a C++ toolchain).
-  --vdbfusion-dir <path>   Where to clone vdbfusion (default: $VDBFUSION_DIR).
+  --build-stonefish        Build the patched Stonefish submodule and install it
+                            (heavy C++ build; needs Stonefish's own 3rdparty
+                            dependencies).
+  --stonefish-dir <path>   Use an existing Stonefish checkout instead of the
+                            submodule (default: $STONEFISH_DIR).
+  --with-vdbfusion         Build + pip install the vdbfusion submodule (needed
+                            for mapper:=tsdf; heavy — needs OpenVDB and a C++
+                            toolchain). The only option on aarch64, where no
+                            wheel is published.
+  --vdbfusion-dir <path>   Use an existing vdbfusion checkout instead of the
+                            submodule (default: $VDBFUSION_DIR).
   --meshes-from <path>     Copy sim/world/data/obj/ from an existing checkout.
   -h, --help               Show this help.
 EOF
@@ -64,7 +61,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-echo "==> 1/6 Sanity checks"
+echo "==> 1/7 Sanity checks"
 if ! command -v ros2 >/dev/null 2>&1; then
     echo "ros2 not found on PATH. Enter the ROS 2 Jazzy environment first" \
          "(e.g. 'distrobox enter ros2-jazzy && source /opt/ros/jazzy/setup.zsh')" \
@@ -78,37 +75,47 @@ if ! command -v rosdep >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "==> 2/6 Python dependencies (requirements.txt)"
-pip install -r "$REPO_ROOT/requirements.txt"
-
-echo "==> 3/6 rosdep (workspace root: $WS_ROOT)"
-( cd "$WS_ROOT" && rosdep install --from-paths src -i -y )
-
-echo "==> 4/6 Patched Stonefish"
-if [ "$BUILD_STONEFISH" = true ]; then
-    if [ -d "$STONEFISH_DIR" ]; then
-        echo "$STONEFISH_DIR already exists, skipping clone/patch."
-    else
-        git clone "$STONEFISH_UPSTREAM" "$STONEFISH_DIR"
-        ( cd "$STONEFISH_DIR" && \
-          git checkout "$STONEFISH_BASE_COMMIT" && \
-          git am "$REPO_ROOT"/sim/stonefish_patches/*.patch )
-    fi
-    echo "Stonefish cloned and patched at $STONEFISH_DIR." \
-         "Build it following Stonefish's own CMake instructions" \
-         "(see sim/stonefish_patches/README.md) — not run automatically here."
+echo "==> 2/7 Submodules (pinned Stonefish + vdbfusion sources)"
+if [ -f "$REPO_ROOT/.gitmodules" ] && [ -d "$REPO_ROOT/.git" ] || \
+   [ -f "$REPO_ROOT/.git" ]; then
+    ( cd "$REPO_ROOT" && git submodule update --init --recursive )
 else
-    echo "Skipped (pass --build-stonefish to clone + patch it)."
+    echo "Not a git checkout, skipping submodule init."
 fi
 
-echo "==> 5/6 vdbfusion (mapper:=tsdf)"
-if [ "$WITH_VDBFUSION" = true ]; then
-    if [ -d "$VDBFUSION_DIR" ]; then
-        echo "$VDBFUSION_DIR already exists, skipping clone."
-    else
-        git clone "$VDBFUSION_UPSTREAM" "$VDBFUSION_DIR"
+echo "==> 3/7 Python dependencies (requirements.txt)"
+pip install -r "$REPO_ROOT/requirements.txt"
+
+echo "==> 4/7 rosdep (workspace root: $WS_ROOT)"
+( cd "$WS_ROOT" && rosdep install --from-paths src -i -y )
+
+echo "==> 5/7 Patched Stonefish"
+if [ "$BUILD_STONEFISH" = true ]; then
+    if [ ! -d "$STONEFISH_DIR/Library" ]; then
+        echo "$STONEFISH_DIR looks empty. Run" \
+             "'git submodule update --init external/stonefish' first," \
+             "or point --stonefish-dir at an existing checkout." >&2
+        exit 1
     fi
-    ( cd "$VDBFUSION_DIR" && pip install . )
+    cmake -S "$STONEFISH_DIR" -B "$STONEFISH_DIR/build" \
+          -DCMAKE_BUILD_TYPE=Release
+    cmake --build "$STONEFISH_DIR/build" -j "$STONEFISH_BUILD_JOBS"
+    echo "Stonefish built at $STONEFISH_DIR/build." \
+         "Install it (sudo cmake --install) if it is not already on the" \
+         "library path — see docs/INSTALL.md."
+else
+    echo "Skipped (pass --build-stonefish to build the pinned submodule)."
+fi
+
+echo "==> 6/7 vdbfusion (mapper:=tsdf)"
+if [ "$WITH_VDBFUSION" = true ]; then
+    if [ ! -f "$VDBFUSION_DIR/setup.py" ] && [ ! -f "$VDBFUSION_DIR/pyproject.toml" ]; then
+        echo "$VDBFUSION_DIR looks empty. Run" \
+             "'git submodule update --init external/vdbfusion' first," \
+             "or point --vdbfusion-dir at an existing checkout." >&2
+        exit 1
+    fi
+    pip install "$VDBFUSION_DIR"
 else
     echo "Skipped (pass --with-vdbfusion; only needed for mapper:=tsdf)."
 fi
@@ -128,7 +135,7 @@ else
          "before building." >&2
 fi
 
-echo "==> 6/6 colcon build"
+echo "==> 7/7 colcon build"
 ( cd "$WS_ROOT" && colcon build --symlink-install --cmake-args -Wno-dev )
 
 echo "==> Done. source $WS_ROOT/install/setup.zsh, then: python3 launcher.py"

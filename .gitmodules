@@ -1,0 +1,6 @@
+[submodule "external/vdbfusion"]
+	path = external/vdbfusion
+	url = https://github.com/PRBonn/vdbfusion.git
+[submodule "external/stonefish"]
+	path = external/stonefish
+	url = https://github.com/Arcod7/stonefish.git

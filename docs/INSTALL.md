@@ -23,10 +23,21 @@ rosdep update
 ## 3. Patched Stonefish
 
 This project runs a patched build of [Stonefish](https://github.com/patrykcieslak/stonefish),
-not the stock package. See [`sim/stonefish_patches/README.md`](../sim/stonefish_patches/README.md)
-for the upstream commit, the patches themselves, and build instructions
-(CMake + Stonefish's own 3rdparty dependencies — follow Stonefish's own build
-docs for those).
+not the stock package. It comes in as a git submodule at
+`external/stonefish`, pinned to an exact commit of the patched fork, so
+there is nothing to clone or patch by hand:
+
+```bash
+git submodule update --init external/stonefish
+./bootstrap.sh --build-stonefish
+```
+
+A plain `git clone` does not download submodules, so this is opt-in — clone
+with `--recurse-submodules`, or run the command above afterwards.
+
+[`sim/stonefish_patches/`](../sim/stonefish_patches/) still carries the patches
+as plain files. They document what the fork changes relative to upstream and
+record the base commit; the submodule is what actually gets built.
 
 ## 4. Scene meshes
 
@@ -38,7 +49,7 @@ disk (not just cloned) before the demo will load the scenario.
 
 ```bash
 mkdir -p ~/ros_ws/src && cd ~/ros_ws/src
-git clone git@github.com:Arcod7/ActiveSlam.git
+git clone --recurse-submodules git@github.com:Arcod7/ActiveSlam.git
 cd ~/ros_ws
 rosdep install --from-paths src -i -y
 colcon build --symlink-install --cmake-args -Wno-dev
@@ -77,12 +88,12 @@ the exception — see below, it needs a source build instead.
 PyPI only publishes wheels up to Python 3.10, x86_64
 only — there is no wheel for Python 3.11/3.12 (Ubuntu 24.04's default) on any
 architecture, so `pip install vdbfusion` fails everywhere on a fresh Jazzy
-setup. Build it from source instead:
+setup, and on aarch64 (Apple Silicon, Raspberry Pi) a source build is the only
+option at all. It is pinned as a submodule for that reason:
 
 ```bash
-git clone https://github.com/PRBonn/vdbfusion.git
-cd vdbfusion
-pip install .   # or --break-system-packages / inside the venv above
+git submodule update --init external/vdbfusion
+./bootstrap.sh --with-vdbfusion     # or: pip install external/vdbfusion
 ```
 
 Follow [vdbfusion's own `INSTALL.md`](https://github.com/PRBonn/vdbfusion/blob/main/INSTALL.md)

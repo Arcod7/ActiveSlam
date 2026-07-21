@@ -34,9 +34,9 @@ logging ATE/RPE against ground truth.
 
 ## Quick start
 
-Already have ROS 2 Jazzy, the scene meshes, and a patched Stonefish build on
-`PATH`? `bootstrap.sh` installs the remaining Python/rosdep dependencies, and
-`launcher.py` is a terminal UI that runs the stack:
+Already have ROS 2 Jazzy and the scene meshes? `bootstrap.sh` initialises the
+pinned submodules, installs the Python/rosdep dependencies and builds the
+workspace; `launcher.py` is a terminal UI that runs the stack:
 
 ```bash
 ./bootstrap.sh
@@ -44,8 +44,8 @@ colcon build --symlink-install && source install/setup.zsh
 python3 launcher.py
 ```
 
-See `./bootstrap.sh --help` for the Stonefish clone/patch and TSDF-support
-flags, and the *Install*/*Run* sections below for the full flag reference.
+See `./bootstrap.sh --help` for the Stonefish and TSDF build flags, and the
+*Install*/*Run* sections below for the full flag reference.
 
 ### The launcher
 
@@ -85,15 +85,17 @@ launcher drives the same underlying launch files.
 
 ## Install
 
-Requires ROS 2 Jazzy and a patched build of Stonefish (patches + build
-instructions: [`sim/stonefish_patches/README.md`](sim/stonefish_patches/README.md)).
+Requires ROS 2 Jazzy and a patched build of Stonefish, which comes in as a
+pinned git submodule under [`external/`](external) along with `vdbfusion`
+(see [`sim/stonefish_patches/README.md`](sim/stonefish_patches/README.md) for
+what the fork changes).
 The scene meshes (~313 MB, gitignored — see
 [`sim/world/data/README.md`](sim/world/data/README.md)) must be present on
 disk separately; they don't come from `git clone`.
 
 ```bash
 mkdir -p ~/ros_ws/src && cd ~/ros_ws/src
-git clone git@github.com:Arcod7/ActiveSlam.git
+git clone --recurse-submodules git@github.com:Arcod7/ActiveSlam.git
 cd ~/ros_ws
 rosdep install --from-paths src -i -y
 colcon build --symlink-install --cmake-args -Wno-dev
