@@ -1,0 +1,29 @@
+From 1b8e825e61cd79f63225a95b45114d3e5922e784 Mon Sep 17 00:00:00 2001
+From: Arcod7 <antoine.esman@epitech.eu>
+Date: Tue, 21 Jul 2026 23:53:03 +0100
+Subject: [PATCH 4/4] fix: do not treat a missing material library as fatal
+ when loading OBJ
+
+Since the switch to rapidobj, ParseFile resolves the mtllib directive with
+Load::Mandatory, so an OBJ referencing a *.mtl that is not shipped aborts
+the simulator via cCritical. LoadOBJ never reads the parsed materials --
+Stonefish takes them from the scenario description -- so parse with
+MaterialLibrary::Ignore(), which also skips the unnecessary file I/O.
+---
+ Library/src/utils/GeometryFileUtil.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/Library/src/utils/GeometryFileUtil.cpp b/Library/src/utils/GeometryFileUtil.cpp
+index 768041c..7b52870 100644
+--- a/Library/src/utils/GeometryFileUtil.cpp
++++ b/Library/src/utils/GeometryFileUtil.cpp
+@@ -56,7 +56,8 @@ Mesh* LoadOBJ(const std::string& path, GLfloat scale)
+     cInfo("Loading geometry from: %s", path.c_str());
+     
+     int64_t start = GetTimeInMicroseconds();
+-    rapidobj::Result objData = rapidobj::ParseFile(path);
++    //Materials come from the scenario description, so a missing *.mtl must not be fatal.
++    rapidobj::Result objData = rapidobj::ParseFile(path, rapidobj::MaterialLibrary::Ignore());
+     
+     if (objData.error)
+     {

@@ -1,7 +1,7 @@
-From a2d3b63a56e5f14ef10c866bdfd5878aec698852 Mon Sep 17 00:00:00 2001
+From ad2e48df18163d2b4b224d1f045fa9b91f1bf696 Mon Sep 17 00:00:00 2001
 From: Arcod7 <antoine.esman@epitech.eu>
 Date: Tue, 21 Jul 2026 17:07:20 +0100
-Subject: [PATCH] fix: use GL_LINEAR for texture magnification filter
+Subject: [PATCH 3/4] fix: use GL_LINEAR for texture magnification filter
 
 GL_TEXTURE_MAG_FILTER only accepts GL_NEAREST or GL_LINEAR; the mipmap
 minification modes are not valid values for it. Passing
@@ -28,6 +28,3 @@ index 3c9eaa3..b171850 100644
      if(anisotropy > 0.f)
          glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, anisotropy);
      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
--- 
-2.55.0
-

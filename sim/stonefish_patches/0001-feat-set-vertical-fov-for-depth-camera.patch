@@ -1,7 +1,7 @@
-From aa2b6673c3562f53172600e45128857190f0ea57 Mon Sep 17 00:00:00 2001
+From 509408581bfc26290ac20bcededad3449aadad9e Mon Sep 17 00:00:00 2001
 From: Arcod7 <antoine.esman@epitech.eu>
 Date: Wed, 3 Jun 2026 16:53:29 +0100
-Subject: [PATCH 1/2] feat: set vertical fov for depth camera
+Subject: [PATCH 1/4] feat: set vertical fov for depth camera
 
 ---
  Library/include/sensors/vision/DepthCamera.h |  7 ++++++-
@@ -10,7 +10,7 @@ Subject: [PATCH 1/2] feat: set vertical fov for depth camera
  3 files changed, 18 insertions(+), 4 deletions(-)
 
 diff --git a/Library/include/sensors/vision/DepthCamera.h b/Library/include/sensors/vision/DepthCamera.h
-index 919f807..e47967a 100644
+index bfb69d5..9fc29ef 100644
 --- a/Library/include/sensors/vision/DepthCamera.h
 +++ b/Library/include/sensors/vision/DepthCamera.h
 @@ -47,9 +47,10 @@ namespace sf
@@ -44,10 +44,10 @@ index 919f807..e47967a 100644
          std::function<void(DepthCamera*)> newDataCallback;
      };
 diff --git a/Library/src/core/ScenarioParser.cpp b/Library/src/core/ScenarioParser.cpp
-index e3ec211..bc8cba1 100644
+index 780b84b..768877c 100644
 --- a/Library/src/core/ScenarioParser.cpp
 +++ b/Library/src/core/ScenarioParser.cpp
-@@ -4042,7 +4042,10 @@ Sensor* ScenarioParser::ParseSensor(XMLElement* element, const std::string& name
+@@ -4047,7 +4047,10 @@ Sensor* ScenarioParser::ParseSensor(XMLElement* element, const std::string& name
              return nullptr;
          }
          
@@ -60,7 +60,7 @@ index e3ec211..bc8cba1 100644
          //Optional noise definition
          if((item = element->FirstChildElement("noise")) != nullptr)    
 diff --git a/Library/src/sensors/vision/DepthCamera.cpp b/Library/src/sensors/vision/DepthCamera.cpp
-index 2b6d35e..faf9ae3 100644
+index 4fe0827..345524b 100644
 --- a/Library/src/sensors/vision/DepthCamera.cpp
 +++ b/Library/src/sensors/vision/DepthCamera.cpp
 @@ -33,11 +33,12 @@
@@ -89,15 +89,12 @@ index 2b6d35e..faf9ae3 100644
      
  VisionSensorType DepthCamera::getVisionSensorType() const
  {
-@@ -81,7 +87,7 @@ OpenGLView* DepthCamera::getOpenGLView() const
- 
- void DepthCamera::InitGraphics()
+@@ -83,7 +89,7 @@ void DepthCamera::InitGraphics(bool& seesParticles)
  {
+     seesParticles = false;
+ 
 -    glCamera = new OpenGLDepthCamera(glm::vec3(0,0,0), glm::vec3(0,0,1.f), glm::vec3(0,-1.f,0), 0, 0, resX, resY, (GLfloat)fovH, depthRange.x, depthRange.y, freq < Scalar(0));
 +    glCamera = new OpenGLDepthCamera(glm::vec3(0,0,0), glm::vec3(0,0,1.f), glm::vec3(0,-1.f,0), 0, 0, resX, resY, (GLfloat)fovH, depthRange.x, depthRange.y, freq < Scalar(0), false, (GLfloat)fovV);
      glCamera->setNoise(noiseStdDev);
      glCamera->setCamera(this);
      UpdateTransform();
--- 
-2.54.0
-

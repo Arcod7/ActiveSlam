@@ -6,7 +6,7 @@ than a vendored fork or submodule, since the base library is a large C++
 project (~250 MB checkout) that isn't part of this repo.
 
 **Upstream:** `https://github.com/patrykcieslak/stonefish.git`
-**Base commit:** `09208f913daf688cc8abc775d45742c860c81f19`
+**Base commit:** `b21eb8e194c570ff2f61e91aeffb38d73dc25f42`
 **Patches (apply in order):**
 1. `0001-feat-set-vertical-fov-for-depth-camera.patch` — adds a `vertical_fov`
    attribute to depth-camera sensors (XML + `DepthCamera` class), so a depth
@@ -24,13 +24,22 @@ project (~250 MB checkout) that isn't part of this repo.
    call was a silent no-op (raising `GL_INVALID_ENUM`, leaving the filter at its
    `GL_LINEAR` default); this makes it explicit. Independent upstream cleanup,
    not something the project relies on.
+4. `0004-fix-do-not-treat-a-missing-material-library-as-fatal.patch` — stops a
+   missing `*.mtl` from aborting the simulator. Since upstream moved OBJ loading
+   to `rapidobj`, `ParseFile` resolves the `mtllib` directive with
+   `Load::Mandatory`, so a mesh whose material library was never shipped kills
+   the process through `cCritical`. Several of this project's meshes are Blender
+   exports carrying such a dangling reference, and `LoadOBJ` never reads the
+   parsed materials anyway (Stonefish takes them from the scenario XML), so the
+   parse now uses `MaterialLibrary::Ignore()`. **Required** — without it the
+   simulator aborts while parsing the scenario.
 
 ## Building
 
 ```bash
 git clone https://github.com/patrykcieslak/stonefish.git
 cd stonefish
-git checkout 09208f913daf688cc8abc775d45742c860c81f19
+git checkout b21eb8e194c570ff2f61e91aeffb38d73dc25f42
 git am /path/to/ActiveSlam/sim/stonefish_patches/*.patch
 # then follow Stonefish's own build instructions (CMake + its 3rdparty deps)
 ```
