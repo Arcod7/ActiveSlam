@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""
+Parameter surface, presets and reference text for launcher.py.
+
+Split from the UI so the option table can be checked against demo.launch.py's
+declared arguments without a terminal. Pure standard library.
+"""
+
+# Live-tunable parameters are re-read by their node every control cycle, so a
+# change can be pushed with `ros2 param set` instead of restarting the group.
+# (node basename, node parameter name)
+LIVE = {
+    "wall_standoff":             ("wall_follower", "standoff_m"),
+    "wall_switch_goal_distance": ("wall_follower", "switch_goal_distance_m"),
+    "wall_switch_scan_angle":    ("wall_follower", "switch_scan_angle_rad"),
+    "wall_switch_scan_yaw":      ("wall_follower", "switch_scan_yaw"),
+    "wall_path_influence":       ("wall_follower", "path_influence"),
+    "wall_path_look_offset_deg": ("wall_follower", "path_look_offset_deg"),
+    "wall_normal_offset_deg":    ("wall_follower", "wall_normal_offset_deg"),
+    "wall_path_heading_weight":  ("wall_follower", "path_heading_weight"),
+}
+
+
+class Param:
+    def __init__(self, id, label, kind, default, section, description,
+                 choices=None, choice_help=None, advanced=False, step=None,
+                 visible=lambda v: True, lo=None, hi=None):
+        self.id = id
+        self.label = label
+        self.kind = kind                  # enum, bool, int, float, text
+        self.default = default
+        self.section = section
+        self.description = description
+        self.choices = choices or []
+        self.choice_help = choice_help or {}
+        self.advanced = advanced
+        self.step = step if step is not None else (1 if kind == "int" else 0.05)
+        self.visible = visible
+        self.lo = lo
+        self.hi = hi
+
+    @property
+    def live(self):
+        return self.id in LIVE
+
+    def clamp(self, value):
+        if self.lo is not None:
+            value = max(self.lo, value)
+        if self.hi is not None:
+            value = min(self.hi, value)
+        return value
+
+
+SECTION_TITLES = {
+    "primary": "Primary",
+    "frontier": "Frontier exploration",
+    "slam": "SLAM / pose source",
+    "advanced": "Other",
+}
+SECTION_ORDER = ["primary", "frontier", "slam", "advanced"]
+
+_frontier = lambda v: v["mode"] == "frontier"
+_slam = lambda v: v["slam"] == "slam"
+
+PARAMS = [
+    Param("mode", "Mode", "enum", "teleop", "primary",
+          "Who drives the vehicle. teleop hands control to the keyboard "
+          "(press t on this screen); frontier runs autonomous exploration: "
+          "frontier detection on the occupancy map, A* planning, then a path "
+          "executor.",
+          ["teleop", "frontier"],
+          {"teleop": "Manual keyboard control, driven from this launcher.",
+           "frontier": "Autonomous frontier-based exploration."}),
+    Param("mapper", "Mapper", "enum", "octomap", "primary",
+          "Map backend. OctoMap is an octree occupancy grid (probabilistic, "
+          "raycast free space, 20 cm voxels). TSDF is VDBFusion: a truncated "
+          "signed-distance field on OpenVDB, meshed with marching cubes — "
+          "gives surfaces and normals rather than occupied cells.",
+          ["octomap", "tsdf"],
+          {"octomap": "octomap_server, /projected_map + occupancy voxels.",
+           "tsdf": "VDBFusion/OpenVDB surface reconstruction with normals."}),
+    Param("slam", "Pose source", "enum", "none", "primary",
+          "Where the vehicle pose comes from. none uses the simulator's exact "
+          "pose. slam runs a GTSAM iSAM2 pose graph over simulated "
+          "pressure/IMU/DVL dead reckoning with loop closure, so the estimate "
+          "drifts and gets corrected like a real system.",
+          ["none", "slam"],
+          {"none": "Ground-truth TF straight from Stonefish.",
+           "slam": "GTSAM iSAM2 pose graph + sonar/nav noise + ATE/RPE eval."}),
+    Param("rviz", "RViz", "bool", True, "primary",
+          "Start RViz. The view is chosen automatically: demo_slam.rviz when "
+          "slam is on (drift arrow, error HUD, covariance ellipsoids), "
+          "demo_tsdf.rviz for the TSDF surface, otherwise the base view."),
+
+    Param("motion", "Path executor", "enum", "default", "frontier",
+          "How the planned path is followed. default drives straight down the "
+          "path. walloriented follows it while yawing toward the nearest "
+          "mapped surface. walllooking blends the wall tangent with the path "
+          "and needs TSDF normals.",
+          ["default", "walloriented", "walllooking"],
+          {"default": "Direct path following, heading along travel.",
+           "walloriented": "Path following with a fixed yaw offset toward the wall.",
+           "walllooking": "Wall-tangent/path blend; consumes TSDF surface normals."},
+          visible=_frontier),
+    Param("scan_style", "Scan style", "enum", "sweep", "frontier",
+          "Rotation used when scanning at a waypoint. sweep is the cable-safe "
+          "right-then-left motion (net yaw returns to zero). spin is the "
+          "legacy full 360 rotation, which piles up keyframes and inflates "
+          "loop-closure counts.",
+          ["sweep", "spin"],
+          {"sweep": "Right half, left full, return — tether safe.",
+           "spin": "Legacy 360 degree rotation."},
+          visible=_frontier),
+    Param("scenario", "Scenario", "enum", "none", "frontier",
+          "Scripted evaluation run. drift_return leaves the start position and "
+          "comes back to it, so loop closure can be observed firing on demand "
+          "instead of waiting for exploration to revisit somewhere.",
+          ["none", "drift_return"],
+          {"none": "Free exploration.",
+           "drift_return": "Scripted outbound leg then return to start."},
+          visible=_frontier),
+
+    Param("noise_profile", "Noise profile", "enum", "realistic", "slam",
+          "Which sensor error model feeds the pose graph and the sonar. Also "
+          "drives the noise applied to /cloud_in.",
+          ["realistic", "ideal", "sonar_only", "odom_pos_only", "odom_only", "degraded"],
+          {"realistic": "Datasheet-grounded sonar + nav sensor noise.",
+           "ideal": "No noise — upper bound / sanity check.",
+           "sonar_only": "Realistic sonar, near-ideal nav sensors.",
+           "odom_pos_only": "Realistic DVL/pressure, exact orientation and sonar.",
+           "odom_only": "Ground-truth sonar, realistic nav sensors.",
+           "degraded": "Worst case — stresses loop closure and revisit."},
+          visible=_slam),
+    Param("loop_closure", "Loop closure", "bool", True, "slam",
+          "Detect revisited places and add graph constraints that correct "
+          "accumulated drift. Turning it off is the A/B baseline: the pose "
+          "graph becomes pure dead reckoning.",
+          visible=_slam),
+    Param("revisit", "Uncertainty revisit", "bool", True, "slam",
+          "Suspend exploration and drive back to mapped areas when the pose "
+          "covariance (D-optimality) crosses a threshold, to force a loop "
+          "closure. This is the active part of active SLAM.",
+          visible=lambda v: _slam(v) and _frontier(v)),
+    Param("map_rebuild", "Rebuild map on closure", "bool", False, "slam",
+          "After a large loop closure, reset the TSDF and re-integrate every "
+          "keyframe at its corrected pose, so the map geometry is fixed too "
+          "rather than just the trajectory. TSDF only — OctoMap cannot "
+          "reproduce its raycast free space this way.",
+          visible=lambda v: _slam(v) and v["mapper"] == "tsdf"),
+    Param("noise_seed", "Noise seed", "int", -1, "slam",
+          "Seed for the noise draws. -1 uses the profile's own seed; set an "
+          "explicit value for reproducible or decorrelated repeat runs.",
+          advanced=True, visible=_slam),
+    Param("output_dir", "Output dir", "text", "", "slam",
+          "Where the eval stack writes TUM trajectories and CSV metrics. "
+          "Empty means a timestamped directory under eval/runs/.",
+          advanced=True, visible=_slam),
+
+    Param("safety_start_enabled", "Safety gate starts enabled", "bool", False, "advanced",
+          "Start the motion safety gate already enabled. Normally left off so "
+          "motion is armed deliberately from the RViz panel after checking the "
+          "scene. The gate is fail-closed: it blocks commands that are stale, "
+          "oversized, or missing odometry.",
+          advanced=True),
+
+    Param("scan_sweep_deg", "Sweep width", "float", 180.0, "frontier",
+          "Total sweep angle in degrees for scan_style:=sweep.",
+          advanced=True, step=5.0, lo=10.0, hi=360.0,
+          visible=lambda v: _frontier(v) and v["scan_style"] == "sweep"),
+    Param("scenario_out_dx", "Outbound dx (m)", "float", 15.0, "frontier",
+          "drift_return: outbound leg X offset from the captured start pose.",
+          advanced=True, step=1.0,
+          visible=lambda v: _frontier(v) and v["scenario"] == "drift_return"),
+    Param("scenario_out_dy", "Outbound dy (m)", "float", 0.0, "frontier",
+          "drift_return: outbound leg Y offset from the captured start pose.",
+          advanced=True, step=1.0,
+          visible=lambda v: _frontier(v) and v["scenario"] == "drift_return"),
+    Param("wall_orientation_offset_deg", "Wall yaw offset", "float", 30.0, "frontier",
+          "Degrees to yaw away from the travel bearing toward the nearest "
+          "mapped surface, so the sonar keeps the wall in view while moving "
+          "along the path.",
+          advanced=True, step=5.0, lo=-180.0, hi=180.0,
+          visible=lambda v: _frontier(v) and v["motion"] == "walloriented"),
+    Param("wall_orientation_lookahead_m", "Wall lookahead (m)", "float", 0.0, "frontier",
+          "Lookahead radius along the A* path used to pick the heading. 0 uses "
+          "the heading at the current position.",
+          advanced=True, step=0.5, lo=0.0,
+          visible=lambda v: _frontier(v) and v["motion"] == "walloriented"),
+    Param("tsdf_frontier_standoff_m", "TSDF frontier standoff (m)", "float", 1.0, "frontier",
+          "How far off the reconstructed surface, along its outward normal, a "
+          "TSDF frontier goal is placed — keeps goals in free water.",
+          advanced=True, step=0.1, lo=0.0,
+          visible=lambda v: _frontier(v) and v["mapper"] == "tsdf"),
+    Param("wall_standoff", "Wall standoff (m)", "float", 1.5, "frontier",
+          "Target distance to hold from the wall while wall-looking. "
+          "Live-tunable while running.",
+          advanced=True, step=0.1, lo=0.1,
+          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+    Param("wall_switch_goal_distance", "Wall-switch goal dist (m)", "float", 6.0, "frontier",
+          "When the planner goal is nearer than this, look for another wall "
+          "instead of continuing along the current one. Live-tunable.",
+          advanced=True, step=0.5, lo=0.0,
+          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+    Param("wall_switch_scan_angle", "Wall-switch sweep (rad)", "float", 3.14159, "frontier",
+          "Sweep angle used when searching for the next wall. Live-tunable.",
+          advanced=True, step=0.1, lo=0.0,
+          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+    Param("wall_switch_scan_yaw", "Wall-switch sweep yaw", "float", 0.08, "frontier",
+          "Yaw rate command used during that sweep. Live-tunable.",
+          advanced=True, step=0.01, lo=0.0,
+          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+    Param("wall_path_influence", "Path influence", "float", 0.70, "frontier",
+          "Travel-direction blend: 0 follows the wall tangent, 1 follows the "
+          "planned path. Live-tunable.",
+          advanced=True, step=0.05, lo=0.0, hi=1.0,
+          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+    Param("wall_path_look_offset_deg", "Path look offset", "float", 30.0, "frontier",
+          "Degrees to turn the path-derived look heading toward the wall. "
+          "Live-tunable.",
+          advanced=True, step=5.0, lo=-180.0, hi=180.0,
+          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+    Param("wall_normal_offset_deg", "Wall normal offset", "float", 0.0, "frontier",
+          "Degrees to turn the wall-facing normal back toward the path "
+          "bearing. Live-tunable.",
+          advanced=True, step=5.0, lo=-180.0, hi=180.0,
+          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+    Param("wall_path_heading_weight", "Look blend", "float", 0.35, "frontier",
+          "Orientation blend: 0 uses the wall-derived heading, 1 the "
+          "path-derived heading. Live-tunable.",
+          advanced=True, step=0.05, lo=0.0, hi=1.0,
+          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+]
+
+PARAM_MAP = {p.id: p for p in PARAMS}
+DEFAULTS = {p.id: p.default for p in PARAMS}
+
+PRESETS = [
+    ("Teleop + OctoMap (default)", {}),
+    ("Autonomous frontier (TSDF)", {"mode": "frontier", "mapper": "tsdf"}),
+    ("Wall-looking exploration",
+     {"mode": "frontier", "mapper": "tsdf", "motion": "walllooking"}),
+    ("SLAM benchmark (realistic)",
+     {"slam": "slam", "mode": "frontier", "noise_profile": "realistic"}),
+    ("Headless / CI", {"mode": "frontier", "rviz": False}),
+]
+
+TELEOP_KEYS = "W/S forward  Q/E strafe  A/D yaw  Space/X up/down  F stop  Esc leave"
+
+INFOS = [
+    ("What this is", [
+        "Active SLAM for underwater volumetric exploration — an MSc",
+        "dissertation extending Suresh et al. (IEEE ICRA 2020) with a",
+        "wide-FoV 3D sonar, FPFH submap descriptors and a TSDF backend.",
+        "Heriot-Watt University, Ocean Systems Lab.",
+    ]),
+    ("Simulation", [
+        "Stonefish        underwater dynamics, sensors and rendering,",
+        "                 run from a patched fork (depth-camera vertical",
+        "                 FoV + physics-thread capture timestamps).",
+        "BlueROV2         vehicle model, thrusters and 3D sonar proxy",
+        "                 (depth camera at 90 x 40 degrees).",
+        "ROS 2 Jazzy      middleware; the stack is one launch graph.",
+    ]),
+    ("Mapping", [
+        "OctoMap          probabilistic octree occupancy grid, 20 cm",
+        "                 voxels, raycast free space (default backend).",
+        "VDBFusion        truncated signed-distance field on OpenVDB,",
+        "                 meshed with marching cubes — gives surfaces",
+        "                 and normals (mapper:=tsdf).",
+        "depth_image_proc depth image to organised point cloud.",
+    ]),
+    ("SLAM", [
+        "GTSAM iSAM2      incremental pose-graph optimisation.",
+        "Dead reckoning   simulated pressure, IMU and DVL fused into an",
+        "                 odometry estimate that drifts realistically.",
+        "Loop closure     revisit detection adds constraints that pull",
+        "                 the trajectory (and optionally the map) back.",
+        "Sonar noise      WaterLinked Sonar 3D-15 datasheet model.",
+    ]),
+    ("Planning", [
+        "Frontier search  boundary between known-free and unknown space",
+        "                 on the occupancy map.",
+        "A*               grid path planning to the selected frontier.",
+        "Executors        direct, wall-oriented, or wall-looking (the",
+        "                 last consumes TSDF surface normals).",
+        "Safety gate      fail-closed: blocks stale, oversized or",
+        "                 odometry-less commands.",
+    ]),
+    ("Evaluation", [
+        "ATE / RPE        absolute and relative trajectory error against",
+        "                 the simulator's exact pose.",
+        "Map metrics      IoU and coverage (OctoMap), chamfer distance",
+        "                 and coverage (TSDF), against a ground-truth map",
+        "                 built from the exact pose in parallel.",
+        "TUM export       trajectories written to eval/runs/<timestamp>/.",
+    ]),
+]

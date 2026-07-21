@@ -1,0 +1,553 @@
+#!/usr/bin/env python3
+"""
+Launch model and process supervisor for launcher.py.
+
+Kept separate from the curses UI so the group/parameter model and the teardown
+logic can be unit-tested headlessly. Pure standard library — importable before
+the workspace is built.
+
+The stack is split into independently restartable groups so changing an option
+only bounces the layers that actually depend on it; `core` (the simulator) is
+expensive to start and is never restarted by a parameter change.
+"""
+
+import math
+import os
+import signal
+import subprocess
+import sys
+import sysconfig
+import time
+
+# Order matters: groups are started top-down and stopped bottom-up.
+GROUP_ORDER = ["core", "tf", "cloud", "mapper", "gt_map", "slam", "eval",
+               "planner", "teleop_support", "rviz"]
+
+# Groups that accumulate state across a run (maps, pose graph, eval output,
+# planner blacklists). A reset restarts exactly these; the simulator, TF, point
+# cloud and RViz are stateless in this sense and stay up.
+STATEFUL_GROUPS = ["mapper", "gt_map", "slam", "eval", "planner"]
+
+DEFAULT_SPAWN = ("bluerov2", (0.0, 0.0, 8.0), (0.0, 0.0, 0.0))
+
+STOP_SIGINT_TIMEOUT = 12.0   # ros2 launch handles SIGINT gracefully
+STOP_SIGTERM_TIMEOUT = 5.0
+STOP_SIGKILL_TIMEOUT = 3.0
+
+
+def octomap_preload_path():
+    """LD_PRELOAD for RViz's octomap symbol clash, with the arch triplet derived
+    rather than hardcoded (demo.launch.py hardcodes aarch64-linux-gnu)."""
+    triplet = sysconfig.get_config_var("MULTIARCH") or ""
+    try:
+        from ament_index_python.packages import get_package_prefix
+        prefix = get_package_prefix("octomap")
+    except Exception:
+        return None
+    for candidate in ([os.path.join(prefix, "lib", triplet, "liboctomap.so")] if triplet else []) + [
+        os.path.join(prefix, "lib", "liboctomap.so"),
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _motion_arg(motion):
+    """demo.launch.py's motion alias mapping, mirrored for the planner group."""
+    if motion in ("walllooking", "wallfollow"):
+        return "walllooking"
+    if motion in ("walloriented", "wall_oriented"):
+        return "walloriented"
+    return "forward"
+
+
+def _odom_topic(v):
+    return "/slam/odometry" if v["slam"] == "slam" else "/StoneFish/Odometry"
+
+
+def _rviz_config(v, bringup_share):
+    if v["slam"] == "slam":
+        name = "demo_slam.rviz"
+    elif v["mapper"] == "tsdf":
+        name = "demo_tsdf.rviz"
+    else:
+        name = "demo.rviz"
+    return os.path.join(bringup_share, "rviz", name)
+
+
+class Group:
+    """One independently restartable layer of the stack."""
+
+    def __init__(self, id, label, description, build, depends=(),
+                 visible=lambda v: True, env_extra=None, graceful=True):
+        self.id = id
+        self.label = label
+        self.description = description
+        self.build = build          # values -> list of argv lists
+        self.depends = tuple(depends)  # parameter ids that force a restart
+        self.visible = visible
+        # Extra environment for this group only — LD_PRELOAD in particular must
+        # not leak into the Python nodes it was never meant for.
+        self.env_extra = env_extra or {}
+        # graceful=False: skip the SIGINT/SIGTERM ladder and kill outright.
+        # For a pure viewer there is nothing to flush, and RViz's own signal
+        # teardown aborts on this platform, which surfaces as a crash dialog.
+        self.graceful = graceful
+
+    def commands(self, values):
+        return self.build(values)
+
+
+def build_groups(bringup_share=""):
+    """The group table. `bringup_share` is only needed for the RViz config path."""
+
+    def core(v):
+        return [["ros2", "launch", "stonefish_groundtruth_mapping", "core.launch.py"]]
+
+    def tf(v):
+        use_gt = "false" if v["slam"] == "slam" else "true"
+        return [["ros2", "launch", "stonefish_groundtruth_mapping",
+                 "tf_only.launch.py", f"use_gt_tf:={use_gt}"]]
+
+    def cloud(v):
+        noise = "true" if v["slam"] == "slam" else "false"
+        return [["ros2", "launch", "stonefish_groundtruth_mapping",
+                 "pointcloud_only.launch.py",
+                 f"sonar_noise:={noise}",
+                 f"noise_profile:={v['noise_profile']}",
+                 f"noise_seed:={v['noise_seed']}"]]
+
+    def mapper(v):
+        cmds = [["ros2", "launch", "stonefish_groundtruth_mapping",
+                 "mapper_only.launch.py",
+                 f"mapper:={v['mapper']}",
+                 f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}"]]
+        # demo.launch.py also runs octomap_server as the frontier planning map
+        # when mapper:=tsdf, since frontier detection needs /projected_map.
+        if v["mode"] == "frontier" and v["mapper"] == "tsdf":
+            cmds.append(["ros2", "run", "octomap_server", "octomap_server_node",
+                         "--ros-args",
+                         "-r", "cloud_in:=/cloud_in",
+                         "-p", "frame_id:=world_ned",
+                         "-p", "resolution:=0.2",
+                         "-p", "sensor_model/max_range:=15.0",
+                         "-p", "latch:=true"])
+        return cmds
+
+    def gt_map(v):
+        return [["ros2", "launch", "stonefish_groundtruth_mapping",
+                 "gt_map.launch.py", f"mapper:={v['mapper']}"]]
+
+    def slam(v):
+        return [["ros2", "launch", "slam_backend", "slam.launch.py",
+                 f"noise_profile:={v['noise_profile']}",
+                 f"loop_closure:={'true' if v['loop_closure'] else 'false'}",
+                 f"noise_seed:={v['noise_seed']}",
+                 f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}"]]
+
+    def evaluation(v):
+        cmd = ["ros2", "launch", "eval_tools", "eval.launch.py",
+               f"mapper:={v['mapper']}"]
+        if v["output_dir"]:
+            cmd.append(f"output_dir:={v['output_dir']}")
+        return [cmd]
+
+    def planner(v):
+        revisit = "true" if (v["revisit"] and v["slam"] == "slam") else "false"
+        return [["ros2", "launch", "frontier_slam", "frontier_slam.launch.py",
+                 f"odom_topic:={_odom_topic(v)}",
+                 f"revisit:={revisit}",
+                 f"scenario:={v['scenario']}",
+                 f"scenario_out_dx:={v['scenario_out_dx']}",
+                 f"scenario_out_dy:={v['scenario_out_dy']}",
+                 f"scan_style:={v['scan_style']}",
+                 f"scan_sweep_deg:={v['scan_sweep_deg']}",
+                 f"safety_start_enabled:={'true' if v['safety_start_enabled'] else 'false'}",
+                 f"motion:={_motion_arg(v['motion'])}",
+                 f"wall_orientation_offset_deg:={v['wall_orientation_offset_deg']}",
+                 f"wall_orientation_lookahead_m:={v['wall_orientation_lookahead_m']}",
+                 f"tsdf_frontier_standoff_m:={v['tsdf_frontier_standoff_m']}",
+                 "wall_points_topic:=" + ("/tsdf/surface_cloud" if v["mapper"] == "tsdf"
+                                          else "/octomap_point_cloud_centers"),
+                 f"wall_standoff:={v['wall_standoff']}",
+                 f"wall_switch_goal_distance:={v['wall_switch_goal_distance']}",
+                 f"wall_switch_scan_angle:={v['wall_switch_scan_angle']}",
+                 f"wall_switch_scan_yaw:={v['wall_switch_scan_yaw']}",
+                 f"wall_path_influence:={v['wall_path_influence']}",
+                 f"wall_path_look_offset_deg:={v['wall_path_look_offset_deg']}",
+                 f"wall_normal_offset_deg:={v['wall_normal_offset_deg']}",
+                 f"wall_path_heading_weight:={v['wall_path_heading_weight']}"]]
+
+    def teleop_support(v):
+        # demo.launch.py starts these two only for mode:=teleop.
+        return [
+            ["ros2", "run", "frontier_slam", "motion_safety_gate", "--ros-args",
+             "-p", f"odom_topic:={_odom_topic(v)}",
+             "-p", f"start_enabled:={'true' if v['safety_start_enabled'] else 'false'}"],
+            ["ros2", "run", "frontier_slam", "heavy_sim_mixer"],
+        ]
+
+    def rviz(v):
+        return [["rviz2", "-d", _rviz_config(v, bringup_share)]]
+
+    is_slam = lambda v: v["slam"] == "slam"
+
+    return [
+        Group("core", "Simulator (Stonefish)",
+              "Stonefish underwater simulator: BlueROV2 + scene meshes, and the "
+              "depth camera standing in for a wide-FoV 3D sonar. Expensive to "
+              "start, so it is never restarted by an option change.",
+              core),
+        Group("tf", "TF chain",
+              "world_ned -> bluerov2/base_link -> bluerov2/Dcam. Under "
+              "slam:=none this is broadcast from ground truth (odom_tf_sync); "
+              "under slam:=slam the pose graph owns it instead.",
+              tf, depends=["slam"]),
+        Group("cloud", "Point cloud + sonar noise",
+              "depth_image_proc turns the depth image into /cloud_in. Under "
+              "slam:=slam a datasheet-grounded WaterLinked Sonar 3D-15 noise "
+              "model is spliced in ahead of every consumer.",
+              cloud, depends=["slam", "noise_profile", "noise_seed"]),
+        Group("mapper", "Map backend",
+              "OctoMap occupancy grid or VDBFusion TSDF. Consumes /cloud_in "
+              "only, so the backend can be swapped without touching the sim.",
+              mapper, depends=["mapper", "map_rebuild", "mode"]),
+        Group("gt_map", "Ground-truth reference map",
+              "A second map built from the exact simulator pose, overlaid "
+              "against the belief map so map drift is visible directly.",
+              gt_map, depends=["mapper"], visible=is_slam),
+        Group("slam", "SLAM backend (GTSAM)",
+              "Simulated pressure/IMU/DVL sensors, dead-reckoning fusion and a "
+              "GTSAM iSAM2 pose graph with loop closure.",
+              slam, depends=["noise_profile", "loop_closure", "noise_seed",
+                             "map_rebuild"], visible=is_slam),
+        Group("eval", "Benchmark + eval",
+              "ATE/RPE against ground truth, TUM trajectory export and map "
+              "metrics, written to eval/runs/<timestamp>/.",
+              evaluation, depends=["output_dir", "mapper"], visible=is_slam),
+        Group("planner", "Frontier planner",
+              "Frontier detection, A* planning and the path executor that "
+              "drives autonomous exploration.",
+              planner, depends=["mode", "motion", "scan_style", "scenario",
+                                "revisit", "slam", "mapper",
+                                "scenario_out_dx", "scenario_out_dy",
+                                "scan_sweep_deg", "safety_start_enabled",
+                                "wall_orientation_offset_deg",
+                                "wall_orientation_lookahead_m",
+                                "tsdf_frontier_standoff_m", "wall_standoff",
+                                "wall_switch_goal_distance",
+                                "wall_switch_scan_angle", "wall_switch_scan_yaw",
+                                "wall_path_influence", "wall_path_look_offset_deg",
+                                "wall_normal_offset_deg", "wall_path_heading_weight"],
+              visible=lambda v: v["mode"] == "frontier"),
+        Group("teleop_support", "Safety gate + thruster mixer",
+              "Fail-closed motion safety gate and the thruster mixer that "
+              "teleop drives through.",
+              teleop_support, depends=["slam", "safety_start_enabled"],
+              visible=lambda v: v["mode"] == "teleop"),
+        Group("rviz", "RViz",
+              "Visualisation. The view is picked automatically from the "
+              "mapper/slam combination.",
+              rviz, depends=["slam", "mapper"],
+              visible=lambda v: bool(v["rviz"]),
+              env_extra=({"LD_PRELOAD": _preload} if (_preload := octomap_preload_path())
+                         else {}),
+              graceful=False),
+    ]
+
+
+class Proc:
+    """One spawned process, in its own process group."""
+
+    def __init__(self, argv, log_path, env=None, graceful=True):
+        self.argv = argv
+        self.log_path = log_path
+        self.graceful = graceful
+        self.log_handle = open(log_path, "ab", buffering=0)
+        self.popen = subprocess.Popen(
+            argv,
+            stdout=self.log_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,   # own process group -> killpg reaches children
+            env=env,
+        )
+        # Captured now: once the child is reaped, getpgid() no longer resolves,
+        # and the group is what teardown actually targets.
+        try:
+            self.pgid = os.getpgid(self.popen.pid)
+        except OSError:
+            self.pgid = self.popen.pid
+
+    @property
+    def pid(self):
+        return self.popen.pid
+
+    def poll(self):
+        return self.popen.poll()
+
+    def alive(self):
+        """Group-level liveness: the launched work is still running if anything
+        in the process group survives, even after the direct child exits."""
+        return not self.group_empty()
+
+    def _killpg(self, sig):
+        if self.pgid is None:
+            return False
+        try:
+            os.killpg(self.pgid, sig)
+            return True
+        except (ProcessLookupError, PermissionError, OSError):
+            return False
+
+    def group_empty(self):
+        """True once no process remains in the group.
+
+        Checked instead of the direct child's exit status: `ros2 launch` dying
+        does not mean its nodes died, and a background child inherits SIG_IGN
+        for SIGINT, so watching only the parent reports success while the real
+        work is still running.
+        """
+        if self.pgid is None:
+            return True
+        # Reap the direct child first — a zombie still counts as a group member.
+        self.popen.poll()
+        try:
+            os.killpg(self.pgid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        except OSError:
+            return True
+        return False
+
+    def stop(self, on_event=None):
+        """SIGINT -> SIGTERM -> SIGKILL to the whole process group, escalating
+        until the group is actually empty."""
+        if self.group_empty():
+            self._reap()
+            self._close()
+            return True
+        for sig, timeout, name in (
+            (signal.SIGINT, STOP_SIGINT_TIMEOUT, "SIGINT"),
+            (signal.SIGTERM, STOP_SIGTERM_TIMEOUT, "SIGTERM"),
+            (signal.SIGKILL, STOP_SIGKILL_TIMEOUT, "SIGKILL"),
+        ):
+            if on_event:
+                on_event(f"{name} -> pgid {self.pgid}")
+            self._killpg(sig if self.graceful else signal.SIGKILL)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if self.group_empty():
+                    break
+                time.sleep(0.1)
+            if self.group_empty():
+                break
+        self._reap()
+        self._close()
+        return self.group_empty()
+
+    def _reap(self):
+        try:
+            self.popen.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+
+    def _close(self):
+        try:
+            self.log_handle.close()
+        except OSError:
+            pass
+
+
+class Supervisor:
+    """Starts, stops and restarts groups; guarantees teardown on exit."""
+
+    def __init__(self, ws_root, log_dir, groups, env=None):
+        self.ws_root = ws_root
+        self.log_dir = log_dir
+        self.groups = {g.id: g for g in groups}
+        self.env = env or os.environ.copy()
+        self.procs = {}          # group id -> [Proc]
+        self.applied = {}        # group id -> values snapshot it was started with
+        self._shutting_down = False
+        os.makedirs(log_dir, exist_ok=True)
+
+    # -- state ---------------------------------------------------------------
+    def running_ids(self):
+        return [gid for gid, ps in self.procs.items() if any(p.alive() for p in ps)]
+
+    def status(self, gid):
+        ps = self.procs.get(gid)
+        if not ps:
+            return "stopped"
+        if all(p.alive() for p in ps):
+            return "running"
+        if any(p.alive() for p in ps):
+            return "partial"
+        return "exited"
+
+    def exit_codes(self, gid):
+        return [p.poll() for p in self.procs.get(gid, [])]
+
+    # -- lifecycle -----------------------------------------------------------
+    def start(self, gid, values, on_event=None):
+        if gid in self.procs and any(p.alive() for p in self.procs[gid]):
+            return
+        group = self.groups[gid]
+        env = dict(self.env)
+        env.update(group.env_extra)
+        procs = []
+        for i, argv in enumerate(group.commands(values)):
+            log_path = os.path.join(self.log_dir, f"{gid}{'' if i == 0 else f'_{i}'}.log")
+            if on_event:
+                on_event(f"start {gid}: {' '.join(argv)}")
+            procs.append(Proc(argv, log_path, env=env, graceful=group.graceful))
+        self.procs[gid] = procs
+        self.applied[gid] = dict(values)
+
+    def stop(self, gid, on_event=None):
+        self.stop_many([gid], on_event=on_event)
+
+    def stop_many(self, gids, on_event=None):
+        """Tear down several groups at once.
+
+        Signals are delivered to every group up front and then waited on
+        collectively, so a slow or signal-ignoring group costs the escalation
+        ladder once overall instead of once per group (serial teardown of the
+        full stack would otherwise take minutes).
+        """
+        # Known groups tear down in reverse start order; any group not listed in
+        # GROUP_ORDER still goes through this parallel path rather than a slow
+        # serial fallback.
+        ordered = [g for g in reversed(GROUP_ORDER) if g in gids and g in self.procs]
+        ordered += [g for g in gids if g in self.procs and g not in GROUP_ORDER]
+        remaining = [p for gid in ordered for p in self.procs.get(gid, [])]
+        for sig, timeout, name in (
+            (signal.SIGINT, STOP_SIGINT_TIMEOUT, "SIGINT"),
+            (signal.SIGTERM, STOP_SIGTERM_TIMEOUT, "SIGTERM"),
+            (signal.SIGKILL, STOP_SIGKILL_TIMEOUT, "SIGKILL"),
+        ):
+            remaining = [p for p in remaining if not p.group_empty()]
+            if not remaining:
+                break
+            if on_event:
+                on_event(f"{name} -> {len(remaining)} process group(s)")
+            for p in remaining:
+                # Non-graceful groups (viewers) skip straight to SIGKILL rather
+                # than run a signal teardown that is known to abort.
+                p._killpg(sig if p.graceful else signal.SIGKILL)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if all(p.group_empty() for p in remaining):
+                    break
+                time.sleep(0.1)
+        for gid in ordered:
+            for p in self.procs.get(gid, []):
+                p._reap()
+                p._close()
+            self.procs.pop(gid, None)
+            self.applied.pop(gid, None)
+
+    def needs_restart(self, gid, values):
+        """True when a running group was started with a value it depends on that
+        has since changed."""
+        old = self.applied.get(gid)
+        if old is None:
+            return False
+        return any(old.get(k) != values.get(k) for k in self.groups[gid].depends)
+
+    def plan(self, values):
+        """(to_stop, to_start, to_restart) for the requested configuration."""
+        wanted = [gid for gid in GROUP_ORDER
+                  if gid in self.groups and self.groups[gid].visible(values)]
+        running = set(self.running_ids())
+        to_stop = [g for g in GROUP_ORDER if g in running and g not in wanted]
+        to_start = [g for g in wanted if g not in running]
+        to_restart = [g for g in wanted if g in running and self.needs_restart(g, values)]
+        return to_stop, to_start, to_restart
+
+    def apply(self, values, on_event=None):
+        to_stop, to_start, to_restart = self.plan(values)
+        self.stop_many(to_stop + to_restart, on_event=on_event)
+        for gid in [g for g in GROUP_ORDER if g in to_start + to_restart]:
+            self.start(gid, values, on_event=on_event)
+        return to_stop, to_start, to_restart
+
+    def shutdown_all(self, on_event=None):
+        """Idempotent full teardown. Safe to call from a signal handler."""
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        try:
+            self.stop_many(list(self.procs), on_event=on_event)
+            # Anything spawned outside GROUP_ORDER still gets reaped.
+            while self.procs:
+                gid = next(iter(self.procs))
+                for p in self.procs.pop(gid, []):
+                    p.stop(on_event=on_event)
+                self.applied.pop(gid, None)
+        finally:
+            self._shutting_down = False
+
+
+def robot_spawn_pose():
+    """(name, xyz, rpy) the robot is spawned at, read from the scenario.
+
+    Parsed rather than hardcoded so a change to the .scn is picked up; falls
+    back to the shipped BlueROV2 values if the scenario cannot be read.
+    """
+    import xml.etree.ElementTree as ET
+    world_dir = os.environ.get("STONEFISH_WORLD_DIR")
+    if not world_dir:
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            world_dir = get_package_share_directory("world")
+        except Exception:
+            return DEFAULT_SPAWN
+    path = os.path.join(world_dir, "data", "robot", "bluerov2_unphy.scn")
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return DEFAULT_SPAWN
+    robot = root.find(".//robot")
+    if robot is None:
+        return DEFAULT_SPAWN
+    name = robot.get("name") or DEFAULT_SPAWN[0]
+    wt = robot.find("world_transform")
+    if wt is None:
+        return DEFAULT_SPAWN
+    def triple(attr, default):
+        try:
+            parts = [float(x) for x in (wt.get(attr) or "").split()]
+            return tuple(parts) if len(parts) == 3 else default
+        except ValueError:
+            return default
+    return (name, triple("xyz", DEFAULT_SPAWN[1]), triple("rpy", DEFAULT_SPAWN[2]))
+
+
+def rpy_to_quaternion(roll, pitch, yaw):
+    """ZYX intrinsic roll/pitch/yaw to (x, y, z, w)."""
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    return (sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+            cr * cp * cy + sr * sp * sy)
+
+
+def find_workspace_root(start=None):
+    """Nearest ancestor containing install/setup.bash."""
+    d = os.path.dirname(os.path.abspath(start or __file__))
+    for _ in range(6):
+        if os.path.isfile(os.path.join(d, "install", "setup.bash")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+    return None
