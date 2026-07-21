@@ -4,3 +4,6 @@
 [submodule "external/stonefish"]
 	path = external/stonefish
 	url = https://github.com/Arcod7/stonefish.git
+[submodule "sim/stonefish_ros2"]
+	path = sim/stonefish_ros2
+	url = https://github.com/Arcod7/stonefish_ros2.git
