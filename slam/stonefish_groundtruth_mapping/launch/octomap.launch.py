@@ -8,6 +8,10 @@ Full OctoMap mapping stack: Stonefish + TF + point cloud + octomap_server.
                         → /occupied_cells_vis_array  (RViz MarkerArray)
                         → /projected_map             (2-D occupancy grid)
 
+Thin composition of pointcloud.launch.py and mapper_only.launch.py
+(mapper:=octomap). Behaviour is unchanged; launch mapper_only.launch.py by
+itself to swap the map backend without dropping the simulator.
+
 Verify with:
   ros2 topic echo /octomap_binary --no-arr
   rviz2 → MarkerArray → /occupied_cells_vis_array
@@ -16,34 +20,20 @@ import os
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
+
+_LAUNCH_DIR = os.path.join(
+    get_package_share_directory('stonefish_groundtruth_mapping'), 'launch')
 
 
 def generate_launch_description():
     pointcloud = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory('stonefish_groundtruth_mapping'),
-                'launch', 'pointcloud.launch.py',
-            )
-        )
+        PythonLaunchDescriptionSource(os.path.join(_LAUNCH_DIR, 'pointcloud.launch.py'))
     )
 
-    octomap = Node(
-        package='octomap_server',
-        executable='octomap_server_node',
-        name='octomap_server',
-        output='screen',
-        parameters=[{
-            'frame_id':               'world_ned',
-            'resolution':             0.2,        # 20 cm voxels
-            'sensor_model/max_range': 15.0,       # matches Dcam depth_max in .scn
-            'latch':                  True,
-        }],
-        remappings=[
-            ('cloud_in', '/cloud_in'),
-        ],
+    octomap = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(_LAUNCH_DIR, 'mapper_only.launch.py')),
+        launch_arguments={'mapper': 'octomap'}.items(),
     )
 
     return LaunchDescription([pointcloud, octomap])
