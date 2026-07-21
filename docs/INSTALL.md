@@ -55,8 +55,14 @@ this project.
 
 ## 6. Python dependencies not covered by `rosdep`
 
-[`requirements.txt`](../requirements.txt) lists everything `rosdep` can't
-resolve because it isn't packaged for apt — install with:
+Python dependencies are split by who can install them:
+
+- **`rosdep` handles anything packaged for apt** — `numpy`, `scipy` and
+  `matplotlib` are declared in the `package.xml` of each package that imports
+  them, so step 5's `rosdep install` already pulled them in. They are
+  deliberately not repeated in `requirements.txt`.
+- **[`requirements.txt`](../requirements.txt) is only what `rosdep` cannot
+  provide** — install with:
 
 ```bash
 pip install -r requirements.txt   # or --break-system-packages / inside a venv
