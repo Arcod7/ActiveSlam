@@ -121,18 +121,31 @@ else
 fi
 
 echo "==> Scene meshes"
-MESH_DIR="$REPO_ROOT/sim/world/data/obj"
+MESH_DATA_DIR="$REPO_ROOT/sim/world/data"
+MESH_DIR="$MESH_DATA_DIR/obj"
+MESH_MANIFEST="$MESH_DATA_DIR/obj.sha256"
 if [ -n "$MESHES_FROM" ]; then
     mkdir -p "$MESH_DIR"
     cp -r "$MESHES_FROM"/. "$MESH_DIR"/
     echo "Copied meshes from $MESHES_FROM into $MESH_DIR."
-elif [ -d "$MESH_DIR" ] && [ -n "$(ls -A "$MESH_DIR" 2>/dev/null)" ]; then
-    echo "$MESH_DIR already populated, skipping."
+fi
+# Check against the manifest rather than just testing that the directory is
+# non-empty: a partial or corrupted copy otherwise fails much later, inside the
+# simulator, with no indication of which file is at fault.
+if [ -f "$MESH_MANIFEST" ]; then
+    if ( cd "$MESH_DATA_DIR" && sha256sum -c --quiet "$MESH_MANIFEST" 2>/dev/null ); then
+        echo "All meshes present and matching $(basename "$MESH_MANIFEST")."
+    else
+        echo "Mesh assets are missing or do not match the manifest:" >&2
+        ( cd "$MESH_DATA_DIR" && sha256sum -c "$MESH_MANIFEST" 2>&1 \
+            | grep -vE ': OK$' | sed 's/^/  /' ) >&2
+        echo "" >&2
+        echo "obj/ is gitignored and distributed out of band. Copy it from an" \
+             "existing checkout with --meshes-from <path>, or see" \
+             "sim/world/data/README.md." >&2
+    fi
 else
-    echo "$MESH_DIR is empty. Mesh provenance is not automated yet" \
-         "(see sim/world/data/README.md) — pass --meshes-from <path> to copy" \
-         "them from an existing checkout, or place them there manually" \
-         "before building." >&2
+    echo "No mesh manifest at $MESH_MANIFEST, skipping the integrity check." >&2
 fi
 
 echo "==> 7/7 colcon build"

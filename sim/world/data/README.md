@@ -28,6 +28,44 @@ grey and cyan patches because the mesh then samples unrelated UV islands.
 The environment meshes (`shipwreck.obj`, `cliff.obj`, and
 `off_shore_station.obj`) still need their original sources documented.
 
-**Getting the files onto a new machine:** until a fetch script exists, copy
-`data/obj/` from an existing checkout (or wherever the canonical copies are
-kept) into this directory before building.
+## Verifying a copy
+
+[`obj.sha256`](obj.sha256) records the SHA-256 of every file `obj/` must
+contain. It is tracked in git even though the meshes are not, so a checkout can
+always tell whether its copy is complete and intact:
+
+```bash
+cd sim/world/data && sha256sum -c obj.sha256
+```
+
+`./bootstrap.sh` runs this and names any file that is missing or corrupted.
+Without it a partial copy surfaces much later, as an obscure failure inside the
+simulator.
+
+## Getting the files onto a new machine
+
+Copy `obj/` from an existing checkout — `./bootstrap.sh --meshes-from <path>`
+does this and then verifies against the manifest.
+
+**Automating this is still an open decision**, and it is blocked on two
+separate things:
+
+1. *Where to host them.* The options, with their trade-offs:
+   - **GitHub release asset** — a tarball attached to a release. No extra
+     tooling, no repo bloat, works for anonymous clones, and versioned
+     alongside the code. 313 MB is within GitHub's 2 GB per-asset limit. This
+     is the option to pick unless something rules it out.
+   - **git-lfs** — cleanest conceptually, but it bloats every clone by
+     default, needs LFS installed, and GitHub's free LFS quota (1 GB storage,
+     1 GB/month bandwidth) is smaller than this asset set.
+   - **External URL** (institutional storage) — fine for the project's own
+     use, but a dead link makes the repo unbuildable for anyone else later.
+2. *Provenance.* `shipwreck.obj`, `cliff.obj` and `off_shore_station.obj` have
+   no recorded source or licence (see above). Redistributing them without
+   knowing their licence is not something to do by default, so that has to be
+   settled before any of them are published anywhere — regardless of which
+   hosting option is chosen.
+
+The BlueROV2 assets are unaffected by (2): they are Apache-2.0 and already
+attributed above, so they could be published immediately if the environment
+meshes were split out.
