@@ -25,7 +25,7 @@ logging ATE/RPE against ground truth.
 |---|---|
 | [`bringup`](bringup) | Unified `demo.launch.py` (mode/mapper/slam switches) and the three RViz configs it picks between |
 | [`sim/world`](sim/world) | Stonefish scenario: BlueROV2 model, environment meshes, `.scn` config |
-| [`sim/stonefish_ros2`](sim/stonefish_ros2) | ROS 2 bridge to the simulator (patched fork) |
+| [`sim/stonefish_ros2`](sim/stonefish_ros2) | ROS 2 bridge to the simulator (patched fork, submodule — see [`docs/stonefish_ros2_fork.md`](docs/stonefish_ros2_fork.md)) |
 | [`slam/stonefish_groundtruth_mapping`](slam/stonefish_groundtruth_mapping) | TF chain, depth image → point cloud, OctoMap/TSDF mapping |
 | [`slam/slam_backend`](slam/slam_backend) | Simulated pressure/IMU/DVL sensors + dead-reckoning fusion + GTSAM iSAM2 pose-graph SLAM |
 | [`planner/frontier_slam`](planner/frontier_slam) | Frontier-based autonomous exploration (the optional mode) |
@@ -85,10 +85,11 @@ launcher drives the same underlying launch files.
 
 ## Install
 
-Requires ROS 2 Jazzy and a patched build of Stonefish, which comes in as a
-pinned git submodule under [`external/`](external) along with `vdbfusion`
-(see [`sim/stonefish_patches/README.md`](sim/stonefish_patches/README.md) for
-what the fork changes).
+Requires ROS 2 Jazzy and a patched build of Stonefish. The patched Stonefish
+library and the patched ROS 2 bridge are both pinned git submodules
+(`external/stonefish`, `sim/stonefish_ros2`) and are **required** — clone with
+`--recurse-submodules` or the workspace will not build. `external/vdbfusion` is
+optional, needed only for `mapper:=tsdf`.
 The scene meshes (~313 MB, gitignored — see
 [`sim/world/data/README.md`](sim/world/data/README.md)) must be present on
 disk separately; they don't come from `git clone`.

@@ -32,12 +32,20 @@ git submodule update --init external/stonefish
 ./bootstrap.sh --build-stonefish
 ```
 
-A plain `git clone` does not download submodules, so this is opt-in — clone
-with `--recurse-submodules`, or run the command above afterwards.
-
 [`sim/stonefish_patches/`](../sim/stonefish_patches/) still carries the patches
 as plain files. They document what the fork changes relative to upstream and
 record the base commit; the submodule is what actually gets built.
+
+**Submodules are required, not optional.** A plain `git clone` does not fetch
+them, and the workspace will not build without `external/stonefish` (the
+library `stonefish_ros2` compiles against) or `sim/stonefish_ros2` (a package
+`stonefish_groundtruth_mapping` depends on). Clone with
+`--recurse-submodules`, or run `git submodule update --init --recursive`
+afterwards — `./bootstrap.sh` does this for you. `external/vdbfusion` is the
+one genuinely optional submodule; it is only needed for `mapper:=tsdf`.
+
+The ROS 2 bridge is a patched fork too — see
+[`stonefish_ros2_fork.md`](stonefish_ros2_fork.md).
 
 ## 4. Scene meshes
 
