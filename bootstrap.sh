@@ -208,7 +208,12 @@ install_vdbfusion() {
              "external/vdbfusion submodule and re-run." >&2
         exit 1
     fi
-    "$UV" pip install --python "$VENV_PY" "$VDBFUSION_DIR"
+    # Same cache override install_gtsam uses for its source build: a shared uv
+    # cache can hold entries written by sudo during an earlier install, and
+    # building an sdist needs to take a lock inside it.
+    UV_CACHE_DIR="$VENV_DIR/.uv-cache" \
+        "$UV" pip install --python "$VENV_PY" \
+        -c "$REPO_ROOT/requirements.txt" "$VDBFUSION_DIR"
     "$VENV_PY" -c 'import vdbfusion; print("vdbfusion:", vdbfusion.__file__)'
 }
 

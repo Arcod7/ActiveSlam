@@ -80,6 +80,19 @@ sudo cmake --install external/stonefish/build && sudo ldconfig
 Note that `--skip-stonefish` suppresses the check along with the build, so an
 install kept deliberately out of the way has to stay current by hand.
 
+**vdbfusion's source build fails in c-blosc: `conflicting types for
+'shuffle'`**
+
+Seen on aarch64 with GCC 11 (Ubuntu 22.04 / Humble). vdbfusion's CMake builds
+its own blosc 1.5.0 through ExternalProject rather than using the system one,
+and that release's `shuffle.c` and `shuffle.h` disagree on a `const`, which GCC
+11 rejects outright where older compilers only warned.
+
+Nothing in this repository selects that blosc. The combination is narrow —
+x86_64 takes the wheel and never builds, and the source build works on Ubuntu
+24.04 — so if you hit it, `./bootstrap.sh --skip-vdbfusion` gets you a working
+workspace without `mapper:=tsdf`; use `mapper:=octomap`.
+
 **`fatal error: glm/glm.hpp: No such file or directory`**
 
 Stonefish's own dependencies are missing. `rosdep` cannot supply them — it only
