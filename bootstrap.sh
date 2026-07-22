@@ -83,6 +83,11 @@ gtsam_installed_version() {
     "$VENV_PY" -c 'import importlib.metadata as m; print(m.version("gtsam"))' 2>/dev/null
 }
 
+gtsam_install_dir() {
+    "$VENV_PY" -c 'import os, sysconfig
+print(os.path.join(sysconfig.get_paths()["purelib"], "gtsam"))' 2>/dev/null
+}
+
 install_gtsam() {
     # Prefer a prebuilt wheel. The pinned source submodule is the portable
     # fallback for interpreters and architectures no wheel covers.
@@ -106,11 +111,18 @@ install_gtsam() {
                 "gtsam==$GTSAM_WHEEL_VERSION"; then
             return
         fi
+        # Report the failure rather than name a cause: a platform with no
+        # matching wheel and a venv holding root-owned files from an earlier
+        # sudo install both arrive here, and they need opposite fixes.
+        echo "Could not install GTSAM $GTSAM_WHEEL_VERSION; the reason is in" \
+             "the output above. Keeping GTSAM $GTSAM_INSTALLED." >&2
+        gtsam_dir="$(gtsam_install_dir)"
+        if [ -n "$gtsam_dir" ] && [ -e "$gtsam_dir" ] && [ ! -w "$gtsam_dir" ]; then
+            echo "$gtsam_dir is not writable by $(id -un): an earlier install" \
+                 "ran under sudo. 'sudo rm -rf $gtsam_dir'* and re-run." >&2
+        fi
         # Rebuilding from source here would repeat a long build on every run
-        # for platforms no wheel covers, so say so and leave it alone.
-        echo "No $GTSAM_WHEEL_VERSION wheel for this platform; keeping GTSAM" \
-             "$GTSAM_INSTALLED. Rebuild it from $GTSAM_SUBMODULE_PATH by hand" \
-             "if it misbehaves." >&2
+        # for platforms no wheel covers, so it is left alone.
         return
     fi
 
