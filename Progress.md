@@ -837,3 +837,105 @@ x86_64-only.
 Note: rosdep's `gtsam` key resolves to `ros-jazzy-gtsam`, which ships the
 C++ libraries and no Python module, so it cannot replace the PyPI wheel
 that `slam_backend` imports. Left on pip deliberately.
+
+## Phase 27 — Fail-closed motion gate, RViz arming panel, and ArduSub adapter
+
+**Date**: 2026-07-17 (acceptance evidence 2026-07-21)
+**Files**: `planner/frontier_slam/frontier_slam/safety_gate.py` (new),
+`planner/frontier_slam/frontier_slam/safety_logic.py` (new),
+`planner/frontier_slam/frontier_slam/ardusub_adapter.py` (new),
+`planner/frontier_slam/frontier_slam/ardusub_control.py` (new),
+`planner/frontier_slam/config/ardusub.yaml` (new),
+`planner/frontier_slam/launch/ardusub_adapter.launch.py` (new),
+`planner/frontier_slam/frontier_slam/{control_utils,heavy_sim_mixer,wall_follower,wall_oriented_controller,waypoint_controller}.py`,
+`planner/frontier_slam/launch/{frontier_slam,wall_follow}.launch.py`,
+`planner/frontier_slam/test/{test_safety_logic,test_heavy_mixer}.py`,
+`tools/motion_safety_rviz/` (new package),
+`bringup/launch/demo.launch.py`, `bringup/rviz/*.rviz`,
+`sim/world/data/robot/bluerov2_unphy.scn`, `IRL_TEST.md` (new),
+`docs/INSTALL.md`, `planner/frontier_slam/README.md`
+
+Every executor now publishes body commands through a single gate node
+(`safety_gate.py`, pure decision logic in `safety_logic.py`) instead of
+driving the vehicle directly. The gate is **fail-closed**: `start_enabled`
+defaults to false, so nothing moves until `/motion/enable` is published, and
+it zeroes output on a stale command, a non-finite or out-of-range value, or
+a missing odometry heartbeat. `/motion/safety_status` reports the reason.
+An RViz panel (`tools/motion_safety_rviz`) arms and disarms it without a
+terminal, and is loaded by all four RViz configs.
+
+`ardusub_adapter.py` translates the same gated body command into MAVLink
+`MANUAL_CONTROL` for an ArduSub vehicle, with its own arming, mode and
+failsafe handling in `ardusub_control.py` and per-vehicle scaling in
+`config/ardusub.yaml`. `IRL_TEST.md` is the staged bring-up procedure for
+taking the stack to a physical BlueROV2.
+
+**Caveat: the adapter has not been accepted against a physical vehicle.**
+Phase 0 Part 1 of `IRL_TEST.md` (bench acceptance of the gate itself, no
+vehicle) passed 18/18 on 2026-07-21 — evidence in
+`eval/runs/irl_phase0_20260721/` (`gate.log` plus two recorded bags), which
+shows the gate rejecting malformed commands, holding DISABLED until armed,
+and dropping to STALE_COMMAND when the command stream stops. Part 2 needs an
+operator at the RViz panel and is not yet run.
+
+Sim consequence, only understood later: because `frontier_slam.launch.py`
+instantiates the gate for *every* `mode:=frontier` launch, headless
+evaluation batches also started fail-closed — see Phase 28.
+
+## Phase 28 — Cable-safe sweep scanning, thruster calibration, and armed eval batches
+
+**Date**: 2026-07-21 / 2026-07-22
+**Files**: `planner/frontier_slam/frontier_slam/scan_sweep.py` (new),
+`planner/frontier_slam/frontier_slam/waypoint_controller.py`,
+`planner/frontier_slam/test/test_scan_sweep.py` (new),
+`planner/frontier_slam/launch/frontier_slam.launch.py`,
+`bringup/launch/demo.launch.py`, `sim/world/data/robot/bluerov2_unphy.scn`,
+`eval/eval_tools/scripts/run_matrix.py`,
+`eval/eval_tools/config/matrix_*.yaml`
+
+Scanning in place no longer spins a full revolution. `scan_sweep.py` drives
+an odometry-confirmed right-half → left-full → return-to-start cycle whose
+net cumulative yaw is zero, so a tethered vehicle cannot wind its cable up;
+progress is measured from actual yaw rather than elapsed time, and a
+per-cycle timeout (including the return phase) bounds the worst case at
+twice the configured deadline. It replaces the spin at all three sites —
+initial scan, no-goal `SCAN`, and `GOAL_REACHED` — leaving the CSV state
+labels untouched for the eval scripts. `scan_style` (`sweep` default,
+`spin` = previous behaviour) and `scan_sweep_deg` are launch arguments on
+both launch files.
+
+Two calibration errors surfaced while validating it. The BlueROV2's
+thruster `max_setpoint` had been 340 RPM since the simulator was first
+imported, roughly 11x below a real T200's ~3800-4000, suppressing achievable
+thrust by close to two orders of magnitude and making `CTRL_STUCK_ESCAPE`
+fire during ordinary drives; it is now 3800 on all eight thrusters, with
+rotor dynamics switched from `zero_order` to `first_order` (0.4 s) so
+setpoints ramp instead of stepping. `SCAN_YAW` was then recalibrated 0.08 →
+0.026 (~15°/s), which gives the 5 Hz sonar proper frame overlap.
+**Velocity and timing figures recorded before this fix are not comparable
+with anything after it.**
+
+The headless evaluation path needed one further change: the Phase 27 gate
+is instantiated for every `mode:=frontier` launch, and `run_matrix.py` had
+no way to arm it, so batches were silently benchmarking a motionless
+vehicle (yaw pinned within ±3.5°, under 1 cm of travel over 90 s).
+`safety_start_enabled` is now a valid matrix key and is set true in the sim
+configs, leaving the gate's fail-closed default intact for real hardware.
+
+**Measured counter-result.** The sweep was expected to *lower* the loop
+closure count relative to a spin, on the theory that spinning piles up
+keyframes. It does the opposite, and the reasoning behind the expectation
+was wrong: loop-closure candidacy in `pose_graph.py` is positional
+(`loop_closure_radius_m`, `loop_closure_min_gap`) and never looks at
+heading. Over a 78 s seed-42 A/B, the sweep produced fewer keyframes (84 vs
+107) but more accepted closure edges (101 vs 47, i.e. 3.6 vs 2.0 per closing
+node) and better localisation on every metric — ATE 0.122 vs 0.192, mean
+absolute error 0.102 vs 0.170, D-optimality 0.0036 vs 0.0062. The likely
+mechanism is that re-traversing headings gives a new keyframe better cloud
+overlap with an in-radius earlier one, so ICP accepts where a monotonic spin
+is rejected. Sweep therefore stays the default on its own merits; the
+tether-safety argument was never contingent on the closure count.
+
+Tests: 117 pass in `planner/frontier_slam/test/`, including
+`test_scan_sweep.py`'s phase-sequence, net-zero-yaw (with wraparound),
+timeout-guard, return-phase-deadline and `spin`-bypass cases.

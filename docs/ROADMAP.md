@@ -34,6 +34,30 @@ Everything below is ordered to serve #1 first. The current code optimises #2 und
 `docs/SLAM_PLAN.md` for the design). `slam:=none` (default) keeps the
 Week-0 baseline above byte-for-byte. Detail under Weeks 1–2 below.
 
+**Update, 2026-07-22.** Weeks 1–3 have landed: TSDF mapping, the
+uncertainty-triggered revisit planner, map rebuild after large closures, the
+batch orchestrator, and six noise profiles are all in and benchmarked
+(`Progress.md` Phases 1–28). Two things since have changed how runs behave and
+what the remaining schedule looks like:
+
+- **A fail-closed motion gate** now sits between every executor and the
+  thrusters, with an ArduSub MAVLink adapter behind it (Phase 27). This is the
+  opportunistic real-robot path; bench acceptance passed, no physical vehicle
+  yet.
+- **Scanning sweeps instead of spinning** (Phase 28), which is tether-safe, and
+  the sim's thruster calibration was corrected by ~11x. Any velocity or timing
+  figure recorded before 2026-07-21 is not comparable with later runs.
+
+**Remaining before the 2026-08-01 code freeze**, in priority order:
+
+1. Re-run the benchmark matrix on the corrected baseline — the numbers the
+   dissertation quotes must all come from after the calibration fix.
+2. Presentation demo scene. The shipwreck-world attempt is parked: the 289 MB /
+   2.3M-face mesh stalls Stonefish once it enters the sonar's view, so it needs
+   a decimated asset or a different target object.
+3. Wall-guided executors stay descoped (`docs/FUTURE_WORK.md`) — not modified,
+   tested, or benchmarked.
+
 ---
 
 ## Week 1 — Make "lost" measurable + unify the cost layer
@@ -100,29 +124,31 @@ comparison on one fixed path is still open.
 
 Goal: choose actions using uncertainty, not just information gain.
 
-- [ ] **Propagate pose covariance** along candidate paths; reduce to a scalar (D-optimality).
-- [ ] **Utility = info-gain(frontier) traded against expected uncertainty.** Revisit
-      candidates = previously-seen distinctive areas.
-- [ ] **Submap saliency v0**: FPFH → k-means dictionary → idf rarity (GloSSy-lite). Start
-      with plain geometric distinctiveness if the full pipeline runs long.
-- [ ] Decision rule: explore while uncertainty is bounded; trigger a revisit when the
-      propagated covariance crosses a threshold.
+- [x] **Scalar uncertainty (D-optimality)** published live from the pose graph and consumed
+      by the planner. Per-candidate covariance *propagation* was cut — the planner reacts to
+      the live value instead (Phase 20).
+- [x] **Utility trade-off + decision rule**: `revisit:=true` breaks off exploration when
+      D-optimality crosses a threshold, drives to a previously-seen target, and resumes.
+- [ ] **Submap saliency v0** (FPFH → k-means → idf rarity): not built. Target scoring uses
+      keyframe density. Blocked on aarch64 (no `open3d` wheel) and descoped for time.
 
 Done when: the robot autonomously breaks off exploration to close a loop and the logged
-uncertainty drops afterward.
+uncertainty drops afterward. — **Met** (Phase 20): forced-trigger run completes the full
+suspend → drive → closure → dopt-drop → resume cycle. The natural-trigger A/B is a mechanism
+demo, not an ATE-improvement claim (n=2, mixed).
 
 ## Week 4 — 3D + benchmark + consolidation
 
 Goal: one dimensional extension + the comparison the thesis needs.
 
-- [ ] **Pick ONE** (time-boxed): 3-D frontier detection on octomap voxels, **or** TSDF map
-      (the poster's map-representation axis; gives surface normals for free → helps Week 1
-      wall-normal targeting and local nav).
-- [ ] **Benchmark matrix**: open-loop vs frontier-coverage vs saliency-active, across
-      turbidity / current / obstacle density. Report the 4 metrics.
-- [ ] Buffer for slippage + poster figures.
+- [x] **Picked TSDF** (`mapper:=tsdf`, VDBFusion): surface reconstruction, normals, solid-voxel
+      goal safety, and rebuild-on-large-closure. OctoMap stays as the planning map source.
+- [~] **Benchmark matrix**: the orchestrator, six noise profiles and the metric set are in and
+      have been run; the numbers now need re-running on the post-calibration baseline.
+- [ ] Poster/presentation figures + demo scene (see the code-freeze list above).
 
-Done when: a table compares the three policies on drift / coverage / time / uncertainty.
+Done when: a table compares the policies on drift / coverage / time / uncertainty, from runs
+made after the 2026-07-21 thruster calibration fix.
 
 ---
 

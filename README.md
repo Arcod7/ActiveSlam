@@ -129,7 +129,17 @@ ros2 launch bringup demo.launch.py mode:=frontier motion:=walloriented \
 ros2 launch bringup demo.launch.py slam:=none|slam                # pose source
 ros2 launch bringup demo.launch.py noise_profile:=realistic|ideal|sonar_only|odom_pos_only|odom_only|degraded  # slam:=slam only
 ros2 launch bringup demo.launch.py rviz:=false                    # headless
+ros2 launch bringup demo.launch.py mode:=frontier scan_style:=sweep|spin \
+  scan_sweep_deg:=180.0                                           # cable-safe sweep (default) vs full revolution
+ros2 launch bringup demo.launch.py mode:=frontier safety_start_enabled:=true  # arm the motion gate at startup
 ```
+
+The motion safety gate is **fail-closed**: nothing moves until `/motion/enable`
+is published, whether that comes from the RViz panel, the launcher's `m` key,
+or `safety_start_enabled:=true`. `/motion/safety_status` says what is blocking.
+
+Wall-guided path executors (`motion:=walloriented|walllooking`) are outside the
+evaluated scope of this project — see [`docs/FUTURE_WORK.md`](docs/FUTURE_WORK.md).
 
 Benchmarking switches (all `slam:=slam` only, all default to today's behavior):
 

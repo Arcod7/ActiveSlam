@@ -74,6 +74,25 @@ depth_image_proc ─► /cloud_in_raw ─► sonar_noise ─► /cloud_in (5Hz) 
                                                           belief vs /gt/... map: IoU/coverage/chamfer
 ```
 
+Motion path (independent of the mapping/SLAM chain above):
+
+```
+waypoint_controller / wall executors ──► /motion/body_command
+                                              │
+                                     safety_gate (fail-closed)
+                                      start_enabled=false by default;
+                                      zeroes on stale/invalid/no-odom
+                                              │
+                                    /motion/body_command_safe ──► thruster mixer
+                                                                  or ardusub_adapter
+                                                                  (MAVLink MANUAL_CONTROL)
+```
+
+Nothing moves until `/motion/enable` is published — by the RViz panel
+(`tools/motion_safety_rviz`), `launcher.py`'s `m` key, or
+`safety_start_enabled:=true` for headless runs. `/motion/safety_status`
+reports which condition is blocking.
+
 ## Packages
 
 - `slam/slam_backend/` — sensor sims (incl. `sonar_noise`), dead-reckoning fusion, pose graph, scan matcher
@@ -161,6 +180,9 @@ ros2 launch bringup demo.launch.py slam:=slam mapper:=tsdf map_rebuild:=true    
 ros2 launch bringup demo.launch.py slam:=slam noise_seed:=7                          # reproducible, decorrelated noise draws
 ros2 launch bringup demo.launch.py slam:=slam output_dir:=/path/to/run              # label eval output instead of a timestamp
 ros2 launch bringup demo.launch.py slam:=slam mode:=frontier revisit:=true          # Week 3: uncertainty-triggered revisit
+ros2 launch bringup demo.launch.py mode:=frontier scan_style:=spin                  # pre-2026-07-21 full-revolution scan (default is sweep)
+ros2 launch bringup demo.launch.py mode:=frontier scan_sweep_deg:=120.0             # narrower cable-safe sweep
+ros2 launch bringup demo.launch.py mode:=frontier rviz:=false safety_start_enabled:=true  # headless: arm the motion gate at startup
 
 # Batch evaluation (plain script, not a console_script -- needs
 # `source install/setup.bash` first so eval_tools.plot_results is importable):
