@@ -211,8 +211,10 @@ deps, rosdep, the patched Stonefish (unless already installed), colcon build.
 
   --skip-stonefish         Do not build or install Stonefish. Use when it is
                             installed somewhere CMake finds but this script
-                            does not look (it checks for StonefishConfig.cmake
-                            under the usual prefixes).
+                            does not look (it checks the usual prefixes for a
+                            StonefishConfig.cmake whose headers carry the API
+                            stonefish_ros2 needs, and rebuilds when they do
+                            not).
   --stonefish-dir <path>   Use an existing Stonefish checkout instead of the
                             submodule (default: $STONEFISH_DIR).
   --with-vdbfusion         Build + pip install the vdbfusion submodule (needed
@@ -350,18 +352,42 @@ echo "==> 4/8 rosdep (workspace root: $WS_ROOT)"
 ( cd "$WS_ROOT" && rosdep install --from-paths src -i -y )
 
 echo "==> 5/8 Patched Stonefish"
-stonefish_installed() {
+stonefish_prefix() {
     for prefix in /usr/local /usr /opt/stonefish; do
-        [ -f "$prefix/lib/cmake/Stonefish/StonefishConfig.cmake" ] && return 0
+        [ -f "$prefix/lib/cmake/Stonefish/StonefishConfig.cmake" ] \
+            && { echo "$prefix"; return 0; }
     done
     return 1
 }
+
+# Methods stonefish_ros2 calls that exist only in the patched fork. An older
+# Stonefish satisfies find_package(Stonefish) just as well, so testing only
+# that something is installed lets a stale one through — and it surfaces as a
+# compile error deep in the bridge rather than here.
+stonefish_missing_api() {
+    for pair in "sensors/vision/Camera.h:getLastCaptureTime" \
+                "sensors/vision/DepthCamera.h:getVerticalFOV"; do
+        grep -q "${pair##*:}" "$1/include/Stonefish/${pair%%:*}" 2>/dev/null \
+            || echo "${pair##*:}"
+    done
+}
+
+STONEFISH_PREFIX="$(stonefish_prefix || true)"
+STONEFISH_MISSING_API=""
+if [ -n "$STONEFISH_PREFIX" ]; then
+    STONEFISH_MISSING_API="$(stonefish_missing_api "$STONEFISH_PREFIX" \
+        | paste -sd' ' -)"
+fi
 if [ "$SKIP_STONEFISH" = true ]; then
     echo "Skipped (--skip-stonefish)."
-elif stonefish_installed; then
-    echo "Already installed, skipping the build. Force a rebuild by removing" \
-         "$STONEFISH_DIR/build and the installed StonefishConfig.cmake."
+elif [ -n "$STONEFISH_PREFIX" ] && [ -z "$STONEFISH_MISSING_API" ]; then
+    echo "Already installed at $STONEFISH_PREFIX, skipping the build."
 else
+    if [ -n "$STONEFISH_PREFIX" ]; then
+        echo "The Stonefish installed at $STONEFISH_PREFIX predates the" \
+             "patched fork — it has no $STONEFISH_MISSING_API, which" \
+             "stonefish_ros2 calls. Rebuilding and installing over it."
+    fi
     if [ ! -d "$STONEFISH_DIR/Library" ]; then
         echo "$STONEFISH_DIR looks empty. Run" \
              "'git submodule update --init external/stonefish' first," \
@@ -377,6 +403,8 @@ else
     # Installing is not optional: stonefish_ros2 does find_package(Stonefish),
     # which only resolves against an installed StonefishConfig.cmake.
     sudo cmake --install "$STONEFISH_DIR/build"
+    # Reinstalling over an older copy leaves the linker cache pointing at it.
+    sudo ldconfig
     echo "Stonefish built and installed from $STONEFISH_DIR/build."
 fi
 

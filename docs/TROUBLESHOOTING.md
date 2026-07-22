@@ -54,6 +54,32 @@ will recreate the venv from the interpreter the distribution expects.
 `./bootstrap.sh`; it builds and installs it. If Stonefish is installed
 somewhere `bootstrap.sh` does not look but CMake does, pass `--skip-stonefish`.
 
+**`sf::Camera has no member named getLastCaptureTime`** (or
+`sf::DepthCamera has no member named getVerticalFOV`)
+
+The installed Stonefish predates the patched fork. Both methods were added on
+the fork and `stonefish_ros2` calls them, so an older install compiles the
+bridge no further than this — while still satisfying
+`find_package(Stonefish)`, which is why the build gets as far as it does.
+Confirm with:
+
+```bash
+grep -c getLastCaptureTime /usr/local/include/Stonefish/sensors/vision/Camera.h
+```
+
+`0`, or no such file, means the install is stale. `./bootstrap.sh` detects this
+and rebuilds over it. To do it by hand:
+
+```bash
+git submodule update --init --recursive external/stonefish
+cmake -S external/stonefish -B external/stonefish/build -DCMAKE_BUILD_TYPE=Release
+cmake --build external/stonefish/build -j"$(nproc)"
+sudo cmake --install external/stonefish/build && sudo ldconfig
+```
+
+Note that `--skip-stonefish` suppresses the check along with the build, so an
+install kept deliberately out of the way has to stay current by hand.
+
 **`fatal error: glm/glm.hpp: No such file or directory`**
 
 Stonefish's own dependencies are missing. `rosdep` cannot supply them — it only

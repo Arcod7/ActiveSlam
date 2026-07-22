@@ -69,8 +69,11 @@ or whenever a step failed and you have fixed the cause.
    `rviz2`, ...).
 5. **Patched Stonefish** — installs its dependencies (glm, SDL2, Freetype,
    OpenGL, which `rosdep` does not cover), then builds and installs the pinned
-   submodule. Skipped when `StonefishConfig.cmake` is already present under a
-   standard prefix; `--skip-stonefish` forces the skip. Building takes a while.
+   submodule. Skipped when a standard prefix already holds a
+   `StonefishConfig.cmake` whose headers declare the methods `stonefish_ros2`
+   calls; an older install is rebuilt over rather than skipped, since it
+   satisfies `find_package(Stonefish)` but fails to compile the bridge.
+   `--skip-stonefish` forces the skip regardless. Building takes a while.
 6. **vdbfusion**, only with `--with-vdbfusion` — needed for `mapper:=tsdf`.
 7. **Open3D**, only with `--with-open3d` — needed for FPFH descriptor work.
 8. **Scene meshes** — copies the out-of-band ones with `--meshes-from`, then
