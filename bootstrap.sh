@@ -5,6 +5,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORIGINAL_ARGS=("$@")
 PARENT_DIR="$(dirname "$REPO_ROOT")"
 if [ "$(basename "$PARENT_DIR")" = "src" ]; then
     WS_ROOT="$(dirname "$PARENT_DIR")"
@@ -40,6 +41,83 @@ MESHES_FROM=""
 # distro's ROS Python packages visible inside it.
 VENV_DIR="$WS_ROOT/.venv"
 SYSTEM_PYTHON="/usr/bin/python3.12"
+DISTROBOX_NAME="activeslam-jazzy"
+DISTROBOX_IMAGE="quay.io/toolbx/ubuntu-toolbox:24.04"
+
+python_is_expected() {
+    "$1" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'
+}
+
+setup_distrobox_and_continue() {
+    if [ -e /run/.containerenv ] || [ -e /.dockerenv ]; then
+        echo "This shell is already inside a container. Exit it and re-run" \
+             "bootstrap.sh from the Ubuntu host to create $DISTROBOX_NAME." >&2
+        exit 1
+    fi
+
+    if ! command -v podman >/dev/null 2>&1; then
+        echo "==> Installing Podman (Distrobox's container engine)"
+        sudo apt-get update
+        sudo apt-get install -y podman
+    fi
+
+    if ! command -v distrobox >/dev/null 2>&1; then
+        if ! command -v curl >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y curl
+        fi
+        echo "==> Installing Distrobox with its official installer"
+        curl -fsSL https://raw.githubusercontent.com/89luca89/distrobox/main/install \
+            | sudo sh
+    fi
+
+    DISTROBOX_FLAGS=(
+        --name "$DISTROBOX_NAME"
+        --image "$DISTROBOX_IMAGE"
+        --yes
+    )
+    ACTIVESLAM_EXPECT_NVIDIA=0
+    if command -v nvidia-smi >/dev/null 2>&1 || [ -d /proc/driver/nvidia ]; then
+        DISTROBOX_FLAGS+=(--nvidia)
+        ACTIVESLAM_EXPECT_NVIDIA=1
+        echo "NVIDIA drivers detected; enabling Distrobox NVIDIA integration."
+    fi
+
+    if ! podman container exists "$DISTROBOX_NAME"; then
+        echo "==> Creating Ubuntu 24.04 Distrobox: $DISTROBOX_NAME"
+        DBX_CONTAINER_MANAGER=podman distrobox create "${DISTROBOX_FLAGS[@]}"
+    else
+        echo "==> Reusing existing Distrobox: $DISTROBOX_NAME"
+    fi
+
+    echo "==> Entering $DISTROBOX_NAME and preparing ROS 2 Jazzy"
+    DBX_CONTAINER_MANAGER=podman distrobox enter --name "$DISTROBOX_NAME" -- \
+        env ACTIVESLAM_DISTROBOX_BOOTSTRAP=1 \
+        ACTIVESLAM_EXPECT_NVIDIA="$ACTIVESLAM_EXPECT_NVIDIA" \
+        bash "$REPO_ROOT/tools/setup_jazzy_distrobox_guest.sh" \
+        "$REPO_ROOT" "${ORIGINAL_ARGS[@]}"
+    exit $?
+}
+
+unsupported_environment() {
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        return 0
+    fi
+
+    echo "ActiveSlam needs ROS 2 Jazzy on Ubuntu 24.04 with Python 3.12."
+    echo "This shell has ROS_DISTRO='${ROS_DISTRO:-unset}' and" \
+         "$(/usr/bin/python3 --version 2>&1 || echo 'no /usr/bin/python3')."
+    echo ""
+    echo "Distrobox setup will install Podman if needed, run Distrobox's official"
+    echo "curl installer with sudo, create an Ubuntu 24.04 container, enable NVIDIA"
+    echo "integration when detected, install ROS 2 Jazzy, and resume bootstrap."
+    printf "Set up and use the '%s' Distrobox now? [y/N] " "$DISTROBOX_NAME"
+    read -r DISTROBOX_REPLY
+    case "$DISTROBOX_REPLY" in
+        y|Y|yes|YES|Yes) setup_distrobox_and_continue ;;
+    esac
+    return 0
+}
 
 usage() {
     cat <<EOF
@@ -92,15 +170,10 @@ while [ $# -gt 0 ]; do
 done
 
 echo "==> 1/8 Sanity checks"
-if ! command -v ros2 >/dev/null 2>&1; then
-    echo "ros2 not found on PATH. Enter the ROS 2 Jazzy environment first" \
-         "(e.g. 'distrobox enter ros2-jazzy && source /opt/ros/jazzy/setup.zsh')" \
-         "and re-run this script." >&2
-    exit 1
-fi
-if [ "${ROS_DISTRO:-}" != "jazzy" ]; then
-    echo "ActiveSlam requires ROS 2 Jazzy, but ROS_DISTRO is" \
-         "'${ROS_DISTRO:-unset}'. Enter a Jazzy/Ubuntu 24.04 shell, source" \
+if ! command -v ros2 >/dev/null 2>&1 || [ "${ROS_DISTRO:-}" != "jazzy" ] || \
+   [ ! -x "$SYSTEM_PYTHON" ] || ! python_is_expected "$SYSTEM_PYTHON"; then
+    unsupported_environment
+    echo "Unsupported environment. Enter ROS 2 Jazzy on Ubuntu 24.04, source" \
          "'/opt/ros/jazzy/setup.bash' (or setup.zsh), and re-run this script." >&2
     exit 1
 fi
@@ -108,22 +181,6 @@ if ! command -v rosdep >/dev/null 2>&1; then
     echo "rosdep not found. Install it first:" \
          "'sudo apt install python3-rosdep && sudo rosdep init && rosdep update'" \
          "(see docs/INSTALL.md)." >&2
-    exit 1
-fi
-
-# A venv isolates packages but keeps the Python implementation/version it was
-# created from. The supported Jazzy/Ubuntu 24.04 environment supplies Python
-# 3.12, and we select that exact interpreter below. Catch an
-# Ubuntu 22.04/Humble-style Python 3.10 environment before uv produces a much
-# less actionable dependency-resolution error.
-python_is_expected() {
-    "$1" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'
-}
-if [ ! -x "$SYSTEM_PYTHON" ] || ! python_is_expected "$SYSTEM_PYTHON"; then
-    echo "ActiveSlam requires $SYSTEM_PYTHON from the supported ROS 2 Jazzy /" \
-         "Ubuntu 24.04 environment. A virtualenv does not change the Python" \
-         "version it is created from. Enter that environment and re-run this" \
-         "script." >&2
     exit 1
 fi
 
@@ -144,6 +201,18 @@ echo "==> 3/8 Python dependencies (uv virtualenv + requirements.txt)"
 if [ -n "${VIRTUAL_ENV:-}" ]; then
     VENV_DIR="$VIRTUAL_ENV"
     echo "Using the already-active virtualenv at $VENV_DIR."
+fi
+if [ -x "$VENV_DIR/bin/python" ] && ! python_is_expected "$VENV_DIR/bin/python"; then
+    VENV_PY_VERSION="$("$VENV_DIR/bin/python" --version 2>&1 || echo unknown)"
+    if [ "${ACTIVESLAM_DISTROBOX_BOOTSTRAP:-}" = "1" ]; then
+        VENV_BACKUP="${VENV_DIR}.pre-jazzy-$(date +%Y%m%d-%H%M%S)"
+        mv "$VENV_DIR" "$VENV_BACKUP"
+        echo "Moved incompatible $VENV_PY_VERSION venv to $VENV_BACKUP."
+    else
+        echo "$VENV_DIR uses $VENV_PY_VERSION instead of the required Python 3.12." \
+             "Deactivate it, move or remove that venv, and re-run bootstrap." >&2
+        exit 1
+    fi
 fi
 UV="$(command -v uv || true)"
 if [ -z "$UV" ]; then

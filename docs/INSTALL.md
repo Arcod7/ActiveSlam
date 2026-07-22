@@ -10,7 +10,12 @@ does. When something fails, see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 guide and pick the `desktop` variant — it includes RViz, which this project
 uses. On another Linux distro, a container tool like
 [distrobox](https://github.com/89luca89/distrobox) is one way to get an
-Ubuntu 24.04 userspace; that is a host-OS detail, not part of this guide.
+Ubuntu 24.04 userspace. When `bootstrap.sh` is run interactively from an
+unsupported environment (for example, Ubuntu 22.04 with ROS 2 Humble), it
+offers to install Podman and Distrobox, create an `activeslam-jazzy` Ubuntu
+24.04 container, install ROS 2 Jazzy there, and resume automatically. NVIDIA
+integration is enabled when the host driver is detected. Declining the prompt,
+or running non-interactively, leaves the host unchanged and exits.
 
 **`rosdep`**, which is not always installed alongside ROS 2 itself:
 
@@ -38,9 +43,9 @@ Run it from the repo root, inside a shell where `ros2` is on `PATH`. It is
 idempotent: re-run it after a `git pull`, or whenever a step failed and you
 have fixed the cause.
 
-1. **Sanity checks** — refuses to continue without ROS 2 Jazzy, `rosdep`, and
-   a system Python new enough for the published GTSAM wheel. Ubuntu 24.04's
-   Python 3.12 satisfies that requirement.
+1. **Sanity checks** — requires ROS 2 Jazzy, `rosdep`, and Python 3.12. In an
+   interactive unsupported shell, offers the Distrobox handoff described
+   above before exiting.
 2. **Submodules** — initialises the two required ones, `external/stonefish`
    (the patched library) and `sim/stonefish_ros2` (the patched ROS 2 bridge).
    The workspace does not build without them, so cloning with

@@ -5,6 +5,22 @@ Install steps are in [`INSTALL.md`](INSTALL.md).
 
 ## Build
 
+**Bootstrap reports an unsupported Ubuntu 22.04 / ROS 2 Humble environment**
+
+Accept the interactive Distrobox prompt. It uses Podman and Distrobox's
+official curl installer, creates an Ubuntu 24.04 container named
+`activeslam-jazzy`, enables NVIDIA integration when the host driver is
+detected, installs ROS 2 Jazzy, and resumes bootstrap inside it. Later, enter
+the same environment with:
+
+```bash
+distrobox enter activeslam-jazzy
+source /opt/ros/jazzy/setup.bash
+```
+
+The prompt appears only on a terminal; non-interactive invocations fail rather
+than installing host software unexpectedly.
+
 **`gtsam==4.2.1 has no wheels with a matching Python implementation tag`
 (for example, `cp310`)**
 
