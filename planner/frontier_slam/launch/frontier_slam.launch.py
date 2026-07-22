@@ -327,8 +327,8 @@ def generate_launch_description():
         ),
         Node(
             package='frontier_slam',
-            executable='wall_follower',
-            name='wall_follower',
+            executable='wall_looking',
+            name='wall_looking',
             output='screen',
             parameters=[{
                 'depth_setpoint': _float_parameter('depth'),

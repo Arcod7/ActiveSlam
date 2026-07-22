@@ -19,7 +19,7 @@ Published topics:
   /tsdf/surface_normals_cloud  (sensor_msgs/PointCloud2)
                                  fields x y z normal_x normal_y normal_z —
                                  the same sampled points + normals in machine-
-                                 readable form, consumed by wall_follower
+                                 readable form, consumed by wall_looking
   /tsdf/voxels           (visualization_msgs/MarkerArray)
                            single CUBE_LIST at the true voxel resolution (fixed
                            size — a size varying with weight is what made

@@ -10,14 +10,14 @@ declared arguments without a terminal. Pure standard library.
 # change can be pushed with `ros2 param set` instead of restarting the group.
 # (node basename, node parameter name)
 LIVE = {
-    "wall_standoff":             ("wall_follower", "standoff_m"),
-    "wall_switch_goal_distance": ("wall_follower", "switch_goal_distance_m"),
-    "wall_switch_scan_angle":    ("wall_follower", "switch_scan_angle_rad"),
-    "wall_switch_scan_yaw":      ("wall_follower", "switch_scan_yaw"),
-    "wall_path_influence":       ("wall_follower", "path_influence"),
-    "wall_path_look_offset_deg": ("wall_follower", "path_look_offset_deg"),
-    "wall_normal_offset_deg":    ("wall_follower", "wall_normal_offset_deg"),
-    "wall_path_heading_weight":  ("wall_follower", "path_heading_weight"),
+    "wall_standoff":             ("wall_looking", "standoff_m"),
+    "wall_switch_goal_distance": ("wall_looking", "switch_goal_distance_m"),
+    "wall_switch_scan_angle":    ("wall_looking", "switch_scan_angle_rad"),
+    "wall_switch_scan_yaw":      ("wall_looking", "switch_scan_yaw"),
+    "wall_path_influence":       ("wall_looking", "path_influence"),
+    "wall_path_look_offset_deg": ("wall_looking", "path_look_offset_deg"),
+    "wall_normal_offset_deg":    ("wall_looking", "wall_normal_offset_deg"),
+    "wall_path_heading_weight":  ("wall_looking", "path_heading_weight"),
 }
 
 
@@ -96,11 +96,13 @@ PARAMS = [
           "How the planned path is followed. default drives straight down the "
           "path. walloriented follows it while yawing toward the nearest "
           "mapped surface. walllooking blends the wall tangent with the path "
-          "and needs TSDF normals.",
+          "and needs TSDF normals — it is work in progress: an A/B under it "
+          "showed loop closure increasing trajectory error, attributed to "
+          "perceptual aliasing along a self-similar wall.",
           ["default", "walloriented", "walllooking"],
           {"default": "Direct path following, heading along travel.",
            "walloriented": "Path following with a fixed yaw offset toward the wall.",
-           "walllooking": "Wall-tangent/path blend; consumes TSDF surface normals."},
+           "walllooking": "WIP — wall-tangent/path blend; consumes TSDF normals."},
           visible=_frontier),
     Param("scan_style", "Scan style", "enum", "sweep", "frontier",
           "Rotation used when scanning at a waypoint. sweep is the cable-safe "
@@ -237,7 +239,9 @@ DEFAULTS = {p.id: p.default for p in PARAMS}
 PRESETS = [
     ("Teleop + OctoMap (default)", {}),
     ("Autonomous frontier (TSDF)", {"mode": "frontier", "mapper": "tsdf"}),
-    ("Wall-looking exploration",
+    ("Wall-oriented exploration",
+     {"mode": "frontier", "mapper": "tsdf", "motion": "walloriented"}),
+    ("Wall-looking exploration (WIP)",
      {"mode": "frontier", "mapper": "tsdf", "motion": "walllooking"}),
     ("SLAM benchmark (realistic)",
      {"slam": "slam", "mode": "frontier", "noise_profile": "realistic"}),
@@ -281,8 +285,8 @@ INFOS = [
         "Frontier search  boundary between known-free and unknown space",
         "                 on the occupancy map.",
         "A*               grid path planning to the selected frontier.",
-        "Executors        direct, wall-oriented, or wall-looking (the",
-        "                 last consumes TSDF surface normals).",
+        "Executors        direct, wall-oriented, or wall-looking (WIP;",
+        "                 consumes TSDF surface normals).",
         "Safety gate      fail-closed: blocks stale, oversized or",
         "                 odometry-less commands.",
     ]),

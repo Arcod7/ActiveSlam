@@ -1,7 +1,7 @@
 """
 Forward path controller with a fixed viewing offset toward the nearest wall.
 
-Unlike ``wall_follower``, this controller does not estimate wall normals,
+Unlike ``wall_looking``, this controller does not estimate wall normals,
 regulate standoff, or alter the planner route.  It follows the same path as
 the ordinary waypoint controller while yawing ``look_offset_deg`` to the left
 or right of the route bearing.  The nearest occupied/surface point in the map

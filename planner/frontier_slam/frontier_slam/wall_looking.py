@@ -70,7 +70,7 @@ CSV_COLUMNS = [
 _NORMAL_FIELDS = ('x', 'y', 'z', 'normal_x', 'normal_y', 'normal_z')
 
 
-class WallFollower(Node):
+class WallLooking(Node):
     # P-gains
     KP_YAW      = 0.07   # same heading gain as waypoint_controller
     KP_STANDOFF = 0.50   # standoff-distance error → approach speed
@@ -94,7 +94,7 @@ class WallFollower(Node):
     LOG_EVERY_N_TICKS   = 10     # CSV row rate = CTRL_HZ / this → 1 Hz
 
     def __init__(self) -> None:
-        super().__init__('wall_follower')
+        super().__init__('wall_looking')
 
         self.declare_parameter('standoff_m',    1.5)
         self.declare_parameter('tangent_speed', 0.15)
@@ -155,7 +155,7 @@ class WallFollower(Node):
         self._switched_for_goal = False
         self._tick = 0
 
-        self._log = open_session_log('wall_follower', CSV_COLUMNS, _LOG_DIR)
+        self._log = open_session_log('wall_looking', CSV_COLUMNS, _LOG_DIR)
 
         self.create_subscription(PointCloud2, normals_topic,             self._cloud_cb, 1)
         self.create_subscription(Odometry,    odom_topic,                self._odom_cb,  10)
@@ -167,7 +167,7 @@ class WallFollower(Node):
 
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
         self.get_logger().info(
-            f'wall_follower ready — standoff={self._standoff:.1f}m '
+            f'wall_looking ready — standoff={self._standoff:.1f}m '
             f'tangent_speed={self._tan_speed:.2f} direction={self._direction:+d} '
             f'goal_topic={goal_topic} path_topic={path_topic} '
             f'— logging to {self._log.path}'
@@ -631,7 +631,7 @@ def _parse_normals_cloud(msg: PointCloud2) -> 'tuple[np.ndarray, np.ndarray] | t
 
 def main(args=None) -> None:
     rclpy.init(args=args)
-    node = WallFollower()
+    node = WallLooking()
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):

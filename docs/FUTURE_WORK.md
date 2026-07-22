@@ -4,22 +4,26 @@ Items investigated or prototyped during the project but deliberately left
 outside the delivered scope. Each entry records what exists, why it was
 parked, and what completing it would take.
 
-## Wall-guided motion executors
+## Wall-looking motion executor (work in progress)
 
-`motion:=walllooking` (`wall_follower.py`) and `motion:=walloriented`
-(`wall_oriented_controller.py`) are implemented behind the motion-executor
-interface and unit-tested, but are no longer part of the evaluated system.
-An A/B benchmark under wall-following motion (`matrix_lc_ab_wallfollow`)
-showed loop closure *increasing* trajectory error (final ATE 0.405 m with
-closures vs 0.200 m without, 437 closure edges on a small physical loop),
-the opposite of the drift-and-return result. The leading explanation is
-perceptual aliasing: a wall observed at a constant standoff is locally
-self-similar, so proximity-gated scan matching can accept constraints
-between different points along the surface. Confirming that hypothesis needs
-per-closure inlier diagnostics; until then wall-guided motion is not a
-reliable evaluation setting. The executors may be removed from the tree to
-simplify the motion stack; this entry and the git history preserve the
-finding either way.
+`motion:=walllooking` (`wall_looking.py`) is implemented behind the
+motion-executor interface and unit-tested, but is not part of the evaluated
+system. An A/B benchmark under it (`matrix_lc_ab_wallfollow`, whose
+`motion: wallfollow` is the `walllooking` alias) showed loop closure
+*increasing* trajectory error (final ATE 0.405 m with closures vs 0.200 m
+without, 437 closure edges on a small physical loop), the opposite of the
+drift-and-return result. The leading explanation is perceptual aliasing: a
+wall observed at a constant standoff is locally self-similar, so
+proximity-gated scan matching can accept constraints between different
+points along the surface. Confirming that hypothesis needs per-closure
+inlier diagnostics; until then wall-looking is not a reliable evaluation
+setting, and it stays selectable but marked WIP in the launcher.
+
+`motion:=walloriented` (`wall_oriented_controller.py`) is a supported
+executor and is *not* covered by that finding — the A/B above never ran
+under it. It follows the planner path while holding a fixed yaw offset
+toward the nearest mapped surface, which keeps the sonar on structure
+without changing the travel policy.
 
 ## Submap saliency descriptors (FPFH)
 

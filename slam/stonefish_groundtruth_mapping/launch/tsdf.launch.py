@@ -7,7 +7,7 @@ Full TSDF mapping stack: Stonefish + TF + point cloud + tsdf_mapper.
          tsdf_mapper (VDBFusion) → /tsdf/surface_cloud          (marching-cubes surface)
                                   → /tsdf/surface_normals        (sampled normals, MarkerArray)
                                   → /tsdf/surface_normals_cloud  (points+normals, PointCloud2 —
-                                                                  input for wall_follower)
+                                                                  input for wall_looking)
                                   → /tsdf/voxels                 (weight/sign-coded MarkerArray)
 
 Thin composition of pointcloud.launch.py and mapper_only.launch.py

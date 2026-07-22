@@ -54,9 +54,13 @@ what the remaining schedule looks like:
    dissertation quotes must all come from after the calibration fix.
 2. Presentation demo scene. The shipwreck-world attempt is parked: the 289 MB /
    2.3M-face mesh stalls Stonefish once it enters the sonar's view, so it needs
-   a decimated asset or a different target object.
-3. Wall-guided executors stay descoped (`docs/FUTURE_WORK.md`) — not modified,
-   tested, or benchmarked.
+   a decimated asset or a different target object. A reference-trajectory
+   mission (follow a known loop, break off to close a loop when uncertain) is
+   the intended replacement — see `docs/plans/plan.md` Batch 8.
+3. Wall-guided executors stay out of the evaluated matrix.
+   `motion:=walloriented` is supported; `motion:=walllooking` is work in
+   progress and carries the loop-closure-inversion finding
+   (`docs/FUTURE_WORK.md`).
 
 ---
 
@@ -81,7 +85,7 @@ the band-aids caused by using Euclidean distance as if it were travel cost.
       path-length score, (b) Euclidean stuck metric → remaining-path-length progress,
       (c) A*-fail reachability heuristic (unreachable = ∞ cost), (d) `nearest_free` scan.
       Lets you delete the Ch39 displacement-reset and the A*-fail-count blacklist.
-- [x] **Wall-normal + standoff targeting** (Ch55, `wall_follower.py`) — closed-loop kinematic
+- [x] **Wall-normal + standoff targeting** (Ch55, `wall_looking.py`) — closed-loop kinematic
       test passes; still needs an end-to-end Stonefish session per `Sessions.md`.
 
 Done when: a session reports coverage %, ATE, and map error; selection/stuck use path length;
