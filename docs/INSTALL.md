@@ -147,10 +147,17 @@ submap descriptors or point-cloud registration.
 Two things can go wrong on aarch64, neither of them specific to this project:
 
 - `import open3d` raising `cannot allocate memory in static TLS block`.
-  The module reserves initial-exec thread-local storage that the loader cannot
-  place after the fact; on a kernel with 16 KB pages there is less surplus to
-  take it from. Raise the loader's reserve for the process:
+  Raise the loader's reserve for the process:
   `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2097152`.
+
+  Upgrading Open3D does not avoid this. Its own fix
+  (`add_compile_options("-ftls-model=global-dynamic")` under `LINUX_AARCH64`)
+  is identical in v0.19.0 and on `main`, and no commit since has touched static
+  TLS. The built module needs 12 KB of thread-local storage and carries a
+  single initial-exec relocation (`R_AARCH64_TLS_TPREL64`) against nine
+  well-behaved `TLSDESC` ones; that one relocation forces the whole block into
+  the static TLS area at `dlopen`, and a 16 KB-page kernel leaves less surplus
+  to satisfy it from. It is not in any of the bundled static libraries.
 - VTK's download failing with `SSL connect error` from inside a container that
   reaches other hosts fine. Fetch
   `https://vtk.org/files/release/9.1/VTK-9.1.0.tar.gz` from the host into
