@@ -1,7 +1,7 @@
 #!/bin/bash
 # Idempotent install helper — collapses docs/INSTALL.md into one command.
-# Everything a default run needs happens without flags, Stonefish included;
-# vdbfusion and Open3D are opt-in, being heavy builds nothing needs by default.
+# Everything a default run needs happens without flags — Stonefish and
+# vdbfusion included. Open3D stays opt-in: nothing in a default run uses it.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,7 +34,10 @@ STONEFISH_DIR="$REPO_ROOT/external/stonefish"
 STONEFISH_ROS2_DIR="$REPO_ROOT/sim/stonefish_ros2"
 STONEFISH_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
 
-WITH_VDBFUSION=false
+# vdbfusion backs mapper:=tsdf, which the launcher offers by default, so it is
+# installed like GTSAM rather than behind a flag: wheel first, source only where
+# no wheel matches. --skip-vdbfusion opts out.
+SKIP_VDBFUSION=false
 VDBFUSION_DIR="$REPO_ROOT/external/vdbfusion"
 
 WITH_OPEN3D=false
@@ -130,6 +133,37 @@ install_gtsam() {
     "$VENV_PY" -c 'import gtsam; print("GTSAM Python bindings:", gtsam.__file__)'
 }
 
+install_vdbfusion() {
+    # Same shape as install_gtsam: a wheel where one exists, the pinned source
+    # submodule otherwise. vdbfusion publishes x86_64 wheels only, and only up
+    # to CPython 3.10, so Humble on x86_64 gets the wheel and everything else
+    # builds — which needs OpenVDB and a C++ toolchain.
+    if "$VENV_PY" -c 'import vdbfusion' >/dev/null 2>&1; then
+        echo "Already installed."
+        return
+    fi
+
+    if "$UV" pip install --python "$VENV_PY" "vdbfusion==$VDBFUSION_WHEEL_VERSION"; then
+        return
+    fi
+
+    echo "No compatible vdbfusion $VDBFUSION_WHEEL_VERSION wheel; building from" \
+         "the external/vdbfusion submodule."
+    sudo apt-get install -y build-essential cmake libeigen3-dev libtbb-dev \
+        libblosc-dev libboost-iostreams-dev
+    if [ "$VDBFUSION_DIR" = "$REPO_ROOT/external/vdbfusion" ] \
+       && { [ -f "$REPO_ROOT/.git" ] || [ -d "$REPO_ROOT/.git" ]; }; then
+        ( cd "$REPO_ROOT" && git submodule update --init external/vdbfusion )
+    fi
+    if [ ! -f "$VDBFUSION_DIR/setup.py" ] && [ ! -f "$VDBFUSION_DIR/pyproject.toml" ]; then
+        echo "$VDBFUSION_DIR has no vdbfusion sources in it. Initialise the" \
+             "external/vdbfusion submodule and re-run." >&2
+        exit 1
+    fi
+    "$UV" pip install --python "$VENV_PY" "$VDBFUSION_DIR"
+    "$VENV_PY" -c 'import vdbfusion; print("vdbfusion:", vdbfusion.__file__)'
+}
+
 setup_distrobox_and_continue() {
     if [ -e /run/.containerenv ] || [ -e /.dockerenv ]; then
         echo "This shell is already inside a container. Exit it and re-run" \
@@ -207,7 +241,8 @@ usage() {
 Usage: ./bootstrap.sh [options]
 
 With no options it does everything a default run needs: submodules, Python
-deps, rosdep, the patched Stonefish (unless already installed), colcon build.
+deps, rosdep, the patched Stonefish (unless already installed), vdbfusion,
+colcon build.
 
   --skip-stonefish         Do not build or install Stonefish. Use when it is
                             installed somewhere CMake finds but this script
@@ -217,10 +252,11 @@ deps, rosdep, the patched Stonefish (unless already installed), colcon build.
                             not).
   --stonefish-dir <path>   Use an existing Stonefish checkout instead of the
                             submodule (default: $STONEFISH_DIR).
-  --with-vdbfusion         Build + pip install the vdbfusion submodule (needed
-                            for mapper:=tsdf; heavy — needs OpenVDB and a C++
-                            toolchain). The only option on aarch64, where no
-                            wheel is published.
+  --skip-vdbfusion         Do not install vdbfusion. mapper:=tsdf needs it, and
+                            without it that mapper exits on import. Installed
+                            from a wheel where one matches; elsewhere (aarch64,
+                            CPython 3.11+) built from the submodule, which is
+                            heavy — it needs OpenVDB and a C++ toolchain.
   --vdbfusion-dir <path>   Use an existing vdbfusion checkout instead of the
                             submodule (default: $VDBFUSION_DIR).
   --with-open3d            Build + pip install the Open3D submodule (FPFH
@@ -243,7 +279,9 @@ while [ $# -gt 0 ]; do
         # Accepted for compatibility: building Stonefish is now the default.
         --build-stonefish) shift ;;
         --stonefish-dir) STONEFISH_DIR="$2"; shift 2 ;;
-        --with-vdbfusion) WITH_VDBFUSION=true; shift ;;
+        --skip-vdbfusion) SKIP_VDBFUSION=true; shift ;;
+        # Accepted for compatibility: installing vdbfusion is now the default.
+        --with-vdbfusion) shift ;;
         --vdbfusion-dir) VDBFUSION_DIR="$2"; shift 2 ;;
         --with-open3d) WITH_OPEN3D=true; shift ;;
         --open3d-dir) OPEN3D_DIR="$2"; shift 2 ;;
@@ -271,9 +309,9 @@ if ! command -v rosdep >/dev/null 2>&1; then
 fi
 
 echo "==> 2/8 Submodules (patched Stonefish + ROS 2 bridge)"
-# Only the two required submodules by default. vdbfusion and Open3D are init'd
-# by --with-vdbfusion/--with-open3d instead: Open3D alone is ~350 MB, which is
-# a long clone to impose on everyone for an optional feature.
+# Only the two required submodules by default. vdbfusion is init'd on demand,
+# by the fallback in install_vdbfusion, and Open3D by --with-open3d: Open3D
+# alone is ~350 MB, a long clone to impose on everyone for an optional feature.
 REQUIRED_SUBMODULES="external/stonefish sim/stonefish_ros2"
 if [ -f "$REPO_ROOT/.gitmodules" ] && [ -d "$REPO_ROOT/.git" ] || \
    [ -f "$REPO_ROOT/.git" ]; then
@@ -409,17 +447,10 @@ else
 fi
 
 echo "==> 6/8 vdbfusion (mapper:=tsdf)"
-if [ "$WITH_VDBFUSION" = true ]; then
-    if [ "$VDBFUSION_DIR" = "$REPO_ROOT/external/vdbfusion" ]; then
-        ( cd "$REPO_ROOT" && git submodule update --init external/vdbfusion )
-    fi
-    if [ ! -f "$VDBFUSION_DIR/setup.py" ] && [ ! -f "$VDBFUSION_DIR/pyproject.toml" ]; then
-        echo "$VDBFUSION_DIR has no vdbfusion sources in it." >&2
-        exit 1
-    fi
-    "$UV" pip install --python "$VENV_PY" "$VDBFUSION_DIR"
+if [ "$SKIP_VDBFUSION" = true ]; then
+    echo "Skipped (--skip-vdbfusion). mapper:=tsdf will not run."
 else
-    echo "Skipped (pass --with-vdbfusion; only needed for mapper:=tsdf)."
+    install_vdbfusion
 fi
 
 echo "==> 7/8 Open3D (FPFH descriptors)"

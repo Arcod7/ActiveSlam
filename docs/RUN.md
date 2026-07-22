@@ -96,7 +96,7 @@ ros2 launch bringup demo.launch.py mode:=frontier motion:=walloriented \
   wall_orientation_offset_deg:=30                                 # follow path, look toward nearest wall
 ```
 
-`mapper:=tsdf` needs vdbfusion — `./bootstrap.sh --with-vdbfusion`.
+`mapper:=tsdf` needs vdbfusion, which `./bootstrap.sh` installs by default.
 
 Wall-guided path executors (`motion:=walloriented|walllooking`) are outside the
 evaluated scope of this project — see [`FUTURE_WORK.md`](FUTURE_WORK.md).

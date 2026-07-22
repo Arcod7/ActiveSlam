@@ -118,6 +118,16 @@ head -1 install/slam_backend/lib/slam_backend/pose_graph
 
 If that is not the venv's python, rebuild as above, or re-run `./bootstrap.sh`.
 
+If the shebang *is* right, the package is simply absent — check directly:
+
+```bash
+<workspace>/.venv/bin/python -c "import vdbfusion"
+```
+
+`./bootstrap.sh` installs vdbfusion by default, but a workspace bootstrapped
+before that was the case, or with `--skip-vdbfusion`, will not have it, and
+`mapper:=tsdf` exits on import. Re-run `./bootstrap.sh`.
+
 Note that the apt `colcon` has a `/usr/bin/python3` shebang of its own, so it
 builds with the system interpreter no matter which venv is active.
 `requirements.txt` therefore installs `colcon` *into* the venv, which is what
@@ -206,9 +216,10 @@ uses a uv virtualenv at `<workspace>/.venv` for exactly this reason —
 **`pip install vdbfusion` or `pip install open3d` finds no matching
 distribution**
 
-Expected: neither publishes a wheel this project can use (see
-[`INSTALL.md`](INSTALL.md#optional-components)). Build from the pinned
-submodules with `./bootstrap.sh --with-vdbfusion` / `--with-open3d`.
+Expected on aarch64 and on CPython 3.11+ (see
+[`INSTALL.md`](INSTALL.md#optional-components)). `./bootstrap.sh` handles
+vdbfusion itself, falling back to the pinned submodule when no wheel matches;
+Open3D needs `--with-open3d`.
 
 ## aarch64 (Apple Silicon, Raspberry Pi)
 

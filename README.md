@@ -48,7 +48,7 @@ cd ActiveSlam && ./bootstrap.sh
 dependencies in a uv virtualenv, rosdep, the patched Stonefish (built and
 installed unless it already is), and the colcon build. Copy the out-of-band
 meshes in with `--meshes-from <path-to-an-existing-checkout>/sim/world/data/obj`, and add
-`--with-vdbfusion` if you want the TSDF mapper. `./bootstrap.sh --help` lists
+`--with-open3d` if you want FPFH descriptors. `./bootstrap.sh --help` lists
 the rest.
 
 Then, in every new shell:
