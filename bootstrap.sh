@@ -1,7 +1,7 @@
 #!/bin/bash
 # Idempotent install helper — collapses docs/INSTALL.md into one command.
-# Fast/testable path (deps + rosdep + colcon build) runs by default; the heavy
-# C++ builds (patched Stonefish, vdbfusion, Open3D) are opt-in via flags.
+# Everything a default run needs happens without flags, Stonefish included;
+# vdbfusion and Open3D are opt-in, being heavy builds nothing needs by default.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,10 +15,13 @@ else
          "for the standard layout (see docs/INSTALL.md)." >&2
 fi
 
-# Stonefish, vdbfusion and Open3D are git submodules under external/, pinned to exact
-# commits, so there is nothing to clone or patch by hand and the versions cannot
-# drift from what this repo was tested against.
-BUILD_STONEFISH=false
+# Stonefish, vdbfusion and Open3D are git submodules under external/, pinned to
+# exact commits, so there is nothing to clone or patch by hand and the versions
+# cannot drift from what this repo was tested against.
+# Stonefish is not optional — the workspace does not build without it — so it is
+# built on demand rather than behind a flag: skipped when already installed,
+# built when not. --skip-stonefish forces the skip for an install CMake cannot find.
+SKIP_STONEFISH=false
 STONEFISH_DIR="$REPO_ROOT/external/stonefish"
 STONEFISH_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
 
@@ -41,11 +44,13 @@ usage() {
     cat <<EOF
 Usage: ./bootstrap.sh [options]
 
-Fast path (default): pip deps, rosdep, colcon build.
+With no options it does everything a default run needs: submodules, Python
+deps, rosdep, the patched Stonefish (unless already installed), colcon build.
 
-  --build-stonefish        Build the patched Stonefish submodule and install it
-                            (heavy C++ build; needs Stonefish's own 3rdparty
-                            dependencies).
+  --skip-stonefish         Do not build or install Stonefish. Use when it is
+                            installed somewhere CMake finds but this script
+                            does not look (it checks for StonefishConfig.cmake
+                            under the usual prefixes).
   --stonefish-dir <path>   Use an existing Stonefish checkout instead of the
                             submodule (default: $STONEFISH_DIR).
   --with-vdbfusion         Build + pip install the vdbfusion submodule (needed
@@ -70,7 +75,9 @@ EOF
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --build-stonefish) BUILD_STONEFISH=true; shift ;;
+        --skip-stonefish) SKIP_STONEFISH=true; shift ;;
+        # Accepted for compatibility: building Stonefish is now the default.
+        --build-stonefish) shift ;;
         --stonefish-dir) STONEFISH_DIR="$2"; shift 2 ;;
         --with-vdbfusion) WITH_VDBFUSION=true; shift ;;
         --vdbfusion-dir) VDBFUSION_DIR="$2"; shift 2 ;;
@@ -97,10 +104,15 @@ if ! command -v rosdep >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "==> 2/8 Submodules (pinned Stonefish + vdbfusion + Open3D sources)"
+echo "==> 2/8 Submodules (patched Stonefish + ROS 2 bridge)"
+# Only the two required submodules by default. vdbfusion and Open3D are init'd
+# by --with-vdbfusion/--with-open3d instead: Open3D alone is ~350 MB, which is
+# a long clone to impose on everyone for an optional feature.
+REQUIRED_SUBMODULES="external/stonefish sim/stonefish_ros2"
 if [ -f "$REPO_ROOT/.gitmodules" ] && [ -d "$REPO_ROOT/.git" ] || \
    [ -f "$REPO_ROOT/.git" ]; then
-    ( cd "$REPO_ROOT" && git submodule update --init --recursive )
+    # shellcheck disable=SC2086
+    ( cd "$REPO_ROOT" && git submodule update --init --recursive $REQUIRED_SUBMODULES )
 else
     echo "Not a git checkout, skipping submodule init."
 fi
@@ -110,14 +122,19 @@ if [ -n "${VIRTUAL_ENV:-}" ]; then
     VENV_DIR="$VIRTUAL_ENV"
     echo "Using the already-active virtualenv at $VENV_DIR."
 fi
-if ! command -v uv >/dev/null 2>&1; then
+UV="$(command -v uv || true)"
+if [ -z "$UV" ]; then
     echo "uv not found, installing it to ~/.local/bin"
     curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.local/bin:$PATH"
+    UV="$HOME/.local/bin/uv"
 fi
-if ! command -v uv >/dev/null 2>&1; then
-    echo "uv still not on PATH after install. Add ~/.local/bin to PATH" \
-         "(or install uv yourself: https://docs.astral.sh/uv/) and re-run." >&2
+# Deliberately an absolute path rather than PATH="$HOME/.local/bin:$PATH":
+# prepending that directory puts any uv-managed CPython in it ahead of
+# /usr/bin, and CMake's FindPython3 then picks an interpreter without
+# catkin_pkg, breaking the colcon build in step 8.
+if [ ! -x "$UV" ]; then
+    echo "uv is still not executable at $UV. Install it yourself" \
+         "(https://docs.astral.sh/uv/) and re-run." >&2
     exit 1
 fi
 # --allow-existing keeps this script re-runnable; --clear would discard
@@ -125,15 +142,26 @@ fi
 # --python /usr/bin/python3 is not optional: uv otherwise bases the venv on its
 # own managed CPython, whose --system-site-packages does not include Debian's
 # dist-packages — so rclpy imports and then dies on a missing PyYAML.
-uv venv --python /usr/bin/python3 --system-site-packages --allow-existing "$VENV_DIR"
+"$UV" venv --python /usr/bin/python3 --system-site-packages --allow-existing "$VENV_DIR"
 VENV_PY="$VENV_DIR/bin/python"
-uv pip install --python "$VENV_PY" -r "$REPO_ROOT/requirements.txt"
+"$UV" pip install --python "$VENV_PY" -r "$REPO_ROOT/requirements.txt"
 
 echo "==> 4/8 rosdep (workspace root: $WS_ROOT)"
 ( cd "$WS_ROOT" && rosdep install --from-paths src -i -y )
 
 echo "==> 5/8 Patched Stonefish"
-if [ "$BUILD_STONEFISH" = true ]; then
+stonefish_installed() {
+    for prefix in /usr/local /usr /opt/stonefish; do
+        [ -f "$prefix/lib/cmake/Stonefish/StonefishConfig.cmake" ] && return 0
+    done
+    return 1
+}
+if [ "$SKIP_STONEFISH" = true ]; then
+    echo "Skipped (--skip-stonefish)."
+elif stonefish_installed; then
+    echo "Already installed, skipping the build. Force a rebuild by removing" \
+         "$STONEFISH_DIR/build and the installed StonefishConfig.cmake."
+else
     if [ ! -d "$STONEFISH_DIR/Library" ]; then
         echo "$STONEFISH_DIR looks empty. Run" \
              "'git submodule update --init external/stonefish' first," \
@@ -150,34 +178,35 @@ if [ "$BUILD_STONEFISH" = true ]; then
     # which only resolves against an installed StonefishConfig.cmake.
     sudo cmake --install "$STONEFISH_DIR/build"
     echo "Stonefish built and installed from $STONEFISH_DIR/build."
-else
-    echo "Skipped (pass --build-stonefish to build the pinned submodule)."
 fi
 
 echo "==> 6/8 vdbfusion (mapper:=tsdf)"
 if [ "$WITH_VDBFUSION" = true ]; then
+    if [ "$VDBFUSION_DIR" = "$REPO_ROOT/external/vdbfusion" ]; then
+        ( cd "$REPO_ROOT" && git submodule update --init external/vdbfusion )
+    fi
     if [ ! -f "$VDBFUSION_DIR/setup.py" ] && [ ! -f "$VDBFUSION_DIR/pyproject.toml" ]; then
-        echo "$VDBFUSION_DIR looks empty. Run" \
-             "'git submodule update --init external/vdbfusion' first," \
-             "or point --vdbfusion-dir at an existing checkout." >&2
+        echo "$VDBFUSION_DIR has no vdbfusion sources in it." >&2
         exit 1
     fi
-    uv pip install --python "$VENV_PY" "$VDBFUSION_DIR"
+    "$UV" pip install --python "$VENV_PY" "$VDBFUSION_DIR"
 else
     echo "Skipped (pass --with-vdbfusion; only needed for mapper:=tsdf)."
 fi
 
 echo "==> 7/8 Open3D (FPFH descriptors)"
 if [ "$WITH_OPEN3D" = true ]; then
+    if [ "$OPEN3D_DIR" = "$REPO_ROOT/external/open3d" ]; then
+        echo "Fetching the Open3D submodule (~350 MB)..."
+        ( cd "$REPO_ROOT" && git submodule update --init external/open3d )
+    fi
     if [ ! -f "$OPEN3D_DIR/CMakeLists.txt" ]; then
-        echo "$OPEN3D_DIR looks empty. Run" \
-             "'git submodule update --init external/open3d' first," \
-             "or point --open3d-dir at an existing checkout." >&2
+        echo "$OPEN3D_DIR has no Open3D sources in it." >&2
         exit 1
     fi
     # setuptools and wheel are build-time only (the pip-package target runs
     # setup.py), so they live here rather than in requirements.txt.
-    uv pip install --python "$VENV_PY" setuptools wheel
+    "$UV" pip install --python "$VENV_PY" setuptools wheel
     # BUILD_CUDA_MODULE=OFF: no CUDA on the target machines, and its absence
     # otherwise fails configuration rather than degrading.
     # Python3_EXECUTABLE: without it CMake picks whichever python3 is first on
@@ -191,7 +220,7 @@ if [ "$WITH_OPEN3D" = true ]; then
           -DBUILD_PYTHON_MODULE=ON \
           -DPython3_EXECUTABLE="$VENV_PY"
     cmake --build "$OPEN3D_DIR/build" -j "$OPEN3D_BUILD_JOBS" --target pip-package
-    uv pip install --python "$VENV_PY" \
+    "$UV" pip install --python "$VENV_PY" \
         "$OPEN3D_DIR"/build/lib/python_package/pip_package/open3d-*.whl
 else
     echo "Skipped (pass --with-open3d; only needed for FPFH descriptor work)."
@@ -228,7 +257,12 @@ else
 fi
 
 echo "==> 8/8 colcon build"
-( cd "$WS_ROOT" && colcon build --symlink-install --cmake-args -Wno-dev )
+# -DPython3_EXECUTABLE pins the system interpreter, the only one carrying
+# catkin_pkg and rclpy. Without it CMake's FindPython3 takes the first python3.x
+# on PATH, which on a machine with a uv- or pyenv-managed Python in ~/.local/bin
+# is not the system one, and every ament_cmake package fails on catkin_pkg.
+( cd "$WS_ROOT" && colcon build --symlink-install \
+    --cmake-args -Wno-dev -DPython3_EXECUTABLE=/usr/bin/python3 )
 
 echo "==> Done. Activate the virtualenv, source the workspace, then launch:"
 echo "      source $VENV_DIR/bin/activate"
