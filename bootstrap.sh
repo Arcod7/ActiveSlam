@@ -97,6 +97,7 @@ install_humble_gtsam() {
         -DGTSAM_BUILD_TESTS=OFF \
         -DGTSAM_BUILD_EXAMPLES_ALWAYS=OFF \
         -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF \
+        -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
         -DPYTHON_EXECUTABLE="$SYSTEM_PYTHON"
     cmake --build "$GTSAM_BUILD" -j "$GTSAM_BUILD_JOBS"
     sudo cmake --install "$GTSAM_BUILD"
