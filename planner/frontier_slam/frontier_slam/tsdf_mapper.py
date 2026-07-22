@@ -78,6 +78,12 @@ class TSDFMapper(Node):
         # every direction the camera sweeps produces occupied voxels at max
         # range, creating ghost geometry during rotation.
         self.declare_parameter('max_range_m', 15.0)
+        # Free-space carving for no-return pixels: synthesize a pseudo-point
+        # past the sensor max so space_carving frees the traversed voxels.
+        # vdbfusion has no carve-only ray API, so the endpoint itself writes a
+        # surface — carve_range_m keeps it outside the mapped envelope.
+        self.declare_parameter('carve_no_return', False)
+        self.declare_parameter('carve_range_m', 16.0)
         # Map rebuild consumer (pose_graph.py publisher side): off by default,
         # and never set true on the ground-truth instance (tsdf_mapper_gt) --
         # only the belief map should ever be reset+re-integrated.
@@ -97,6 +103,8 @@ class TSDFMapper(Node):
         self._max_viz      = int(self.get_parameter('max_voxels_viz').value)
         self._show_free    = bool(self.get_parameter('show_free_voxels').value)
         self._max_range    = float(self.get_parameter('max_range_m').value)
+        self._carve_no_return = bool(self.get_parameter('carve_no_return').value)
+        self._carve_range  = float(self.get_parameter('carve_range_m').value)
         voxel_size         = float(self.get_parameter('voxel_size').value)
         trunc              = float(self.get_parameter('trunc_distance').value)
         space_carving      = bool(self.get_parameter('space_carving').value)
@@ -175,6 +183,15 @@ class TSDFMapper(Node):
         # Range filter — drop points at/beyond the sensor's physical max range.
         # Those are "no-return" readings (open water), not real surfaces.
         pts_cam = pts_cam[np.linalg.norm(pts_cam, axis=1) < self._max_range]
+
+        # Appended after the range filter — these sit past max_range by design.
+        if self._carve_no_return:
+            raw = _parse_pointcloud2_raw(msg)
+            if raw is not None:
+                pseudo = synth_no_return_points(raw, msg.width, self._carve_range)
+                if len(pseudo):
+                    pts_cam = np.vstack([pts_cam, pseudo])
+
         if len(pts_cam) == 0:
             return
 
@@ -424,6 +441,75 @@ def _parse_pointcloud2(msg: PointCloud2) -> 'np.ndarray | None':
     if not np.any(valid):
         return None
     return xyz[valid].astype(np.float64)
+
+
+def _parse_pointcloud2_raw(msg: PointCloud2) -> 'np.ndarray | None':
+    """Return the organized (H*W, 3) float64 XYZ grid, NaNs kept in place."""
+    if msg.point_step < 12 or msg.width == 0:
+        return None
+    floats = msg.point_step // 4
+    data = np.frombuffer(msg.data, dtype=np.float32).reshape(-1, floats)
+    return data[:, :3].astype(np.float64)
+
+
+def fit_pinhole_intrinsics(xyz: np.ndarray, width: int) -> 'tuple | None':
+    """Recover (fx, cx, fy, cy) from an organized cloud's valid pixels.
+
+    For a pinhole camera x/z = (u - cx)/fx, so x/z is linear in the column
+    index u (and y/z in the row index v). Least-squares fitting the two lines
+    avoids duplicating the sensor's FoV/resolution as node parameters.
+    Returns None when there are too few valid pixels to fit."""
+    n = len(xyz)
+    if width <= 0 or n < width:
+        return None
+    valid = np.isfinite(xyz).all(axis=1) & (np.abs(xyz[:, 2]) > 1e-9)
+    if valid.sum() < 8:
+        return None
+    idx = np.nonzero(valid)[0]
+    u = (idx % width).astype(np.float64)
+    v = (idx // width).astype(np.float64)
+    xz = xyz[idx, 0] / xyz[idx, 2]
+    yz = xyz[idx, 1] / xyz[idx, 2]
+
+    def _line(t, s):
+        # s = t/f - c/f  =>  slope 1/f, intercept -c/f
+        if np.ptp(t) < 1e-9:
+            return None
+        slope, intercept = np.polyfit(t, s, 1)
+        if abs(slope) < 1e-12:
+            return None
+        return 1.0 / slope, -intercept / slope
+
+    x_fit, y_fit = _line(u, xz), _line(v, yz)
+    if x_fit is None or y_fit is None:
+        return None
+    return x_fit[0], x_fit[1], y_fit[0], y_fit[1]
+
+
+def synth_no_return_points(xyz: np.ndarray, width: int,
+                           carve_range_m: float) -> np.ndarray:
+    """Pseudo-points at carve_range_m along each no-return pixel's ray.
+
+    Feeding these to VDBVolume.integrate(space_carving=True) frees the voxels
+    the ray traverses. Returns an empty (0,3) array when the geometry can't be
+    recovered (no valid pixels to fit against) or nothing is missing."""
+    empty = np.empty((0, 3), dtype=np.float64)
+    if xyz is None or len(xyz) == 0:
+        return empty
+    invalid = ~np.isfinite(xyz).all(axis=1)
+    if not np.any(invalid):
+        return empty
+    intr = fit_pinhole_intrinsics(xyz, width)
+    if intr is None:
+        return empty
+    fx, cx, fy, cy = intr
+
+    idx = np.nonzero(invalid)[0]
+    u = (idx % width).astype(np.float64)
+    v = (idx // width).astype(np.float64)
+    dirs = np.column_stack([(u - cx) / fx, (v - cy) / fy, np.ones(len(idx))])
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    return dirs * carve_range_m
 
 
 def _tf_to_matrix(tf_transform) -> np.ndarray:
