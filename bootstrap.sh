@@ -96,7 +96,9 @@ install_gtsam() {
     # earlier run — a source build, or a wheel from a since-changed pin — keeps
     # importing happily, so testing importability alone pinned every machine to
     # whatever it installed first and made re-running this a no-op.
-    GTSAM_INSTALLED="$(gtsam_installed_version)"
+    # || true: nothing installed is the normal first-run state, and errexit
+    # would otherwise abort the whole bootstrap on the failed lookup.
+    GTSAM_INSTALLED="$(gtsam_installed_version || true)"
     case "$GTSAM_INSTALLED" in
         "$GTSAM_WHEEL_VERSION"|"$GTSAM_SOURCE_REF")
             echo "GTSAM $GTSAM_INSTALLED already installed."
@@ -108,6 +110,7 @@ install_gtsam() {
              "$GTSAM_WHEEL_VERSION (wheel) and $GTSAM_SOURCE_REF (source)." \
              "Replacing it with the pinned wheel."
         if "$UV" pip install --python "$VENV_PY" --reinstall \
+                -c "$REPO_ROOT/requirements.txt" \
                 "gtsam==$GTSAM_WHEEL_VERSION"; then
             return
         fi
@@ -116,7 +119,7 @@ install_gtsam() {
         # sudo install both arrive here, and they need opposite fixes.
         echo "Could not install GTSAM $GTSAM_WHEEL_VERSION; the reason is in" \
              "the output above. Keeping GTSAM $GTSAM_INSTALLED." >&2
-        gtsam_dir="$(gtsam_install_dir)"
+        gtsam_dir="$(gtsam_install_dir || true)"
         if [ -n "$gtsam_dir" ] && [ -e "$gtsam_dir" ] && [ ! -w "$gtsam_dir" ]; then
             echo "$gtsam_dir is not writable by $(id -un): an earlier install" \
                  "ran under sudo. 'sudo rm -rf $gtsam_dir'* and re-run." >&2
@@ -126,7 +129,10 @@ install_gtsam() {
         return
     fi
 
-    if "$UV" pip install --python "$VENV_PY" "gtsam==$GTSAM_WHEEL_VERSION"; then
+    # -c requirements.txt: gtsam declares numpy, and without the bound there uv
+    # installs numpy 2 into the venv over the distribution's numpy 1.
+    if "$UV" pip install --python "$VENV_PY" \
+            -c "$REPO_ROOT/requirements.txt" "gtsam==$GTSAM_WHEEL_VERSION"; then
         return
     fi
 
@@ -183,7 +189,9 @@ install_vdbfusion() {
         return
     fi
 
-    if "$UV" pip install --python "$VENV_PY" "vdbfusion==$VDBFUSION_WHEEL_VERSION"; then
+    if "$UV" pip install --python "$VENV_PY" \
+            -c "$REPO_ROOT/requirements.txt" \
+            "vdbfusion==$VDBFUSION_WHEEL_VERSION"; then
         return
     fi
 
