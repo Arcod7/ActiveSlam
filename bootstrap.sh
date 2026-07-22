@@ -114,7 +114,10 @@ install_gtsam() {
     # GTSAM's regular CMake install intentionally omits the Python module;
     # its generated package lives in build/python. Installing that prebuilt
     # package places the binding in this venv without compiling it again.
-    "$UV" pip install --python "$VENV_PY" "$GTSAM_DIR/build/python"
+    # Keep this build's cache under the selected venv. A shared uv cache may
+    # have entries created by sudo during an earlier container install.
+    UV_CACHE_DIR="$VENV_DIR/.uv-cache" \
+        "$UV" pip install --python "$VENV_PY" "$GTSAM_DIR/build/python"
     "$VENV_PY" -c 'import gtsam; print("GTSAM Python bindings:", gtsam.__file__)'
 }
 
