@@ -112,12 +112,17 @@ install_gtsam() {
     sudo ldconfig
 
     # GTSAM's regular CMake install intentionally omits the Python module;
-    # its generated package lives in build/python. Installing that prebuilt
-    # package places the binding in this venv without compiling it again.
+    # its generated package lives in build/python. Copy it first: setuptools
+    # writes egg-info beside setup.py, and that build tree may contain files
+    # created by a prior sudo install. This places the prebuilt binding in the
+    # venv without compiling it again.
+    GTSAM_PYTHON_PACKAGE="$(mktemp -d)"
+    cp -R "$GTSAM_DIR/build/python/." "$GTSAM_PYTHON_PACKAGE/"
     # Keep this build's cache under the selected venv. A shared uv cache may
     # have entries created by sudo during an earlier container install.
     UV_CACHE_DIR="$VENV_DIR/.uv-cache" \
-        "$UV" pip install --python "$VENV_PY" "$GTSAM_DIR/build/python"
+        "$UV" pip install --python "$VENV_PY" "$GTSAM_PYTHON_PACKAGE"
+    rm -rf "$GTSAM_PYTHON_PACKAGE"
     "$VENV_PY" -c 'import gtsam; print("GTSAM Python bindings:", gtsam.__file__)'
 }
 
