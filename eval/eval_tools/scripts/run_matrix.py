@@ -52,6 +52,64 @@ VALID_KEYS = {
 }
 
 
+# Node executables a previous run leaves behind if it was killed without its
+# process group. Any of these still alive means duplicate publishers on
+# /motion/body_command_safe and /tf, which silently freezes the vehicle.
+ORPHAN_PATTERNS = (
+    'stonefish_simulator', 'octomap_server_node', 'component_container',
+    'odom_tf_sync', 'cloud_relabel', 'motion_safety_gate', 'heavy_sim_mixer',
+    'pose_graph', 'tsdf_mapper', 'waypoint_controller', 'frontier_extractor',
+    'benchmark', 'map_metrics',
+)
+
+# A run that never moves produces plausible-looking CSVs, so the numbers alone
+# do not reveal it. These are floors, not targets: even a scan-in-place start
+# clears them within the first minute.
+MIN_PATH_M = 1.0
+MIN_YAW_DEG = 20.0
+MOTION_CHECK_AT_S = 90.0
+
+
+def find_orphan_nodes() -> list:
+    """Return ['pid cmdline', ...] for leftover ROS nodes from earlier runs."""
+    try:
+        out = subprocess.check_output(['ps', '-eo', 'pid,args'], text=True)
+    except Exception:
+        return []
+    mine = str(os.getpid())
+    found = []
+    for line in out.splitlines()[1:]:
+        pid, _, cmd = line.strip().partition(' ')
+        if pid == mine or 'run_matrix.py' in cmd:
+            continue
+        if any(pat in cmd for pat in ORPHAN_PATTERNS):
+            found.append(f'{pid} {cmd[:100]}')
+    return found
+
+
+def trajectory_motion(tum_path: str) -> dict:
+    """Path length, net displacement and yaw range from a TUM trajectory."""
+    zero = {'samples': 0, 'path_m': 0.0, 'net_m': 0.0, 'yaw_deg': 0.0}
+    if not os.path.exists(tum_path):
+        return zero
+    try:
+        data = np.loadtxt(tum_path, ndmin=2)
+    except Exception:
+        return zero
+    if len(data) < 2 or data.shape[1] < 8:
+        return zero
+    xy = data[:, 1:3]
+    qx, qy, qz, qw = data[:, 4], data[:, 5], data[:, 6], data[:, 7]
+    yaw = np.degrees(np.arctan2(2 * (qw * qz + qx * qy),
+                                 1 - 2 * (qy ** 2 + qz ** 2)))
+    return {
+        'samples': len(data),
+        'path_m': float(np.linalg.norm(np.diff(xy, axis=0), axis=1).sum()),
+        'net_m': float(np.linalg.norm(xy[-1] - xy[0])),
+        'yaw_deg': float(yaw.max() - yaw.min()),
+    }
+
+
 def git_sha() -> str:
     try:
         return subprocess.check_output(
@@ -115,17 +173,43 @@ def _terminate(proc: subprocess.Popen) -> None:
             return
 
 
-def _launch_and_wait(cmd: list, log_path: str, duration_s: float):
+def _launch_and_wait(cmd: list, log_path: str, duration_s: float,
+                     output_dir: str = None):
+    """Run one launch, aborting early if the vehicle never starts moving.
+
+    The motion check is the whole point of the early abort: a frozen run still
+    writes metrics.csv, map_metrics.csv and TUM files, so it is indistinguishable
+    from a real one until someone reads the trajectory. Checking at
+    MOTION_CHECK_AT_S turns an 8-minute waste into a 90-second one."""
     start = time.strftime('%Y-%m-%dT%H:%M:%S')
+    motionless = None
     with open(log_path, 'w') as log_file:
         proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT,
                                  start_new_session=True)
         try:
-            proc.wait(timeout=duration_s)
+            if output_dir and duration_s > MOTION_CHECK_AT_S * 1.5:
+                proc.wait(timeout=MOTION_CHECK_AT_S)
+            else:
+                proc.wait(timeout=duration_s)
         except subprocess.TimeoutExpired:
-            _terminate(proc)
+            if output_dir and duration_s > MOTION_CHECK_AT_S * 1.5:
+                motion = trajectory_motion(os.path.join(output_dir, 'gt_traj.tum'))
+                if (motion['path_m'] < MIN_PATH_M
+                        and motion['yaw_deg'] < MIN_YAW_DEG):
+                    motionless = motion
+                    print(f"  [abort] no motion after {MOTION_CHECK_AT_S:.0f}s "
+                          f"(path {motion['path_m']:.2f}m, yaw "
+                          f"{motion['yaw_deg']:.1f}deg) — killing this run")
+                    _terminate(proc)
+                else:
+                    try:
+                        proc.wait(timeout=duration_s - MOTION_CHECK_AT_S)
+                    except subprocess.TimeoutExpired:
+                        _terminate(proc)
+            else:
+                _terminate(proc)
     end = time.strftime('%Y-%m-%dT%H:%M:%S')
-    return start, end, proc.returncode
+    return start, end, proc.returncode, motionless
 
 
 def _count_data_rows(csv_path: str) -> int:
@@ -198,9 +282,14 @@ def _check_validity(output_dir: str, log_path: str) -> dict:
     metrics_rows = _count_data_rows(os.path.join(output_dir, 'metrics.csv'))
     map_metrics_rows = _count_data_rows(os.path.join(output_dir, 'map_metrics.csv'))
     tracebacks, benign_tracebacks = _count_tracebacks(log_path)
+    motion = trajectory_motion(os.path.join(output_dir, 'gt_traj.tum'))
 
+    # Ordered by how badly the run is broken. `motionless` outranks a traceback:
+    # a vehicle that never moved produces no usable data whatever else happened.
     if metrics_rows == 0:
         status = 'no_data'
+    elif motion['path_m'] < MIN_PATH_M and motion['yaw_deg'] < MIN_YAW_DEG:
+        status = 'motionless'
     elif metrics_rows < 30 or map_metrics_rows < 5:
         status = 'short'
     elif tracebacks > 0:
@@ -210,6 +299,9 @@ def _check_validity(output_dir: str, log_path: str) -> dict:
 
     return {'metrics_rows': metrics_rows, 'map_metrics_rows': map_metrics_rows,
             'tracebacks': tracebacks, 'benign_tracebacks': benign_tracebacks,
+            'gt_path_m': round(motion['path_m'], 3),
+            'gt_net_m': round(motion['net_m'], 3),
+            'gt_yaw_deg': round(motion['yaw_deg'], 1),
             'status': status}
 
 
@@ -225,9 +317,10 @@ def run_one(args: dict, output_dir: str, seed: int, duration_s: float,
 
     os.makedirs(output_dir, exist_ok=True)
     log_path = os.path.join(output_dir, 'launch.log')
-    manifest['start'], manifest['end'], manifest['exit_code'] = \
-        _launch_and_wait(cmd, log_path, duration_s)
+    manifest['start'], manifest['end'], manifest['exit_code'], motionless = \
+        _launch_and_wait(cmd, log_path, duration_s, output_dir)
     manifest.update(_check_validity(output_dir, log_path))
+    manifest['aborted_motionless'] = motionless is not None
     manifest['retried'] = False
 
     # One retry, only when the sim produced literally nothing (failed to
@@ -236,8 +329,8 @@ def run_one(args: dict, output_dir: str, seed: int, duration_s: float,
     if manifest['metrics_rows'] == 0:
         print(f'  [retry] {output_dir}: 0 metrics rows, retrying once')
         manifest['retried'] = True
-        manifest['start'], manifest['end'], manifest['exit_code'] = \
-            _launch_and_wait(cmd, log_path, duration_s)
+        manifest['start'], manifest['end'], manifest['exit_code'], _ = \
+            _launch_and_wait(cmd, log_path, duration_s, output_dir)
         manifest.update(_check_validity(output_dir, log_path))
 
     with open(os.path.join(output_dir, 'manifest.json'), 'w') as f:
@@ -258,6 +351,16 @@ def run_matrix(cfg: dict, batch_root: str, dry_run: bool = False) -> str:
     if not dry_run:
         os.makedirs(batch_dir, exist_ok=True)
 
+    if not dry_run:
+        orphans = find_orphan_nodes()
+        if orphans:
+            raise SystemExit(
+                'Refusing to start: ROS nodes from an earlier run are still '
+                'alive. Duplicate motion gates and TF broadcasters freeze the '
+                'vehicle, and every run in the batch would be wasted.\n  '
+                + '\n  '.join(orphans)
+                + '\nKill them (by PID, not the ros2 launch wrapper) and re-run.')
+
     total = len(cfg['runs']) * len(cfg['seeds'])
     est_hours = total * (cfg['duration_s'] + 50 + cfg['settle_s']) / 3600
     print(f"Batch '{cfg['batch_name']}' -> {batch_dir}")
@@ -276,8 +379,24 @@ def run_matrix(cfg: dict, batch_root: str, dry_run: bool = False) -> str:
             manifest['name'] = run['name']
             manifest['run_dir'] = run_dir
             manifests.append(manifest)
+            # Stop the whole batch on the first frozen run: the cause is always
+            # environmental (orphans, a closed motion gate, a stalled sim) and
+            # applies to every run that would follow.
+            if not dry_run and manifest.get('status') == 'motionless':
+                print(f"  [stop] {run_dir} never moved "
+                      f"(path {manifest.get('gt_path_m')}m, "
+                      f"yaw {manifest.get('gt_yaw_deg')}deg). "
+                      f"Aborting the batch after {i}/{total} runs.")
+                leftover = find_orphan_nodes()
+                if leftover:
+                    print('  Leftover nodes are the likely cause:\n  '
+                          + '\n  '.join(leftover))
+                break
             if not dry_run and i < total:
                 time.sleep(cfg['settle_s'])
+        else:
+            continue
+        break
 
     if not dry_run:
         aggregate(batch_dir, manifests)
@@ -320,7 +439,8 @@ def aggregate(batch_dir: str, manifests: list = None) -> None:
             m['run_dir'] = run_dir
             manifests.append(m)
 
-    fieldnames = ['name', 'seed', 'status', 'final_ate', 'mean_rpe_trans',
+    fieldnames = ['name', 'seed', 'status', 'gt_path_m', 'gt_yaw_deg',
+                  'final_ate', 'mean_rpe_trans',
                   'final_abs_error', 'final_coverage', 'final_iou', 'final_chamfer',
                   'lc_count', 'rebuild_count', 'revisit_count', 'tracebacks']
     rows = []
@@ -330,6 +450,7 @@ def aggregate(batch_dir: str, manifests: list = None) -> None:
         map_csv = os.path.join(run_dir, 'map_metrics.csv')
         rows.append({
             'name': m['name'], 'seed': m['seed'], 'status': m.get('status', 'unknown'),
+            'gt_path_m': m.get('gt_path_m'), 'gt_yaw_deg': m.get('gt_yaw_deg'),
             'final_ate': _last(metrics_csv, 'ate'),
             'mean_rpe_trans': _mean(metrics_csv, 'rpe_trans'),
             'final_abs_error': _last(metrics_csv, 'abs_error'),
