@@ -78,7 +78,7 @@ python_is_expected() {
 
 install_gtsam() {
     # Prefer a prebuilt wheel. The pinned source submodule is the portable
-    # fallback, notably for Humble's CPython 3.10 and ARM64.
+    # fallback for interpreters and architectures no wheel covers.
     if "$VENV_PY" -c 'import gtsam' >/dev/null 2>&1; then
         return
     fi

@@ -25,25 +25,27 @@ creating the Python 3.12 venv.
 The prompt appears only on a terminal; non-interactive invocations fail rather
 than installing host software unexpectedly.
 
-**`gtsam==4.2.1 has no wheels with a matching Python implementation tag`
-(for example, `cp310`)**
+**`gtsam has no wheels with a matching Python implementation tag`
+(for example, `cp39`)**
 
 The virtualenv was created from an unsupported system Python. A virtualenv
 isolates installed packages, but it retains its base interpreter and version;
-one created from Python 3.10 is still Python 3.10. GTSAM 4.2.1 has wheels for
-CPython 3.11 and newer, and the supported ROS 2 Jazzy / Ubuntu 24.04
-environment supplies Python 3.12.
+one created from Python 3.9 is still Python 3.9. The pinned GTSAM wheel
+(`GTSAM_WHEEL_VERSION` in `dependencies.conf`) covers CPython 3.10 for Humble
+and 3.12 for Jazzy, which are what those distributions supply. Anything else
+falls back to the source build.
 
 Check the shell before running bootstrap:
 
 ```bash
-echo "$ROS_DISTRO"       # jazzy
-/usr/bin/python3.12 --version  # Python 3.12.x
+echo "$ROS_DISTRO"             # jazzy or humble
+/usr/bin/python3.12 --version  # Python 3.12.x on Jazzy
+/usr/bin/python3.10 --version  # Python 3.10.x on Humble
 ```
 
-If those are correct but `<workspace>/.venv/bin/python --version` still says
-3.10, deactivate and move or remove the stale venv, then re-run
-`./bootstrap.sh`. It will recreate the venv from `/usr/bin/python3.12`.
+If those are correct but `<workspace>/.venv/bin/python --version` disagrees,
+deactivate and move or remove the stale venv, then re-run `./bootstrap.sh`. It
+will recreate the venv from the interpreter the distribution expects.
 
 **`Could not find a package configuration file provided by "Stonefish"`**
 
