@@ -186,6 +186,13 @@ def generate_launch_description():
         default_value="-1",
         description="Override the noise profile seed for slam:=slam (-1 = use the profile default)",
     )
+    carve_no_return_arg = DeclareLaunchArgument(
+        "carve_no_return",
+        default_value="false",
+        choices=["true", "false"],
+        description="TSDF only: free the voxels along no-return sonar rays "
+        "instead of leaving open water unknown",
+    )
     map_rebuild_arg = DeclareLaunchArgument(
         "map_rebuild",
         default_value="false",
@@ -635,6 +642,7 @@ def generate_launch_description():
             loop_closure_arg,
             noise_seed_arg,
             map_rebuild_arg,
+            carve_no_return_arg,
             output_dir_arg,
             revisit_arg,
             scenario_arg,

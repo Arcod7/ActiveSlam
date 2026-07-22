@@ -35,6 +35,10 @@ def generate_launch_description():
         'map_rebuild', default_value='false',
         description='Reset+re-integrate this TSDF instance after a big loop closure',
     )
+    carve_no_return_arg = DeclareLaunchArgument(
+        'carve_no_return', default_value='false',
+        description='Free the voxels along no-return sonar rays (TSDF only)',
+    )
 
     octomap = Node(
         package='octomap_server',
@@ -58,8 +62,12 @@ def generate_launch_description():
         executable='tsdf_mapper',
         name='tsdf_mapper',
         output='screen',
-        parameters=[{'enable_rebuild': LaunchConfiguration('map_rebuild')}],
+        parameters=[{
+            'enable_rebuild': LaunchConfiguration('map_rebuild'),
+            'carve_no_return': LaunchConfiguration('carve_no_return'),
+        }],
         condition=LaunchConfigurationEquals('mapper', 'tsdf'),
     )
 
-    return LaunchDescription([mapper_arg, map_rebuild_arg, octomap, tsdf_mapper])
+    return LaunchDescription([mapper_arg, map_rebuild_arg, carve_no_return_arg,
+                              octomap, tsdf_mapper])

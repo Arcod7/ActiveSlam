@@ -1,0 +1,31 @@
+# One-seed A/B for TSDF free-space carving of no-return sonar pixels
+# (tsdf_mapper.py carve_no_return, see docs/plans/plan.md Batch 6 / E1):
+# 2 configs x 1 seed = 2 runs, 5 min each.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_carve.yaml
+#
+# What to read: coverage and chamfer against the ground-truth map, plus the
+# occupied-voxel count beyond the 15 m sensor maximum — carving synthesizes a
+# pseudo-point at carve_range_m (16 m) whose endpoint writes a surface, and
+# that artefact must stay outside the mapped envelope.
+batch_name: carve
+duration_s: 300
+settle_s: 15
+seeds: [42]
+
+common_args:
+  # Motion gate is fail-closed; headless runs never arm it otherwise.
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  mapper: tsdf
+  rviz: 'false'
+  noise_profile: realistic
+  loop_closure: 'true'
+  map_rebuild: 'false'
+
+runs:
+  - name: carve_off
+    args: {carve_no_return: 'false'}
+  - name: carve_on
+    args: {carve_no_return: 'true'}

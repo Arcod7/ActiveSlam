@@ -37,6 +37,11 @@ def generate_launch_description():
         description='Reset+re-integrate this TSDF instance after a big loop closure',
     )
 
+    carve_no_return_arg = DeclareLaunchArgument(
+        'carve_no_return', default_value='false',
+        description='Free the voxels along no-return sonar rays',
+    )
+
     pointcloud = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(_LAUNCH_DIR, 'pointcloud.launch.py'))
     )
@@ -46,7 +51,9 @@ def generate_launch_description():
         launch_arguments={
             'mapper': 'tsdf',
             'map_rebuild': LaunchConfiguration('map_rebuild'),
+            'carve_no_return': LaunchConfiguration('carve_no_return'),
         }.items(),
     )
 
-    return LaunchDescription([map_rebuild_arg, pointcloud, tsdf_mapper])
+    return LaunchDescription([map_rebuild_arg, carve_no_return_arg,
+                              pointcloud, tsdf_mapper])

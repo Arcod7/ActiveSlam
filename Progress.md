@@ -939,3 +939,83 @@ tether-safety argument was never contingent on the closure count.
 Tests: 117 pass in `planner/frontier_slam/test/`, including
 `test_scan_sweep.py`'s phase-sequence, net-zero-yaw (with wraparound),
 timeout-guard, return-phase-deadline and `spin`-bypass cases.
+
+## Phase 29 — Batch-validity guards, rebuild A/B, free-space carving, uv + Open3D
+
+**Date**: 2026-07-22
+**Files**: `eval/eval_tools/scripts/run_matrix.py`,
+`eval/eval_tools/test/test_run_validity.py` (new),
+`eval/eval_tools/config/matrix_rebuild.yaml`,
+`eval/eval_tools/config/matrix_carve.yaml` (new),
+`planner/frontier_slam/frontier_slam/tsdf_mapper.py`,
+`planner/frontier_slam/test/test_carve_no_return.py` (new),
+`slam/stonefish_groundtruth_mapping/launch/{mapper_only,tsdf}.launch.py`,
+`bringup/launch/demo.launch.py`, `bootstrap.sh`, `.gitmodules`,
+`external/open3d` (new submodule), `docs/INSTALL.md`, `README.md`,
+`requirements.txt`, `.gitignore`
+
+**Batch-validity guards.** A run whose vehicle never moves still writes a full
+`metrics.csv`, `map_metrics.csv` and TUM trajectory, so the failure is
+invisible in the outputs. A six-run batch was lost to it: orphaned node stacks
+from earlier killed launches were still alive, and their duplicate motion gates
+and TF broadcasters pinned the vehicle at 0.05 m of travel and 1.7° of yaw over
+480 s. `run_matrix.py` now refuses to start while such nodes are alive (listing
+their PIDs), kills any run that has neither travelled 1 m nor swept 20° after
+90 s, and aborts the whole batch on the first motionless run, since the cause
+is environmental and applies to every run that follows. Ground-truth path
+length and yaw range are recorded per run and in `summary.csv`. The floors are
+low enough that a run still doing its initial in-place scan passes on yaw
+alone.
+
+**Rebuild A/B (`matrix_rebuild.yaml`, 3 seeds × 480 s, post-calibration).**
+All six runs clean; `eval/runs/rebuild_20260722_0157/`.
+
+| run | seed | ATE | coverage | chamfer | rebuilds |
+|---|---|---|---|---|---|
+| tsdf | 101 / 102 / 103 | 0.158 / 0.188 / 0.151 | 0.966 / 0.955 / 0.960 | 0.361 / 0.351 / 0.340 | 0 |
+| tsdf_rebuild | 101 / 102 / 103 | 0.182 / 0.156 / 0.569 | 0.958 / 0.964 / 0.742 | 0.366 / 0.372 / 0.640 | 0 / 0 / 1 |
+
+The rebuild fired in one seed of three, so five of six runs compare the
+mechanism against itself; excluding that seed the arms are indistinguishable
+(ATE 0.166 vs 0.169, coverage 0.961 vs 0.961, chamfer 0.351 vs 0.369). Where it
+did fire everything was worse, but n=1 and confounded — a rebuild only triggers
+on a large correction, i.e. on a run that had already drifted. Two arms are
+also not identical when no rebuild fires: `map_rebuild:=true` switches on
+per-scan caching regardless, and those runs show ~3.5x the final absolute error
+at matched seeds. **No rebuild-fidelity claim is made from this**; measuring it
+needs a forced trigger or a policy that reliably produces large closures.
+
+**Free-space carving (`carve_no_return`, default false).** No-return pixels
+carry information — the ray reached maximum range without hitting anything —
+but were dropped with the other NaNs, leaving open water unknown. The
+parameter synthesizes a pseudo-point along each such pixel's ray so VDBFusion's
+space carving frees the voxels it traverses, with ray directions recovered from
+intrinsics fitted to the cloud itself rather than restating the sensor's FoV.
+vdbfusion has no carve-only ray API, so each pseudo-point's endpoint also
+writes a surface; `carve_range_m` (16 m) was meant to keep that artefact past
+the 15 m sensor maximum and outside the mapped envelope.
+
+**It does not, and the reasoning was wrong.** One-seed A/B
+(`eval/runs/carve_20260722_1207/`, 300 s): coverage fell 0.952 → 0.446, chamfer
+rose 0.349 → 8.33 m, and belief-to-ground-truth RMSE 0.30 → 9.25 m. On a
+vehicle that travels ~80 m in a run, 16 m from one pose is well inside the
+volume already mapped from another, so no fixed carve range can park the
+artefact outside the map. The parameter stays off and is kept only as the
+record of a measured negative result; making this work needs carve-only rays,
+which is a vdbfusion change, not a tuning one.
+
+**Python dependencies.** `bootstrap.sh`'s `pip install` failed under PEP 668 on
+Ubuntu 24.04 — ROS 2 Jazzy's own target — so the documented one-command setup
+did not work on the platform it documents. Dependencies now install into a
+uv-managed virtualenv (`--python /usr/bin/python3` so Debian's dist-packages
+stay visible to `rclpy`, `--allow-existing` so re-runs stay idempotent). Open3D
+joins Stonefish and vdbfusion as a pinned submodule (v0.19.0) built by
+`--with-open3d`, since PyPI publishes no aarch64 wheel for it; the build needs
+CMake pointed at the venv interpreter, and pulls VTK from source because no
+aarch64 binary is published for that either. `docs/INSTALL.md` records the two
+aarch64 pitfalls: the static-TLS import failure and its glibc tunable, and
+VTK's download needing a host-side fetch behind a container that cannot
+complete the TLS handshake.
+
+Tests: 127 in `planner/frontier_slam/` and `eval/eval_tools/`, including 10 new
+run-validity cases and 8 for the carving geometry.

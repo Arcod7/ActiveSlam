@@ -48,7 +48,7 @@ VALID_KEYS = {
     'map_rebuild', 'rviz', 'revisit', 'scenario', 'scenario_out_dx', 'scenario_out_dy',
     # The motion gate is fail-closed (safety_gate.py start_enabled=False) and
     # zeroes every command until armed — sim batches must opt in explicitly.
-    'safety_start_enabled', 'scan_style', 'scan_sweep_deg',
+    'safety_start_enabled', 'scan_style', 'scan_sweep_deg', 'carve_no_return',
 }
 
 
