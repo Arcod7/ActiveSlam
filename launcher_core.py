@@ -11,12 +11,15 @@ only bounces the layers that actually depend on it; `core` (the simulator) is
 expensive to start and is never restarted by a parameter change.
 """
 
+import contextlib
+import datetime
 import math
 import os
 import signal
 import subprocess
 import sys
 import sysconfig
+import threading
 import time
 
 # Order matters: groups are started top-down and stopped bottom-up.
@@ -256,6 +259,146 @@ def build_groups(bringup_share=""):
     ]
 
 
+SESSION_POLL_INTERVAL = 0.3
+
+
+@contextlib.contextmanager
+def stderr_to(path):
+    """Point this process's fd 2 at path.
+
+    rclpy's middleware writes to the file descriptor directly, not through
+    sys.stderr, so it lands on top of the curses screen. Only fd 2 is moved:
+    curses draws through fd 1, and redirecting that would send the UI to the
+    file instead of the terminal.
+    """
+    sys.stderr.flush()
+    saved = os.dup(2)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.dup2(fd, 2)
+        yield
+    finally:
+        sys.stderr.flush()
+        os.dup2(saved, 2)
+        os.close(saved)
+        os.close(fd)
+
+
+class SessionLog:
+    """One merged, timestamped log of a whole run.
+
+    The per-group logs stay as they are; this tails them and interleaves their
+    lines with the launcher's own events, so there is a single file that tells
+    the story in order. `latest.log` always points at the newest session.
+
+    Tailing rather than sitting in the children's write path is deliberate: a
+    stalled writer here must never be able to block the simulator on a pipe.
+    """
+
+    def __init__(self, log_dir, clock=time.time):
+        self.log_dir = log_dir
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._sources = []       # (label, path, offset, pending bytes)
+        self._stop = threading.Event()
+        self._thread = None
+        os.makedirs(log_dir, exist_ok=True)
+        stamp = datetime.datetime.fromtimestamp(clock()).strftime("%Y%m%d-%H%M%S")
+        self.path = os.path.join(log_dir, f"session-{stamp}.log")
+        self._handle = open(self.path, "ab", buffering=0)
+        self._link_latest()
+
+    def _link_latest(self):
+        self.latest_path = os.path.join(self.log_dir, "latest.log")
+        try:
+            if os.path.islink(self.latest_path) or os.path.exists(self.latest_path):
+                os.unlink(self.latest_path)
+            os.symlink(os.path.basename(self.path), self.latest_path)
+        except OSError:
+            # A filesystem without symlinks still gets the session file itself.
+            self.latest_path = self.path
+
+    def _write(self, label, text):
+        stamp = datetime.datetime.fromtimestamp(self._clock()).strftime("%H:%M:%S.%f")[:-3]
+        line = f"{stamp}  {label:<14}  {text}\n"
+        with self._lock:
+            try:
+                self._handle.write(line.encode("utf-8", "replace"))
+            except (OSError, ValueError):
+                pass
+
+    def event(self, text):
+        """Record a launcher-level event: a start, a signal, an apply."""
+        self._write("launcher", text)
+
+    def follow(self, label, path, offset=0):
+        """Interleave a per-group log into the session log from offset on."""
+        with self._lock:
+            self._sources.append([label, path, offset, b""])
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+
+    def _pump(self):
+        while not self._stop.wait(SESSION_POLL_INTERVAL):
+            self.drain()
+        self.drain()
+
+    def drain(self):
+        """Copy whatever the followed logs have grown by since the last pass."""
+        with self._lock:
+            sources = list(self._sources)
+        for src in sources:
+            label, path, offset, pending = src
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            if size < offset:      # truncated underneath us; start over
+                offset = 0
+            if size == offset:
+                continue
+            try:
+                with open(path, "rb") as fh:
+                    fh.seek(offset)
+                    chunk = fh.read(size - offset)
+            except OSError:
+                continue
+            src[2] = offset + len(chunk)
+            buf = pending + chunk
+            # Hold an unterminated tail back: a line half-written when we read
+            # would otherwise be split across two entries.
+            lines = buf.split(b"\n")
+            src[3] = lines.pop()
+            for raw in lines:
+                text = raw.decode("utf-8", "replace").rstrip("\r")
+                if text.strip():
+                    self._write(label, text)
+
+    def close(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        self.drain()
+        # Collected under the lock but written outside it: _write takes the
+        # same lock, which is not reentrant.
+        with self._lock:
+            tails = [(src[0], src[3]) for src in self._sources if src[3].strip()]
+            for src in self._sources:
+                src[3] = b""
+        for label, raw in tails:
+            self._write(label, raw.decode("utf-8", "replace"))
+        with self._lock:
+            try:
+                self._handle.close()
+            except OSError:
+                pass
+
+
 class Proc:
     """One spawned process, in its own process group."""
 
@@ -264,6 +407,12 @@ class Proc:
         self.log_path = log_path
         self.graceful = graceful
         self.log_handle = open(log_path, "ab", buffering=0)
+        # Where this run's output starts: the per-group logs are appended to
+        # across runs, and the session log must not re-ingest older ones.
+        try:
+            self.log_offset = self.log_handle.tell()
+        except OSError:
+            self.log_offset = 0
         self.popen = subprocess.Popen(
             argv,
             stdout=self.log_handle,
@@ -366,13 +515,15 @@ class Proc:
 class Supervisor:
     """Starts, stops and restarts groups; guarantees teardown on exit."""
 
-    def __init__(self, ws_root, log_dir, groups, env=None):
+    def __init__(self, ws_root, log_dir, groups, env=None, session=None):
         self.ws_root = ws_root
         self.log_dir = log_dir
+        self.session = session
         self.groups = {g.id: g for g in groups}
         self.env = env or os.environ.copy()
         self.procs = {}          # group id -> [Proc]
         self.applied = {}        # group id -> values snapshot it was started with
+        self._last_status = {}   # group id -> status at the last poll
         self._shutting_down = False
         os.makedirs(log_dir, exist_ok=True)
 
@@ -393,6 +544,24 @@ class Supervisor:
     def exit_codes(self, gid):
         return [p.poll() for p in self.procs.get(gid, [])]
 
+    def poll_transitions(self):
+        """Status changes since the last call: (gid, was, now, exit codes).
+
+        Only groups still tracked are considered, and a deliberate stop drops
+        its entry, so what this reports is a group going down on its own.
+        """
+        changes = []
+        for gid in list(self.procs):
+            now = self.status(gid)
+            was = self._last_status.get(gid)
+            self._last_status[gid] = now
+            if was is not None and was != now:
+                changes.append((gid, was, now, self.exit_codes(gid)))
+        for gid in list(self._last_status):
+            if gid not in self.procs:
+                self._last_status.pop(gid, None)
+        return changes
+
     # -- lifecycle -----------------------------------------------------------
     def start(self, gid, values, on_event=None):
         if gid in self.procs and any(p.alive() for p in self.procs[gid]):
@@ -405,7 +574,11 @@ class Supervisor:
             log_path = os.path.join(self.log_dir, f"{gid}{'' if i == 0 else f'_{i}'}.log")
             if on_event:
                 on_event(f"start {gid}: {' '.join(argv)}")
-            procs.append(Proc(argv, log_path, env=env, graceful=group.graceful))
+            p = Proc(argv, log_path, env=env, graceful=group.graceful)
+            if self.session:
+                label = gid if i == 0 else f"{gid}_{i}"
+                self.session.follow(label, p.log_path, p.log_offset)
+            procs.append(p)
         self.procs[gid] = procs
         self.applied[gid] = dict(values)
 

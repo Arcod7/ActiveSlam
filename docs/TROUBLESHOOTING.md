@@ -150,6 +150,29 @@ distributed out of band, so a fresh clone has the robot and no environment.
 and verifies it against `sim/world/data/obj.sha256`. Running bootstrap prints
 exactly which files are missing or corrupted.
 
+**`Unable to connect to a Zenoh router`, and nodes do not see each other**
+
+`RMW_IMPLEMENTATION` is set to `rmw_zenoh_cpp` in that shell. Unlike the DDS
+implementations, it needs a router process running before peers can discover
+one another — without it every node starts, publishes into nothing, and the
+stack looks up while no data flows. Either start the router in its own
+terminal:
+
+```bash
+ros2 run rmw_zenoh_cpp rmw_zenohd
+```
+
+or drop back to the distribution default, which is what this project is
+developed against — nothing here selects an RMW:
+
+```bash
+unset RMW_IMPLEMENTATION
+```
+
+Check what is in effect with `echo "$RMW_IMPLEMENTATION"`; empty is the
+default. Note it must match across every terminal involved, including the one
+running the launcher.
+
 **Nothing moves, however you drive it**
 
 Working as designed: the motion safety gate is fail-closed and starts disabled.

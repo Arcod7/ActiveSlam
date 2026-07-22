@@ -46,8 +46,30 @@ control screen that:
   down with an escalating SIGINT → SIGTERM → SIGKILL, on quit, on Ctrl-C, and
   on exit, so nothing is left running in the background.
 
-Per-layer logs are written to `logs/launcher/` (gitignored). Selections persist
-in `~/.activeslam_launcher.json`, so it reopens on the last configuration used.
+### Logs
+
+Everything lands in `logs/launcher/` (gitignored):
+
+| File | What it holds |
+|---|---|
+| `latest.log` | Symlink to the current run's `session-<timestamp>.log` |
+| `session-<timestamp>.log` | One run, merged and timestamped: launcher events, every layer's output labelled by group, and anything the middleware writes to stderr |
+| `<group>.log` | One layer's raw output, appended to across runs |
+
+Tail the merged one to watch a run:
+
+```bash
+tail -f logs/launcher/latest.log
+```
+
+That is the file to read when something dies mid-run. A layer going down on its
+own is recorded as it happens — `core: running -> exited (exit codes: [1])` —
+which a screen showing only current state cannot tell you. It is also where
+middleware warnings go: they are written straight to file descriptor 2, so
+without this they print on top of the TUI and corrupt the display.
+
+Selections persist in `~/.activeslam_launcher.json`, so it reopens on the last
+configuration used.
 
 The launcher drives the same launch files as `demo.launch.py` below.
 

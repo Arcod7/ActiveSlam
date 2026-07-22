@@ -486,7 +486,7 @@ def fmt_value(p, v):
     return str(v)
 
 
-def control_screen(stdscr, sup, values, link):
+def control_screen(stdscr, sup, values, link, session):
     show_advanced = False
     preset_idx = 0
     idx = 0
@@ -522,6 +522,13 @@ def control_screen(stdscr, sup, values, link):
         h, w = stdscr.getmaxyx()
 
         running = sup.running_ids()
+        # A layer that goes down on its own is the thing hardest to notice on a
+        # screen that only shows current state, so it is recorded as it happens.
+        for gid, was, now, codes in sup.poll_transitions():
+            session.event(f"{gid}: {was} -> {now} (exit codes: {codes})")
+            if now in ("exited", "partial"):
+                set_status(f"{gid} {now} — see {os.path.basename(session.path)}",
+                           C_ERR)
         if running:
             # Brought up as soon as the stack is, so discovery has connected
             # before the first arm/teleop keypress rather than dropping it.
@@ -788,7 +795,8 @@ def control_screen(stdscr, sup, values, link):
             save_selection(values)
             draw_busy(stdscr, "Applying...")
             was_armed = bool(link.enabled)
-            stopped, started, restarted = sup.apply(values)
+            session.event(f"apply: {values}")
+            stopped, started, restarted = sup.apply(values, on_event=session.event)
             changed = sorted(set(started + restarted))
             # planner and teleop_support each bring their own motion safety
             # gate, and a fresh gate starts disabled — re-arm so applying an
@@ -959,14 +967,19 @@ def main():
     values = dict(model.DEFAULTS)
     restore(values)
 
+    session = core.SessionLog(LOG_DIR)
+    session.start()
+    session.event(f"launcher started (ws_root={ws_root}, built={built})")
+
     sup = core.Supervisor(ws_root or REPO_ROOT, LOG_DIR,
                           core.build_groups(bringup_share()),
-                          env=ros_env(ws_root))
+                          env=ros_env(ws_root), session=session)
     link = RosLink()
 
     def emergency(*_):
         link.close()
-        sup.shutdown_all()
+        sup.shutdown_all(on_event=session.event)
+        session.close()
 
     atexit.register(emergency)
     for s in (signal.SIGTERM, signal.SIGHUP):
@@ -1010,14 +1023,20 @@ def main():
             continue
 
         try:
-            curses.wrapper(lambda scr: (init_colors(),
-                                        control_screen(scr, sup, values, link))[1])
+            # fd 2 goes to the session log for the duration: the middleware
+            # writes warnings straight to it, and they land mid-screen.
+            with core.stderr_to(session.path):
+                curses.wrapper(lambda scr: (init_colors(),
+                                            control_screen(scr, sup, values,
+                                                           link, session))[1])
         finally:
             link.close()
             if sup.running_ids():
                 print("Stopping the stack...", flush=True)
-                sup.shutdown_all(on_event=lambda m: print(f"  {m}", flush=True))
+                sup.shutdown_all(on_event=lambda m: (session.event(m),
+                                                     print(f"  {m}", flush=True)))
                 print("Stopped.")
+            print(f"Session log: {session.latest_path}")
 
     emergency()
 
