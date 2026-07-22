@@ -20,13 +20,13 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from eval_tools.run_paths import new_run_dir
+
 
 def _launch_eval_nodes(context, *args, **kwargs):
     output_dir = LaunchConfiguration('output_dir').perform(context)
     if not output_dir:
-        default_root = os.path.expanduser(
-            '~/delivery/MasterProject/ros_ws/src/ActiveSlam/eval/runs')
-        output_dir = os.path.join(default_root, time.strftime('%Y%m%d_%H%M%S'))
+        output_dir = new_run_dir(time.strftime('%Y%m%d_%H%M%S'))
     os.makedirs(output_dir, exist_ok=True)
 
     benchmark_node = Node(

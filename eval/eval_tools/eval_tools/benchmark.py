@@ -24,6 +24,7 @@ from std_msgs.msg import Float64, Int32, ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
 from scipy.spatial.transform import Rotation
 
+from eval_tools.run_paths import new_run_dir
 from eval_tools.tum_writer import TUMWriter
 
 PoseSample = namedtuple('PoseSample', ['t', 'pos', 'quat'])
@@ -91,9 +92,7 @@ class BenchmarkNode(Node):
 
         out_dir = self.get_parameter('output_dir').value
         if not out_dir:
-            default_root = os.path.expanduser(
-                '~/delivery/MasterProject/ros_ws/src/ActiveSlam/eval/runs')
-            out_dir = os.path.join(default_root, pytime.strftime('%Y%m%d_%H%M%S'))
+            out_dir = new_run_dir(pytime.strftime('%Y%m%d_%H%M%S'))
         os.makedirs(out_dir, exist_ok=True)
         self._out_dir = out_dir
         self._rpe_delta = self.get_parameter('rpe_delta').value
