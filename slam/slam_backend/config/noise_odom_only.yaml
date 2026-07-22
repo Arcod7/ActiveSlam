@@ -38,3 +38,4 @@ sonar:                       # ground-truth (as noise_ideal.yaml)
   lat_sigma_beam_frac: 0.0
   reverb_p: 0.0
   multipath_p: 0.0
+  min_range_m: 0.0

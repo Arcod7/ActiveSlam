@@ -308,6 +308,25 @@ def test_reverberation_hits_weak_returns_more():
     assert far > near
 
 
+def test_near_field_gate_drops_close_returns():
+    """min_range_m NaNs out returns nearer than the threshold (reverb spray)."""
+    grid = plane_grid(0.0, distance=1.0)   # a wall ~1 m away, inside a 1.5 m gate
+    p = SonarNoise(range_sigma0_m=0.005, min_range_m=1.5)
+    out = noisy(grid, p, seed=13)
+    assert np.all(np.isnan(out[:, 0]))     # every return gated away
+
+    far = plane_grid(0.0, distance=5.0)
+    out_far = noisy(far, p, seed=13)
+    assert np.mean(np.isfinite(out_far[:, 0])) > 0.9   # 5 m wall survives the gate
+
+
+def test_near_field_gate_off_by_default_keeps_close_returns():
+    grid = plane_grid(0.0, distance=1.0)
+    p = SonarNoise(range_sigma0_m=0.005)   # min_range_m defaults to 0
+    out = noisy(grid, p, seed=13)
+    assert np.mean(np.isfinite(out[:, 0])) > 0.9
+
+
 def test_reverberation_disabled_is_identity():
     r = np.full(SHAPE, 6.0)
     out, mask = reverberation_range(r, np.ones(SHAPE), np.ones(SHAPE, bool),

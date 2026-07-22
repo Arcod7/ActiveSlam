@@ -49,3 +49,4 @@ sonar:                       # WaterLinked Sonar 3D-15 datasheet (as noise_reali
   reverb_weak_boost: 3.0     # far/grazing surfaces beaten by reverb more often
   multipath_p: 0.05          # geometric second-bounce, fired only where geometry re-hits
   multipath_grazing_exp: 1.0
+  min_range_m: 0.0          # near-field gate; override per-run with the near_cutoff launch arg

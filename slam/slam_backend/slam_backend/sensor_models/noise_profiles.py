@@ -61,6 +61,7 @@ class SonarNoise:
     reverb_weak_boost: float = 0.0     # extra reverb where the surface return is weak (far/grazing)
     multipath_p: float = 0.0           # geometric (screen-space) multipath probability
     multipath_grazing_exp: float = 1.0 # shape of the (1 - cos incidence) multipath weighting
+    min_range_m: float = 0.0           # drop returns nearer than this (near-field gate, 0 = off)
 
 @dataclass
 class NoiseProfile:

@@ -245,6 +245,10 @@ one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.3
   the image and breaks strict comparability with pre-Phase-31 benchmark runs** (centre kept
   near the old value, so it is a redistribution). Multipath models in-frustum bounces only.
   Still not fitted to hardware.
+- ✅ **Near-field gate** (Phase 32): `near_cutoff:=<m>` launch arg (over any profile) drops noised
+  returns nearer than the threshold — clears the reverberation spray around the vehicle. Off by
+  default; live-verified 429 → 0 near-field returns/ping at `near_cutoff:=1.6`, far geometry
+  untouched. Hides reverb rather than retuning it; lowering `reverb_p` is the alternative.
 - ✅ **Benchmarking switches** (Phase 16): `loop_closure:=false` keeps
   `/slam/loop_closure_count` at 0 (default still closes loops); `noise_seed:=7` reaches all
   four sensor nodes; a forced-threshold live run fired 4 map-rebuild cycles cleanly

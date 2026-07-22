@@ -11,6 +11,7 @@ Usage:
   ros2 launch bringup demo.launch.py mode:=frontier motion:=walllooking mapper:=tsdf
                                                                     # path following with wall looking
   ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic  # SLAM pose + error viz
+  ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic near_cutoff:=1.6  # + clear near-field spray
   ros2 launch bringup demo.launch.py slam:=slam mode:=frontier revisit:=true  # break off exploration to close loops
   ros2 launch bringup demo.launch.py slam:=slam mode:=frontier scenario:=drift_return  # scripted leave-and-return
   ros2 launch bringup demo.launch.py rviz:=false              # headless (e.g. CI, remote box)
@@ -192,6 +193,13 @@ def generate_launch_description():
         "noise_seed",
         default_value="-1",
         description="Override the noise profile seed for slam:=slam (-1 = use the profile default)",
+    )
+    near_cutoff_arg = DeclareLaunchArgument(
+        "near_cutoff",
+        default_value="-1.0",
+        description="Drop noised sonar returns nearer than this (m), over any noise_profile, "
+                    "to clear the near-field reverberation spray around the vehicle "
+                    "(-1 = profile default, 0 = keep all; e.g. 1.6 cuts the spray).",
     )
     carve_no_return_arg = DeclareLaunchArgument(
         "carve_no_return",
@@ -648,6 +656,7 @@ def generate_launch_description():
             noise_profile_arg,
             loop_closure_arg,
             noise_seed_arg,
+            near_cutoff_arg,
             map_rebuild_arg,
             carve_no_return_arg,
             output_dir_arg,

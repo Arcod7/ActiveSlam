@@ -51,6 +51,12 @@ def generate_launch_description():
         'noise_seed', default_value='-1',
         description='Override the noise profile seed (-1 = use the profile default)',
     )
+    near_cutoff_arg = DeclareLaunchArgument(
+        'near_cutoff', default_value='-1.0',
+        description='Drop noised returns nearer than this (m), over any profile, to '
+                    'clear the near-field reverberation spray around the vehicle. '
+                    '-1 = use the profile default (0 = keep all near returns).',
+    )
 
     # depth_image_proc always publishes /cloud_in_raw and sonar_noise always
     # republishes it as /cloud_in, whether or not it adds noise. Publishing
@@ -102,6 +108,7 @@ def generate_launch_description():
         parameters=[{
             'noise_profile_path': noise_file,
             'noise_seed': LaunchConfiguration('noise_seed'),
+            'min_range_m': ParameterValue(LaunchConfiguration('near_cutoff'), value_type=float),
             'input_topic': '/cloud_in_raw',
             'output_topic': '/cloud_in',
             'passthrough': passthrough,
@@ -109,6 +116,6 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        sonar_noise_arg, noise_profile_arg, noise_seed_arg,
+        sonar_noise_arg, noise_profile_arg, noise_seed_arg, near_cutoff_arg,
         depth_to_cloud, sonar_noise_node,
     ])

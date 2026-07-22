@@ -1160,3 +1160,49 @@ corner, still vs. stirred water, a static scene held 30 s) would constrain
 nearly every parameter added across Phases 30 and 31.
 
 Tests: 29 in `slam/slam_backend/`, 22 of them for the sonar model.
+
+## Phase 32 — Near-field gate: a launch-tunable knob to clear the reverberation spray
+
+**Date**: 2026-07-23
+**Files**: `slam/slam_backend/slam_backend/sensor_models/sonar_noise.py`,
+`slam/slam_backend/slam_backend/sensor_models/noise_profiles.py`,
+`slam/slam_backend/config/noise_*.yaml`,
+`slam/slam_backend/test/test_sonar_noise.py`,
+`slam/stonefish_groundtruth_mapping/launch/pointcloud_only.launch.py`,
+`bringup/launch/demo.launch.py`
+
+**Objective**: In RViz the Phase 31 volume reverberation showed up as a fan of
+returns spraying off the vehicle into open water — ~430 near-field points per
+ping accumulating into a persistent junk cloud around every robot pose. That is
+the term behaving as designed (particles/bubbles/tether backscatter, and the
+device reports the strongest echo), but at `reverb_p=0.01` for clear water it
+dominates the near field and does not match the clean ground truth. The user
+wanted a single knob, settable per run over any noise profile, to pull the
+noised cloud back toward ground truth.
+
+**What changed**: A near-field gate. `min_range_m` drops any noised return
+nearer than the threshold (NaN, the existing dropout convention), applied after
+all other terms so it also removes reverberation, near multipath, and any other
+near-field return. It is exposed as a launch argument `near_cutoff` on
+`demo.launch.py`, threaded to the `sonar_noise` node the same way `noise_seed`
+is (declared at the top level, inherited by the nested pointcloud include). The
+node reads a `min_range_m` parameter that overrides the profile's own value when
+non-negative (-1 = use the profile, which ships at 0 = gate off), so the knob
+works over every profile without editing YAML:
+
+```
+ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic near_cutoff:=1.6
+```
+
+**Observed impact**: 31 tests (2 new), all passing. Live A/B on the `realistic`
+profile against a 6 m wall: `near_cutoff:=-1` (off) leaves 429 near-field
+returns per ping in open water; `near_cutoff:=1.6` leaves 0, while the 6 m wall
+is untouched. The gate is off by default, so existing runs are unchanged.
+
+**Note on the underlying value.** This gate hides the reverberation rather than
+retuning it. `reverb_p=0.01` may itself be high for a clear-water "realistic"
+profile — real clear water has little volume reverberation — so lowering
+`reverb_p` is the alternative to gating. The gate is the blunt, per-run knob;
+tuning `reverb_p` is the modelling fix. Neither is fitted to hardware.
+
+Tests: 31 in `slam/slam_backend/`, 24 of them for the sonar model.

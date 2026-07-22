@@ -36,6 +36,8 @@ so downstream max-range filters keep discarding them):
      no-return mechanism). Organized-cloud NaN convention per REP 118, already
      handled by every downstream consumer: tsdf_mapper's isfinite filter,
      pose_graph's skip_nans read, octomap_server's native NaN support.
+  7. near-field gate (min_range_m): drop returns nearer than the threshold,
+     a tunable knob to clear the reverberation spray around the vehicle.
 
 Range error and dropout are drawn from smooth random fields rather than
 independently per point, so both are correlated across neighbouring beams
@@ -280,6 +282,10 @@ class SonarNoiseNode(Node):
         # the noise model off, because it is also what republishes the cloud on
         # a QoS every consumer can match — see pointcloud_only.launch.py.
         self.declare_parameter('passthrough', False)
+        # Near-field gate, overridable from any launch over any profile: drop
+        # returns nearer than this to clear the reverberation spray around the
+        # vehicle. -1 keeps the profile's own min_range_m (0 = off).
+        self.declare_parameter('min_range_m', -1.0)
 
         yaml_path = self.get_parameter('noise_profile_path').value
         if not yaml_path or not os.path.exists(yaml_path):
@@ -290,6 +296,10 @@ class SonarNoiseNode(Node):
             full_profile = load_noise_profile(yaml_path)
             self.profile = full_profile.sonar
             profile_seed = full_profile.seed
+
+        min_range_override = self.get_parameter('min_range_m').value
+        if min_range_override >= 0.0:
+            self.profile.min_range_m = min_range_override
 
         seed = resolve_seed(profile_seed, self.get_parameter('noise_seed').value, SEED_OFFSET)
         self._rng = np.random.default_rng(seed if seed != -1 else None)
@@ -302,6 +312,7 @@ class SonarNoiseNode(Node):
             self.profile.outlier_p, self.profile.sos_scale_error_pct,
             self.profile.argmax_window_px > 1, self.profile.lat_sigma_beam_frac,
             self.profile.reverb_p, self.profile.multipath_p,
+            self.profile.min_range_m,
         ])
 
         # One speed-of-sound error per run: a systematic range scale SLAM cannot
@@ -410,6 +421,12 @@ def apply_sonar_noise(xyz, r, cos_inc, f_range, f_drop, p, rng, sos_scale=1.0,
     if p.range_quant_m > 0:
         r_new = np.round(r_new / p.range_quant_m) * p.range_quant_m
     r_new = np.clip(r_new, DEPTH_MIN_M, MAX_RANGE_M)
+
+    # Near-field gate: drop returns nearer than min_range_m. Clears the
+    # reverberation spray around the vehicle and any other near-field returns,
+    # a tunable knob to pull the noised cloud back toward the clean geometry.
+    if p.min_range_m > 0.0:
+        dropout_mask = dropout_mask | (r_new < p.min_range_m)
 
     x_hat = np.array([1.0, 0.0, 0.0])
     y_hat = np.array([0.0, 1.0, 0.0])
