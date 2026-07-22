@@ -25,8 +25,20 @@ creating the Python 3.12 venv.
 The prompt appears only on a terminal; non-interactive invocations fail rather
 than installing host software unexpectedly.
 
-**`gtsam has no wheels with a matching Python implementation tag`
-(for example, `cp39`)**
+**`NO_PUBKEY DDCAE044F796ECB0` for an `nvidia.github.io` repository inside
+the Distrobox**
+
+Legacy NVIDIA Container Toolkit apt sources from an Ubuntu 22.04 host can be
+reproduced in the Ubuntu 24.04 guest without their old signing key. They are
+not required for Distrobox's `--nvidia` driver-library integration. Re-run the
+updated `./bootstrap.sh`: its guest setup gives apt a container-local filtered
+view containing all legitimate Ubuntu and ROS sources except the affected
+`libnvidia-container`, `nvidia-container-runtime`, and `nvidia-docker` feeds.
+It does not rename, edit, or delete the host-mounted files, and it does not
+disable apt signature verification.
+
+**`gtsam==4.2.1 has no wheels with a matching Python implementation tag`
+(for example, `cp310`)**
 
 The virtualenv was created from an unsupported system Python. A virtualenv
 isolates installed packages, but it retains its base interpreter and version;

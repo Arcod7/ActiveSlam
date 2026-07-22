@@ -22,6 +22,56 @@ if [ "${VERSION_CODENAME:-}" != "noble" ]; then
     exit 1
 fi
 
+# Some Ubuntu 22.04 NVIDIA installations leave old libnvidia-container,
+# nvidia-container-runtime and nvidia-docker apt feeds behind. Distrobox's
+# --nvidia setup bind-mounts those definitions into the Noble guest without
+# their legacy signing key, making every apt update fail. A bind mount must not
+# be renamed or edited: that could affect the host. Instead, point apt at a
+# container-local directory of symlinks to every guest source except those
+# legacy NVIDIA feeds. --nvidia still exposes the host driver libraries.
+ACTIVESLAM_APT_SOURCE_VIEW="/etc/apt/activeslam.sources.list.d"
+ACTIVESLAM_APT_MAIN_VIEW="/etc/apt/activeslam.sources.list"
+ACTIVESLAM_APT_SOURCE_CONFIG="/etc/apt/apt.conf.d/99activeslam-sourceparts"
+
+refresh_apt_source_view() {
+    local source source_name
+
+    sudo mkdir -p "$ACTIVESLAM_APT_SOURCE_VIEW"
+    # This directory belongs to ActiveSlam. Rebuild only its symlinks so a
+    # source that later becomes invalid cannot survive here from an older run.
+    sudo find "$ACTIVESLAM_APT_SOURCE_VIEW" -mindepth 1 -maxdepth 1 \
+        -type l -delete
+    for source in \
+        /etc/apt/sources.list.d/*.list \
+        /etc/apt/sources.list.d/*.sources; do
+        [ -f "$source" ] || continue
+        source_name="$(basename "$source")"
+        if grep -Eq \
+            'nvidia\.github\.io/(libnvidia-container|nvidia-container-runtime|nvidia-docker)' \
+            "$source"; then
+            echo "Ignoring host-mounted legacy NVIDIA apt source: $source"
+            continue
+        fi
+        sudo ln -sfn "$source" "$ACTIVESLAM_APT_SOURCE_VIEW/$source_name"
+    done
+
+    # sources.list is normally empty on Noble (ubuntu.sources is used), but
+    # filter a legacy main file into a container-local copy as well.
+    if [ -f /etc/apt/sources.list ]; then
+        sed -E \
+            '/nvidia\.github\.io\/(libnvidia-container|nvidia-container-runtime|nvidia-docker)/d' \
+            /etc/apt/sources.list \
+            | sudo tee "$ACTIVESLAM_APT_MAIN_VIEW" >/dev/null
+    else
+        printf '' | sudo tee "$ACTIVESLAM_APT_MAIN_VIEW" >/dev/null
+    fi
+}
+
+refresh_apt_source_view
+printf 'Dir::Etc::sourcelist "%s";\nDir::Etc::sourceparts "%s";\n' \
+    "$ACTIVESLAM_APT_MAIN_VIEW" "$ACTIVESLAM_APT_SOURCE_VIEW" \
+    | sudo tee "$ACTIVESLAM_APT_SOURCE_CONFIG" >/dev/null
+
 if [ ! -f /opt/ros/jazzy/setup.bash ]; then
     echo "==> Installing ROS 2 Jazzy Desktop inside Distrobox"
     sudo apt-get update
@@ -47,6 +97,9 @@ if [ ! -f /opt/ros/jazzy/setup.bash ]; then
     curl -fL -o "$ACTIVESLAM_ROS_APT_DEB" \
         "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ACTIVESLAM_ROS_APT_VERSION}/ros2-apt-source_${ACTIVESLAM_ROS_APT_VERSION}.noble_all.deb"
     sudo dpkg -i "$ACTIVESLAM_ROS_APT_DEB"
+    # ros2-apt-source just added a legitimate file to sources.list.d; expose
+    # it through the filtered container-local view before the next apt update.
+    refresh_apt_source_view
     sudo apt-get update
     sudo apt-get install -y ros-jazzy-desktop ros-dev-tools python3-rosdep
 fi
