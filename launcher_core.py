@@ -540,6 +540,21 @@ def rpy_to_quaternion(roll, pitch, yaw):
             cr * cp * cy + sr * sp * sy)
 
 
+def venv_env(ws_root):
+    """Environment with the workspace venv on PATH, as activating it would give.
+
+    colcon has to run under the venv's interpreter: the ament_python entry
+    points inherit their shebang from it, and only the venv can import gtsam
+    and the other wheels.
+    """
+    env = os.environ.copy()
+    if ws_root:
+        venv_bin = os.path.join(ws_root, ".venv", "bin")
+        if os.path.isdir(venv_bin):
+            env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
+    return env
+
+
 def find_workspace_root(start=None):
     """Nearest ancestor containing install/setup.bash."""
     d = os.path.dirname(os.path.abspath(start or __file__))

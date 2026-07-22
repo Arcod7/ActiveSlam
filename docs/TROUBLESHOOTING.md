@@ -26,15 +26,34 @@ not `/usr/bin/python3`**
 
 CMake picked up a non-system interpreter — typically a uv- or pyenv-managed
 Python earlier on `PATH` (`~/.local/bin/python3.x`). It lacks ROS 2's Python
-packages. `bootstrap.sh` pins the right one, so this only appears when building
-by hand; pass the same flag:
+packages. The venv was not active. Activate it and rebuild — wiping `build/` first, since
+the wrong interpreter is cached in `CMakeCache.txt` and a plain rebuild keeps
+using it:
 
 ```bash
-colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+source <workspace>/.venv/bin/activate
+rm -rf build install log
+colcon build --symlink-install --cmake-args -Wno-dev
 ```
 
-Wipe `build/` before retrying either way — the wrong interpreter is cached in
-`CMakeCache.txt`, and a plain rebuild keeps using it.
+**A node dies on `ModuleNotFoundError: No module named 'gtsam'` (or
+`small_gicp`, `vdbfusion`), even though the venv has it**
+
+The workspace was built without the venv active. `ament_python` entry points
+take their shebang from whichever interpreter ran `colcon`, so the installed
+scripts point at a Python that cannot see the venv — and activating it
+afterwards does not help, because a shebang bypasses `PATH`. Check with:
+
+```bash
+head -1 install/slam_backend/lib/slam_backend/pose_graph
+```
+
+If that is not the venv's python, rebuild as above, or re-run `./bootstrap.sh`.
+
+Note that the apt `colcon` has a `/usr/bin/python3` shebang of its own, so it
+builds with the system interpreter no matter which venv is active.
+`requirements.txt` therefore installs `colcon` *into* the venv, which is what
+makes activating it sufficient.
 
 **A renamed or added file in a `setup.py` `data_files` list is not installed
 correctly**

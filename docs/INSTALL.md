@@ -65,7 +65,18 @@ have fixed the cause.
    file against `sim/world/data/obj.sha256`. A missing or partial copy is
    reported here rather than failing later inside the simulator. This is a
    warning, not a failure: the rest of the build still completes.
-9. **`colcon build --symlink-install`** over the whole workspace.
+9. **`colcon build --symlink-install`** over the whole workspace, with the venv
+   on `PATH` — which is all that activating it does. Rebuild the same way:
+
+   ```bash
+   source <workspace>/.venv/bin/activate
+   colcon build --symlink-install --cmake-args -Wno-dev
+   ```
+
+   Building without the venv active produces a workspace whose nodes cannot
+   import `gtsam` and the other wheels — see
+   [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for why. `requirements.txt`
+   installs `colcon` into the venv so that activating it is genuinely enough.
 
 Then activate the virtualenv and source the workspace, in each new shell:
 

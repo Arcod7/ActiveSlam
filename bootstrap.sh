@@ -257,12 +257,16 @@ else
 fi
 
 echo "==> 8/8 colcon build"
-# -DPython3_EXECUTABLE pins the system interpreter, the only one carrying
-# catkin_pkg and rclpy. Without it CMake's FindPython3 takes the first python3.x
-# on PATH, which on a machine with a uv- or pyenv-managed Python in ~/.local/bin
-# is not the system one, and every ament_cmake package fails on catkin_pkg.
-( cd "$WS_ROOT" && colcon build --symlink-install \
-    --cmake-args -Wno-dev -DPython3_EXECUTABLE=/usr/bin/python3 )
+# Built with the venv first on PATH — exactly what `source .venv/bin/activate`
+# does, and the same build a user gets by doing that themselves. It matters
+# twice over: the ament_python entry points take their shebang from whichever
+# interpreter runs colcon, and only the venv can import gtsam and the other
+# wheels; and CMake's FindPython3 takes the first python3 on PATH, which on a
+# machine with a uv- or pyenv-managed Python in ~/.local/bin is one without
+# catkin_pkg. The venv answers both, being /usr/bin/python3 with
+# --system-site-packages.
+( cd "$WS_ROOT" && PATH="$VENV_DIR/bin:$PATH" \
+    colcon build --symlink-install --cmake-args -Wno-dev )
 
 echo "==> Done. Activate the virtualenv, source the workspace, then launch:"
 echo "      source $VENV_DIR/bin/activate"

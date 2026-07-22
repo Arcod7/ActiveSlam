@@ -886,10 +886,10 @@ def prompt(stdscr, label):
 # --------------------------------------------------------------------------
 # foreground tasks (curses torn down, output straight to the shell)
 
-def run_foreground(cmd, cwd=None):
+def run_foreground(cmd, cwd=None, env=None):
     print(f"--- {' '.join(cmd)} ---", flush=True)
     try:
-        rc = subprocess.run(cmd, cwd=cwd).returncode
+        rc = subprocess.run(cmd, cwd=cwd, env=env).returncode
     except (OSError, KeyboardInterrupt) as e:
         print(f"failed: {e}")
         rc = 1
@@ -989,7 +989,9 @@ def main():
             continue
         if choice == "Rebuild":
             run_foreground(["colcon", "build", "--symlink-install",
-                            "--cmake-args", "-Wno-dev"], cwd=ws_root or REPO_ROOT)
+                            "--cmake-args", "-Wno-dev"],
+                           cwd=ws_root or REPO_ROOT,
+                           env=core.venv_env(ws_root))
             built = os.path.isdir(os.path.join(ws_root or "", "install", "bringup"))
             continue
 
