@@ -18,6 +18,10 @@ distrobox enter activeslam-jazzy
 source /opt/ros/jazzy/setup.bash
 ```
 
+If the failed Humble attempt already created a Python 3.10 `.venv`, the
+Distrobox handoff moves it to a timestamped `.venv.pre-jazzy-*` backup before
+creating the Python 3.12 venv.
+
 The prompt appears only on a terminal; non-interactive invocations fail rather
 than installing host software unexpectedly.
 

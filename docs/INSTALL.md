@@ -39,9 +39,10 @@ into Python 3.12.
 
 ## What `bootstrap.sh` does
 
-Run it from the repo root, inside a shell where `ros2` is on `PATH`. It is
-idempotent: re-run it after a `git pull`, or whenever a step failed and you
-have fixed the cause.
+Run it from the repo root. In the supported environment, `ros2` must be on
+`PATH`; from an interactive unsupported host, the Distrobox prompt can create
+that environment first. The script is idempotent: re-run it after a `git pull`,
+or whenever a step failed and you have fixed the cause.
 
 1. **Sanity checks** — requires ROS 2 Jazzy, `rosdep`, and Python 3.12. In an
    interactive unsupported shell, offers the Distrobox handoff described
