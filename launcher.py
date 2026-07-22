@@ -165,6 +165,25 @@ class RosLink:
             except Exception:
                 pass
 
+    def peer_count(self):
+        """Nodes this process can see, excluding itself. 0 means discovery is
+        not working, whatever else is wrong."""
+        if not self.node:
+            return 0
+        try:
+            return max(0, len(self.node.get_node_names()) - 1)
+        except Exception:
+            return 0
+
+    def _unreachable_reason(self, specific):
+        if self.peer_count() > 0:
+            return specific
+        rmw = os.environ.get("RMW_IMPLEMENTATION") or "distribution default"
+        domain = os.environ.get("ROS_DOMAIN_ID", "0")
+        return (f"no other ROS nodes are visible — discovery is not working "
+                f"(RMW_IMPLEMENTATION={rmw}, ROS_DOMAIN_ID={domain}). "
+                f"See docs/TROUBLESHOOTING.md.")
+
     def set_enabled(self, on, timeout=3.0):
         """Arm/disarm the motion gate.
 
@@ -181,7 +200,12 @@ class RosLink:
             self.spin()
             time.sleep(0.05)
         else:
-            self.error = "motion gate is not subscribed to /motion/enable"
+            # "Nobody is subscribed" reads as a gate problem, but the usual
+            # cause is that this process cannot see the stack at all — a
+            # mismatched RMW or domain. Those need different fixes, so say
+            # which one it is.
+            self.error = self._unreachable_reason(
+                "motion gate is not subscribed to /motion/enable")
             return False
         msg = self.Bool()
         msg.data = bool(on)
@@ -970,6 +994,15 @@ def main():
     session = core.SessionLog(LOG_DIR)
     session.start()
     session.event(f"launcher started (ws_root={ws_root}, built={built})")
+    # Recorded because every symptom of a mismatched middleware looks like a
+    # different bug — a gate that never reports, an empty RViz, a stack that is
+    # up and mute. Cheaper to read here than to infer.
+    session.event("middleware: RMW_IMPLEMENTATION={} ROS_DOMAIN_ID={} "
+                  "ROS_LOCALHOST_ONLY={} ROS_DISTRO={}".format(
+                      os.environ.get("RMW_IMPLEMENTATION") or "(default)",
+                      os.environ.get("ROS_DOMAIN_ID", "0"),
+                      os.environ.get("ROS_LOCALHOST_ONLY", "0"),
+                      os.environ.get("ROS_DISTRO", "?")))
 
     sup = core.Supervisor(ws_root or REPO_ROOT, LOG_DIR,
                           core.build_groups(bringup_share()),

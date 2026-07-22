@@ -217,6 +217,23 @@ GTSAM call. Note the whole stack depends on this node: it is the only publisher
 of `/slam/odometry`, so without it the safety gate reports `NO_ODOMETRY` and
 zeroes all motion however you arm it.
 
+**`no other ROS nodes are visible — discovery is not working`**
+
+The launcher could not see a single node while the stack was up, so the problem
+is the middleware, not the layer you were trying to reach. The message reports
+the `RMW_IMPLEMENTATION` and `ROS_DOMAIN_ID` in effect *for the launcher*;
+compare them against a node's:
+
+```bash
+tail -n +1 logs/launcher/latest.log | grep middleware   # what the launcher used
+echo "$RMW_IMPLEMENTATION $ROS_DOMAIN_ID"               # in any other terminal
+```
+
+They must match everywhere, and unsetting `RMW_IMPLEMENTATION` in one shell
+does not affect a launcher already running in another — start the launcher from
+a shell where it is already right. If your shell profile exports it, unsetting
+it interactively is undone the next time anything re-sources the profile.
+
 **Nothing moves, however you drive it**
 
 Working as designed: the motion safety gate is fail-closed and starts disabled.
