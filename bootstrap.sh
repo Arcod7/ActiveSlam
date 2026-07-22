@@ -31,6 +31,7 @@ fi
 # built when not. --skip-stonefish forces the skip for an install CMake cannot find.
 SKIP_STONEFISH=false
 STONEFISH_DIR="$REPO_ROOT/external/stonefish"
+STONEFISH_ROS2_DIR="$REPO_ROOT/sim/stonefish_ros2"
 STONEFISH_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
 
 WITH_VDBFUSION=false
@@ -275,6 +276,21 @@ if [ -f "$REPO_ROOT/.gitmodules" ] && [ -d "$REPO_ROOT/.git" ] || \
     ( cd "$REPO_ROOT" && git submodule update --init --recursive $REQUIRED_SUBMODULES )
 else
     echo "Not a git checkout, skipping submodule init."
+fi
+
+# The bridge is a fork already, but keep distro compatibility corrections as
+# explicit, idempotent patches beside this repository. This lets the pinned
+# submodule remain a reproducible upstream commit.
+if [ -d "$STONEFISH_ROS2_DIR/.git" ] || [ -f "$STONEFISH_ROS2_DIR/.git" ]; then
+    for patch_file in "$REPO_ROOT/$STONEFISH_ROS2_PATCH_DIR"/*.patch; do
+        [ -e "$patch_file" ] || continue
+        if git -C "$STONEFISH_ROS2_DIR" apply --reverse --check "$patch_file" \
+            >/dev/null 2>&1; then
+            continue
+        fi
+        git -C "$STONEFISH_ROS2_DIR" apply "$patch_file"
+        echo "Applied $(basename "$patch_file") to stonefish_ros2."
+    done
 fi
 
 echo "==> 3/8 Python dependencies (uv virtualenv + requirements.txt)"
