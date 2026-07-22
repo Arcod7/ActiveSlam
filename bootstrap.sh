@@ -79,10 +79,38 @@ python_is_expected() {
     "$1" -c "import sys; raise SystemExit(sys.version_info[:2] != (${EXPECTED_PYTHON_VERSION%.*}, ${EXPECTED_PYTHON_VERSION#*.}))"
 }
 
+gtsam_installed_version() {
+    "$VENV_PY" -c 'import importlib.metadata as m; print(m.version("gtsam"))' 2>/dev/null
+}
+
 install_gtsam() {
     # Prefer a prebuilt wheel. The pinned source submodule is the portable
     # fallback for interpreters and architectures no wheel covers.
-    if "$VENV_PY" -c 'import gtsam' >/dev/null 2>&1; then
+    #
+    # Version-checked rather than merely importable: a GTSAM left behind by an
+    # earlier run — a source build, or a wheel from a since-changed pin — keeps
+    # importing happily, so testing importability alone pinned every machine to
+    # whatever it installed first and made re-running this a no-op.
+    GTSAM_INSTALLED="$(gtsam_installed_version)"
+    case "$GTSAM_INSTALLED" in
+        "$GTSAM_WHEEL_VERSION"|"$GTSAM_SOURCE_REF")
+            echo "GTSAM $GTSAM_INSTALLED already installed."
+            return
+            ;;
+    esac
+    if [ -n "$GTSAM_INSTALLED" ]; then
+        echo "GTSAM $GTSAM_INSTALLED is installed, but the pins are" \
+             "$GTSAM_WHEEL_VERSION (wheel) and $GTSAM_SOURCE_REF (source)." \
+             "Replacing it with the pinned wheel."
+        if "$UV" pip install --python "$VENV_PY" --reinstall \
+                "gtsam==$GTSAM_WHEEL_VERSION"; then
+            return
+        fi
+        # Rebuilding from source here would repeat a long build on every run
+        # for platforms no wheel covers, so say so and leave it alone.
+        echo "No $GTSAM_WHEEL_VERSION wheel for this platform; keeping GTSAM" \
+             "$GTSAM_INSTALLED. Rebuild it from $GTSAM_SUBMODULE_PATH by hand" \
+             "if it misbehaves." >&2
         return
     fi
 

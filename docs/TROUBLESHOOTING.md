@@ -192,6 +192,31 @@ load`**
 existed needs one of those re-run. RViz itself still opens; only the octomap
 display is missing.
 
+**`pose_graph` dies with exit code -11 (SIGSEGV) and prints nothing**
+
+A segfault before its first log line means the crash is in `_setup_gtsam` or an
+import above it, not in the node's own logic. Usually the installed GTSAM is
+not the pinned one — a source build from an earlier run stays importable, and
+until this was version-checked, re-running `./bootstrap.sh` kept it. Check what
+is actually there:
+
+```bash
+<workspace>/.venv/bin/python -c "import importlib.metadata as m; print(m.version('gtsam'))"
+```
+
+If that is not `GTSAM_WHEEL_VERSION` from `dependencies.conf` (nor
+`GTSAM_SOURCE_REF`, on a platform with no wheel), re-run `./bootstrap.sh`,
+which now replaces it. To see the crash itself:
+
+```bash
+PYTHONFAULTHANDLER=1 ros2 run slam_backend pose_graph
+```
+
+That prints the Python frame it died in — enough to tell an import apart from a
+GTSAM call. Note the whole stack depends on this node: it is the only publisher
+of `/slam/odometry`, so without it the safety gate reports `NO_ODOMETRY` and
+zeroes all motion however you arm it.
+
 **Nothing moves, however you drive it**
 
 Working as designed: the motion safety gate is fail-closed and starts disabled.
