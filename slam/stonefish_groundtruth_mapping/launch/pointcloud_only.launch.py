@@ -65,6 +65,12 @@ def generate_launch_description():
                 name='depth_to_cloud',
                 remappings=[
                     ('image_rect', '/sensor_msgs/image_depth'),
+                    # Stated rather than left to image_transport to derive from
+                    # image_rect: the derivation runs on the unresolved name
+                    # under Humble, which lands on /camera_info and never sees
+                    # this remap. Without the info there is no camera model and
+                    # the node publishes no cloud at all.
+                    ('camera_info', '/sensor_msgs/camera_info'),
                     ('points',     depth_proc_output),
                 ],
             ),
