@@ -7,8 +7,8 @@ Humble does not provide an operator that adds rclcpp::Duration directly to a
 builtin_interfaces::msg::Time. Convert the header timestamp to rclcpp::Time,
 then convert the result back to its message representation.
 ---
- src/stonefish_ros2/ROS2Interface.cpp | 4 +++-
- 1 file changed, 3 insertions(+), 1 deletion(-)
+ src/stonefish_ros2/ROS2Interface.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/src/stonefish_ros2/ROS2Interface.cpp b/src/stonefish_ros2/ROS2Interface.cpp
 index 048a7d4..694c408 100644
@@ -19,9 +19,7 @@ index 048a7d4..694c408 100644
          msg.events[i].y = (unsigned int)(data[i*2] & 0xFFFF); 
          //Next 4 bytes - polarity and time
 -        msg.events[i].ts = msg.header.stamp + rclcpp::Duration(0, abs(data[i*2+1]));
-+        msg.events[i].ts = (rclcpp::Time(msg.header.stamp)
-+            + rclcpp::Duration(0, abs(data[i*2+1])))
-+            .to_msg();
++        msg.events[i].ts = rclcpp::Time(msg.header.stamp) + rclcpp::Duration(0, abs(data[i*2+1]));
          msg.events[i].polarity = data[i*2+1] > 0;
      }
      std::static_pointer_cast<rclcpp::Publisher<stonefish_ros2::msg::EventArray>>(pub)->publish(msg);
