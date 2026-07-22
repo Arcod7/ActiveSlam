@@ -4,8 +4,8 @@ Date: Tue, 22 Jul 2026 00:00:00 +0000
 Subject: [PATCH] fix event timestamps with ROS 2 Humble
 
 Humble does not provide an operator that adds rclcpp::Duration directly to a
-builtin_interfaces::msg::Time. Convert the header timestamp to rclcpp::Time,
-then convert the result back to its message representation.
+builtin_interfaces::msg::Time. Convert the header timestamp to rclcpp::Time;
+its implicit conversion supplies the message timestamp.
 ---
  src/stonefish_ros2/ROS2Interface.cpp | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
@@ -14,7 +14,7 @@ diff --git a/src/stonefish_ros2/ROS2Interface.cpp b/src/stonefish_ros2/ROS2Inter
 index 048a7d4..694c408 100644
 --- a/src/stonefish_ros2/ROS2Interface.cpp
 +++ b/src/stonefish_ros2/ROS2Interface.cpp
-@@ -694,7 +694,9 @@ void ROS2Interface::PublishEventBasedCamera(rclcpp::PublisherBase::SharedPtr pu
+@@ -694,7 +694,7 @@ void ROS2Interface::PublishEventBasedCamera(rclcpp::PublisherBase::SharedPtr pu
          msg.events[i].x = (unsigned int)(data[i*2] >> 16);
          msg.events[i].y = (unsigned int)(data[i*2] & 0xFFFF); 
          //Next 4 bytes - polarity and time
