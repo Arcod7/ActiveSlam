@@ -10,3 +10,6 @@
 [submodule "external/open3d"]
 	path = external/open3d
 	url = https://github.com/isl-org/Open3D.git
+[submodule "external/gtsam"]
+	path = external/gtsam
+	url = https://github.com/borglab/gtsam.git

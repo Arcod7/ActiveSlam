@@ -7,12 +7,18 @@
 #
 # Verified working versions (aarch64, ROS 2 Jazzy container, 2026-07-02):
 
-# No rosdep key exists for the Python bindings. rosdep's `gtsam` key maps to
-# ros-jazzy-gtsam, which ships only the C++ libraries (libgtsam.so and friends,
-# zero Python files), so it cannot satisfy `import gtsam` in slam_backend.
-# PyPI publishes 4.2.1 wheels for CPython 3.11+; bootstrap checks this before
-# invoking uv (the supported Jazzy/Ubuntu 24.04 environment uses Python 3.12).
-gtsam==4.2.1
+# GTSAM is managed by bootstrap.sh rather than this requirements file. It tries
+# the wheel release in dependencies.conf first, then builds the pinned GTSAM
+# submodule when that wheel is unavailable for the active Python/architecture.
+
+# An upper bound, not a dependency. numpy still comes from rosdep, but a wheel
+# that declares numpy (gtsam does, as >=1.11) makes uv install its own copy
+# into the venv regardless: uv resolves without consulting the packages
+# --system-site-packages exposes, so a satisfied requirement is installed
+# anyway, and numpy 2 is what it picks. That copy shadows the distribution's,
+# and the distribution's scipy — built against numpy 1 — then dies on import
+# with "numpy.dtype size changed", taking benchmark and map_metrics with it.
+numpy<2
 
 # No rosdep key; PyPI wheel only. Used by slam_backend for scan matching.
 small-gicp
@@ -26,6 +32,10 @@ pymavlink==2.4.49
 # shebang from whichever interpreter runs colcon; built by the apt one, the
 # installed nodes cannot import gtsam or anything else that lives in the venv.
 colcon-common-extensions
+
+# ROS 2 Humble's rosidl_adapter uses the Empy 3 API (including BUFFERED_OPT).
+# Empy 4 is incompatible and is otherwise selected by an unconstrained venv.
+empy==3.3.4
 
 # vdbfusion (mapper:=tsdf only) is NOT installable via this file: PyPI only ships wheels up
 # to cp310, on x86_64 only — no wheel exists for Python 3.11/3.12 (Ubuntu 24.04's default) on

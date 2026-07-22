@@ -1,8 +1,11 @@
 """
 Depth image -> PointCloud2 without the TF chain or the simulator.
 
-  /sensor_msgs/image_depth  --> depth_image_proc --> /cloud_in
-  /sensor_msgs/camera_info  -->
+  /sensor_msgs/image_depth  --> depth_image_proc --> /cloud_in_raw
+  /sensor_msgs/camera_info  -->                            |
+                                                      sonar_noise
+                                                           |
+                                                       /cloud_in
 
 NaN replacement (REP 118) is handled inside stonefish_ros2 at publish time.
 
@@ -10,15 +13,17 @@ Split out of pointcloud.launch.py so the noise model can be swapped (a
 noise_profile change, or slam:=slam toggling sonar_noise on) without
 restarting the simulator. pointcloud.launch.py = tf.launch.py + this file.
 
-When sonar_noise:=true (set by demo.launch.py under slam:=slam), a datasheet-
-grounded noise model is inserted between depth_image_proc and every consumer,
-standing in for a real WaterLinked Sonar 3D-15 (see slam_backend's
-sonar_noise.py):
+The topology is the same either way; sonar_noise:=true (set by demo.launch.py
+under slam:=slam) decides only whether the relay applies a datasheet-grounded
+model standing in for a real WaterLinked Sonar 3D-15, or passes the cloud
+through untouched (see slam_backend's sonar_noise.py).
 
-  depth_image_proc --> /cloud_in_raw --> sonar_noise --> /cloud_in
-
-sonar_noise:=false (default, and always under slam:=none) keeps the original
-direct wiring so the topology and topic count are unchanged.
+It relays even with the model off because it is also what publishes /cloud_in
+on a QoS the consumers can match. depth_image_proc offers its cloud as
+SensorDataQoS — best effort — under Humble, while octomap_server, tsdf_mapper
+and pose_graph all subscribe reliably; wired directly, nothing connects and no
+map is ever built. Under Jazzy the same publisher is reliable. Owning the
+republisher keeps that out of the distribution's hands.
 
 Test:
   ros2 topic echo /cloud_in --no-arr
@@ -26,10 +31,10 @@ Test:
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -47,11 +52,17 @@ def generate_launch_description():
         description='Override the noise profile seed (-1 = use the profile default)',
     )
 
-    # depth_image_proc's output topic: straight to /cloud_in normally, or to
-    # /cloud_in_raw (feeding sonar_noise) when the noise model is active.
-    depth_proc_output = PythonExpression([
-        "'/cloud_in_raw' if '", LaunchConfiguration('sonar_noise'), "' == 'true' else '/cloud_in'",
-    ])
+    # depth_image_proc always publishes /cloud_in_raw and sonar_noise always
+    # republishes it as /cloud_in, whether or not it adds noise. Publishing
+    # /cloud_in directly is not an option: depth_image_proc offers it as
+    # SensorDataQoS (best effort) under Humble, and every consumer —
+    # octomap_server, tsdf_mapper, pose_graph — subscribes reliably, so nothing
+    # matches and no map is ever built. Relaying through a node whose QoS this
+    # project controls removes the dependency on a distribution's default.
+    passthrough = ParameterValue(
+        PythonExpression(
+            ["'true' if '", LaunchConfiguration('sonar_noise'), "' != 'true' else 'false'"]),
+        value_type=bool)
 
     depth_to_cloud = ComposableNodeContainer(
         name='depth_proc_container',
@@ -65,7 +76,13 @@ def generate_launch_description():
                 name='depth_to_cloud',
                 remappings=[
                     ('image_rect', '/sensor_msgs/image_depth'),
-                    ('points',     depth_proc_output),
+                    # Stated rather than left to image_transport to derive from
+                    # image_rect: the derivation runs on the unresolved name
+                    # under Humble, which lands on /camera_info and never sees
+                    # this remap. Without the info there is no camera model and
+                    # the node publishes no cloud at all.
+                    ('camera_info', '/sensor_msgs/camera_info'),
+                    ('points',     '/cloud_in_raw'),
                 ],
             ),
         ],
@@ -87,8 +104,8 @@ def generate_launch_description():
             'noise_seed': LaunchConfiguration('noise_seed'),
             'input_topic': '/cloud_in_raw',
             'output_topic': '/cloud_in',
+            'passthrough': passthrough,
         }],
-        condition=IfCondition(LaunchConfiguration('sonar_noise')),
     )
 
     return LaunchDescription([

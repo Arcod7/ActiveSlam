@@ -3,10 +3,10 @@ from setuptools import setup
 
 package_name = 'world'
 
-# Mesh files (data/obj/*.obj, *.mtl) are gitignored (~313 MB — see
-# data/README.md) but may or may not be present on disk depending on the
-# checkout. glob() picks up whatever's actually there at build time instead
-# of hardcoding a file list that would break the build when they're absent.
+# Some of data/obj/ is tracked and some is distributed out of band (see
+# data/README.md), so which meshes exist depends on the checkout. glob() picks
+# up whatever is actually there at build time instead of hardcoding a file list
+# that would break the build when they are absent.
 data_files = [
     ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
     ('share/' + package_name, ['package.xml']),

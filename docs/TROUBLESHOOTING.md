@@ -42,20 +42,22 @@ disable apt signature verification.
 
 The virtualenv was created from an unsupported system Python. A virtualenv
 isolates installed packages, but it retains its base interpreter and version;
-one created from Python 3.10 is still Python 3.10. GTSAM 4.2.1 has wheels for
-CPython 3.11 and newer, and the supported ROS 2 Jazzy / Ubuntu 24.04
-environment supplies Python 3.12.
+one created from Python 3.9 is still Python 3.9. The pinned GTSAM wheel
+(`GTSAM_WHEEL_VERSION` in `dependencies.conf`) covers CPython 3.10 for Humble
+and 3.12 for Jazzy, which are what those distributions supply. Anything else
+falls back to the source build.
 
 Check the shell before running bootstrap:
 
 ```bash
-echo "$ROS_DISTRO"       # jazzy
-/usr/bin/python3.12 --version  # Python 3.12.x
+echo "$ROS_DISTRO"             # jazzy or humble
+/usr/bin/python3.12 --version  # Python 3.12.x on Jazzy
+/usr/bin/python3.10 --version  # Python 3.10.x on Humble
 ```
 
-If those are correct but `<workspace>/.venv/bin/python --version` still says
-3.10, deactivate and move or remove the stale venv, then re-run
-`./bootstrap.sh`. It will recreate the venv from `/usr/bin/python3.12`.
+If those are correct but `<workspace>/.venv/bin/python --version` disagrees,
+deactivate and move or remove the stale venv, then re-run `./bootstrap.sh`. It
+will recreate the venv from the interpreter the distribution expects.
 
 **`Could not find a package configuration file provided by "Stonefish"`**
 
@@ -63,6 +65,45 @@ If those are correct but `<workspace>/.venv/bin/python --version` still says
 *installed* `StonefishConfig.cmake` — building the library is not enough. Run
 `./bootstrap.sh`; it builds and installs it. If Stonefish is installed
 somewhere `bootstrap.sh` does not look but CMake does, pass `--skip-stonefish`.
+
+**`sf::Camera has no member named getLastCaptureTime`** (or
+`sf::DepthCamera has no member named getVerticalFOV`)
+
+The installed Stonefish predates the patched fork. Both methods were added on
+the fork and `stonefish_ros2` calls them, so an older install compiles the
+bridge no further than this — while still satisfying
+`find_package(Stonefish)`, which is why the build gets as far as it does.
+Confirm with:
+
+```bash
+grep -c getLastCaptureTime /usr/local/include/Stonefish/sensors/vision/Camera.h
+```
+
+`0`, or no such file, means the install is stale. `./bootstrap.sh` detects this
+and rebuilds over it. To do it by hand:
+
+```bash
+git submodule update --init --recursive external/stonefish
+cmake -S external/stonefish -B external/stonefish/build -DCMAKE_BUILD_TYPE=Release
+cmake --build external/stonefish/build -j"$(nproc)"
+sudo cmake --install external/stonefish/build && sudo ldconfig
+```
+
+Note that `--skip-stonefish` suppresses the check along with the build, so an
+install kept deliberately out of the way has to stay current by hand.
+
+**vdbfusion's source build fails in c-blosc: `conflicting types for
+'shuffle'`**
+
+Seen on aarch64 with GCC 11 (Ubuntu 22.04 / Humble). vdbfusion's CMake builds
+its own blosc 1.5.0 through ExternalProject rather than using the system one,
+and that release's `shuffle.c` and `shuffle.h` disagree on a `const`, which GCC
+11 rejects outright where older compilers only warned.
+
+Nothing in this repository selects that blosc. The combination is narrow —
+x86_64 takes the wheel and never builds, and the source build works on Ubuntu
+24.04 — so if you hit it, `./bootstrap.sh --skip-vdbfusion` gets you a working
+workspace without `mapper:=tsdf`; use `mapper:=octomap`.
 
 **`fatal error: glm/glm.hpp: No such file or directory`**
 
@@ -102,6 +143,16 @@ head -1 install/slam_backend/lib/slam_backend/pose_graph
 
 If that is not the venv's python, rebuild as above, or re-run `./bootstrap.sh`.
 
+If the shebang *is* right, the package is simply absent — check directly:
+
+```bash
+<workspace>/.venv/bin/python -c "import vdbfusion"
+```
+
+`./bootstrap.sh` installs vdbfusion by default, but a workspace bootstrapped
+before that was the case, or with `--skip-vdbfusion`, will not have it, and
+`mapper:=tsdf` exits on import. Re-run `./bootstrap.sh`.
+
 Note that the apt `colcon` has a `/usr/bin/python3` shebang of its own, so it
 builds with the system interpreter no matter which venv is active.
 `requirements.txt` therefore installs `colcon` *into* the venv, which is what
@@ -128,10 +179,85 @@ A declared dependency is not installed. Re-run `rosdep install --from-paths src
 
 **Stonefish exits complaining about the scenario, or meshes look absent**
 
-`sim/world/data/obj/` is gitignored and distributed out of band, so a fresh
-clone does not have it. `./bootstrap.sh --meshes-from <existing-checkout>/sim/world/data/obj`
-copies it and verifies every file against `sim/world/data/obj.sha256`. Running
-bootstrap prints exactly which files are missing or corrupted.
+The BlueROV2 meshes are tracked in git, but `off_shore_station.obj` is
+distributed out of band, so a fresh clone has the robot and no environment.
+`./bootstrap.sh --meshes-from <existing-checkout>/sim/world/data/obj` copies it
+and verifies it against `sim/world/data/obj.sha256`. Running bootstrap prints
+exactly which files are missing or corrupted.
+
+**`Unable to connect to a Zenoh router`, and nodes do not see each other**
+
+`RMW_IMPLEMENTATION` is set to `rmw_zenoh_cpp` in that shell. Unlike the DDS
+implementations, it needs a router process running before peers can discover
+one another — without it every node starts, publishes into nothing, and the
+stack looks up while no data flows. Either start the router in its own
+terminal:
+
+```bash
+ros2 run rmw_zenoh_cpp rmw_zenohd
+```
+
+or drop back to the distribution default, which is what this project is
+developed against — nothing here selects an RMW:
+
+```bash
+unset RMW_IMPLEMENTATION
+```
+
+Check what is in effect with `echo "$RMW_IMPLEMENTATION"`; empty is the
+default. Note it must match across every terminal involved, including the one
+running the launcher.
+
+**RViz: `The plugin for class 'octomap_rviz_plugins/OccupancyGrid' failed to
+load`**
+
+`octomap_rviz_plugins` is not installed. `rviz/demo_slam.rviz` uses it, and
+`bringup` declares it, so `rosdep install --from-paths src -i -y` — or
+`./bootstrap.sh` — pulls it in. A workspace set up before that declaration
+existed needs one of those re-run. RViz itself still opens; only the octomap
+display is missing.
+
+**`pose_graph` dies with exit code -11 (SIGSEGV) and prints nothing**
+
+A segfault before its first log line means the crash is in `_setup_gtsam` or an
+import above it, not in the node's own logic. Usually the installed GTSAM is
+not the pinned one — a source build from an earlier run stays importable, and
+until this was version-checked, re-running `./bootstrap.sh` kept it. Check what
+is actually there:
+
+```bash
+<workspace>/.venv/bin/python -c "import importlib.metadata as m; print(m.version('gtsam'))"
+```
+
+If that is not `GTSAM_WHEEL_VERSION` from `dependencies.conf` (nor
+`GTSAM_SOURCE_REF`, on a platform with no wheel), re-run `./bootstrap.sh`,
+which now replaces it. To see the crash itself:
+
+```bash
+PYTHONFAULTHANDLER=1 ros2 run slam_backend pose_graph
+```
+
+That prints the Python frame it died in — enough to tell an import apart from a
+GTSAM call. Note the whole stack depends on this node: it is the only publisher
+of `/slam/odometry`, so without it the safety gate reports `NO_ODOMETRY` and
+zeroes all motion however you arm it.
+
+**`no other ROS nodes are visible — discovery is not working`**
+
+The launcher could not see a single node while the stack was up, so the problem
+is the middleware, not the layer you were trying to reach. The message reports
+the `RMW_IMPLEMENTATION` and `ROS_DOMAIN_ID` in effect *for the launcher*;
+compare them against a node's:
+
+```bash
+tail -n +1 logs/launcher/latest.log | grep middleware   # what the launcher used
+echo "$RMW_IMPLEMENTATION $ROS_DOMAIN_ID"               # in any other terminal
+```
+
+They must match everywhere, and unsetting `RMW_IMPLEMENTATION` in one shell
+does not affect a launcher already running in another — start the launcher from
+a shell where it is already right. If your shell profile exports it, unsetting
+it interactively is undone the next time anything re-sources the profile.
 
 **Nothing moves, however you drive it**
 
@@ -166,9 +292,10 @@ uses a uv virtualenv at `<workspace>/.venv` for exactly this reason —
 **`pip install vdbfusion` or `pip install open3d` finds no matching
 distribution**
 
-Expected: neither publishes a wheel this project can use (see
-[`INSTALL.md`](INSTALL.md#optional-components)). Build from the pinned
-submodules with `./bootstrap.sh --with-vdbfusion` / `--with-open3d`.
+Expected on aarch64 and on CPython 3.11+ (see
+[`INSTALL.md`](INSTALL.md#optional-components)). `./bootstrap.sh` handles
+vdbfusion itself, falling back to the pinned submodule when no wheel matches;
+Open3D needs `--with-open3d`.
 
 ## aarch64 (Apple Silicon, Raspberry Pi)
 

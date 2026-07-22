@@ -25,11 +25,12 @@ sudo rosdep init   # only if rosdep has never been set up on this machine
 rosdep update
 ```
 
-**The scene meshes.** `sim/world/data/obj/` (~313 MB) is gitignored and
-distributed out of band — see [`sim/world/data/README.md`](../sim/world/data/README.md).
-They must be on disk before the simulator can load the scenario. `bootstrap.sh
---meshes-from <path>` copies them from an existing checkout and verifies them
-against a checksum manifest.
+**The scene mesh.** The BlueROV2 meshes are tracked in git, but
+`off_shore_station.obj` — the environment `scenario/waterlinked.scn` loads — is
+distributed out of band, as its provenance is unrecorded. It must be on disk
+before the simulator can load the scenario. `bootstrap.sh --meshes-from <path>`
+copies it from an existing checkout and verifies it against a checksum
+manifest. See [`sim/world/data/README.md`](../sim/world/data/README.md).
 
 Everything else — build tools, Python packages, Stonefish's dependencies — is
 installed by `bootstrap.sh`. The Python packages go into a virtualenv, but the
@@ -51,9 +52,9 @@ or whenever a step failed and you have fixed the cause.
    (the patched library) and `sim/stonefish_ros2` (the patched ROS 2 bridge).
    The workspace does not build without them, so cloning with
    `--recurse-submodules` is unnecessary; this step covers it either way.
-   `external/vdbfusion` and `external/open3d` are optional and are fetched only
-   by `--with-vdbfusion` / `--with-open3d`, which keeps ~350 MB of Open3D out
-   of a default clone.
+   `external/vdbfusion` is fetched only where no wheel matches the platform,
+   and `external/open3d` only with `--with-open3d`, which keeps ~350 MB of
+   Open3D out of a default clone.
 3. **Python dependencies** — Ubuntu 24.04 marks its system Python
    externally-managed, so a bare `pip install` fails with PEP 668. They go into
    a [uv](https://docs.astral.sh/uv/) virtualenv at `<workspace>/.venv` instead,
@@ -68,14 +69,20 @@ or whenever a step failed and you have fixed the cause.
    `rviz2`, ...).
 5. **Patched Stonefish** — installs its dependencies (glm, SDL2, Freetype,
    OpenGL, which `rosdep` does not cover), then builds and installs the pinned
-   submodule. Skipped when `StonefishConfig.cmake` is already present under a
-   standard prefix; `--skip-stonefish` forces the skip. Building takes a while.
-6. **vdbfusion**, only with `--with-vdbfusion` — needed for `mapper:=tsdf`.
+   submodule. Skipped when a standard prefix already holds a
+   `StonefishConfig.cmake` whose headers declare the methods `stonefish_ros2`
+   calls; an older install is rebuilt over rather than skipped, since it
+   satisfies `find_package(Stonefish)` but fails to compile the bridge.
+   `--skip-stonefish` forces the skip regardless. Building takes a while.
+6. **vdbfusion** — needed for `mapper:=tsdf`, so it is installed by default:
+   the wheel where one matches, the pinned submodule otherwise.
+   `--skip-vdbfusion` opts out.
 7. **Open3D**, only with `--with-open3d` — needed for FPFH descriptor work.
-8. **Scene meshes** — copies them with `--meshes-from`, then verifies every
-   file against `sim/world/data/obj.sha256`. A missing or partial copy is
-   reported here rather than failing later inside the simulator. This is a
-   warning, not a failure: the rest of the build still completes.
+8. **Scene meshes** — copies the out-of-band ones with `--meshes-from`, then
+   hashes whatever is on disk against `sim/world/data/obj.sha256`. A missing or
+   corrupted mesh a scenario needs is reported here rather than failing later
+   inside the simulator. This is a warning, not a failure: the rest of the
+   build still completes.
 9. **`colcon build --symlink-install`** over the whole workspace, with the venv
    on `PATH` — which is all that activating it does. Rebuild the same way:
 
@@ -98,21 +105,23 @@ source <workspace>/install/setup.zsh
 
 ## Optional components
 
-Both are pinned as submodules because neither publishes a wheel this project
-can use, and both are source builds you can skip entirely.
+Both are pinned as submodules for the platforms where no usable wheel exists.
 
-**vdbfusion** (`mapper:=tsdf`) — PyPI only publishes wheels up to Python 3.10,
-x86_64 only, so `pip install vdbfusion` fails on a fresh Jazzy setup (Python
-3.12) on any architecture.
+**vdbfusion** (`mapper:=tsdf`) is **not optional** — `bootstrap.sh` installs it
+by default, because the launcher offers that mapper by default and the node
+exits on import without it. What varies is how. Upstream publishes wheels for
+x86_64 only, up to CPython 3.10, so:
 
-```bash
-./bootstrap.sh --with-vdbfusion
-```
+| Platform | How it is installed |
+|---|---|
+| Humble / x86_64 (CPython 3.10) | Wheel, pinned in `dependencies.conf` |
+| Jazzy (CPython 3.12), or any aarch64 | Built from the `external/vdbfusion` submodule |
 
-It needs OpenVDB and a C++ toolchain, which are not part of this project's
-dependency list — follow
+The source path needs OpenVDB and a C++ toolchain, which are not in this
+project's dependency list — follow
 [vdbfusion's own `INSTALL.md`](https://github.com/PRBonn/vdbfusion/blob/main/INSTALL.md)
-if the build fails.
+if the build fails. `./bootstrap.sh --skip-vdbfusion` skips it, at the cost of
+`mapper:=tsdf`.
 
 **Open3D** (FPFH submap descriptors, point-cloud registration) — no wheel is
 published for aarch64 on any Python version, so on Apple Silicon or a Raspberry

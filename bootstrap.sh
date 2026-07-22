@@ -1,10 +1,17 @@
 #!/bin/bash
 # Idempotent install helper — collapses docs/INSTALL.md into one command.
-# Everything a default run needs happens without flags, Stonefish included;
-# vdbfusion and Open3D are opt-in, being heavy builds nothing needs by default.
+# Everything a default run needs happens without flags — Stonefish and
+# vdbfusion included. Open3D stays opt-in: nothing in a default run uses it.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPENDENCY_CONFIG="$REPO_ROOT/dependencies.conf"
+if [ ! -r "$DEPENDENCY_CONFIG" ]; then
+    echo "Missing dependency manifest: $DEPENDENCY_CONFIG" >&2
+    exit 1
+fi
+# shellcheck source=dependencies.conf
+source "$DEPENDENCY_CONFIG"
 ORIGINAL_ARGS=("$@")
 PARENT_DIR="$(dirname "$REPO_ROOT")"
 if [ "$(basename "$PARENT_DIR")" = "src" ]; then
@@ -24,9 +31,13 @@ fi
 # built when not. --skip-stonefish forces the skip for an install CMake cannot find.
 SKIP_STONEFISH=false
 STONEFISH_DIR="$REPO_ROOT/external/stonefish"
+STONEFISH_ROS2_DIR="$REPO_ROOT/sim/stonefish_ros2"
 STONEFISH_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
 
-WITH_VDBFUSION=false
+# vdbfusion backs mapper:=tsdf, which the launcher offers by default, so it is
+# installed like GTSAM rather than behind a flag: wheel first, source only where
+# no wheel matches. --skip-vdbfusion opts out.
+SKIP_VDBFUSION=false
 VDBFUSION_DIR="$REPO_ROOT/external/vdbfusion"
 
 WITH_OPEN3D=false
@@ -34,18 +45,176 @@ OPEN3D_DIR="$REPO_ROOT/external/open3d"
 OPEN3D_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
 
 MESHES_FROM=""
+GTSAM_DIR="$REPO_ROOT/$GTSAM_SUBMODULE_PATH"
+# The generated Python bindings have a high peak memory use.  A serial build is
+# reliable in constrained containers; callers with enough RAM can override it.
+GTSAM_BUILD_JOBS="${ACTIVESLAM_GTSAM_BUILD_JOBS:-1}"
 
-# Python deps go into a uv-managed virtualenv: Ubuntu 24.04 (ROS 2 Jazzy's
-# target) marks its system Python externally-managed, so a plain
-# `pip install` there fails with PEP 668. --system-site-packages keeps the
-# distro's ROS Python packages visible inside it.
+# Python deps go into a uv-managed virtualenv. --system-site-packages keeps
+# the distro's ROS Python packages visible inside it (and avoids PEP 668 on
+# Ubuntu 24.04).
 VENV_DIR="$WS_ROOT/.venv"
-SYSTEM_PYTHON="/usr/bin/python3.12"
 DISTROBOX_NAME="activeslam-jazzy"
 DISTROBOX_IMAGE="quay.io/toolbx/ubuntu-toolbox:24.04"
 
+select_python_for_ros_distro() {
+    case "${ROS_DISTRO:-}" in
+        jazzy)
+            SYSTEM_PYTHON="/usr/bin/python3.12"
+            EXPECTED_PYTHON_VERSION="3.12"
+            ;;
+        humble)
+            SYSTEM_PYTHON="/usr/bin/python3.10"
+            EXPECTED_PYTHON_VERSION="3.10"
+            ;;
+        *)
+            SYSTEM_PYTHON=""
+            EXPECTED_PYTHON_VERSION=""
+            return 1
+            ;;
+    esac
+}
+
 python_is_expected() {
-    "$1" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'
+    "$1" -c "import sys; raise SystemExit(sys.version_info[:2] != (${EXPECTED_PYTHON_VERSION%.*}, ${EXPECTED_PYTHON_VERSION#*.}))"
+}
+
+gtsam_installed_version() {
+    "$VENV_PY" -c 'import importlib.metadata as m; print(m.version("gtsam"))' 2>/dev/null
+}
+
+gtsam_install_dir() {
+    "$VENV_PY" -c 'import os, sysconfig
+print(os.path.join(sysconfig.get_paths()["purelib"], "gtsam"))' 2>/dev/null
+}
+
+install_gtsam() {
+    # Prefer a prebuilt wheel. The pinned source submodule is the portable
+    # fallback for interpreters and architectures no wheel covers.
+    #
+    # Version-checked rather than merely importable: a GTSAM left behind by an
+    # earlier run — a source build, or a wheel from a since-changed pin — keeps
+    # importing happily, so testing importability alone pinned every machine to
+    # whatever it installed first and made re-running this a no-op.
+    # || true: nothing installed is the normal first-run state, and errexit
+    # would otherwise abort the whole bootstrap on the failed lookup.
+    GTSAM_INSTALLED="$(gtsam_installed_version || true)"
+    case "$GTSAM_INSTALLED" in
+        "$GTSAM_WHEEL_VERSION"|"$GTSAM_SOURCE_REF")
+            echo "GTSAM $GTSAM_INSTALLED already installed."
+            return
+            ;;
+    esac
+    if [ -n "$GTSAM_INSTALLED" ]; then
+        echo "GTSAM $GTSAM_INSTALLED is installed, but the pins are" \
+             "$GTSAM_WHEEL_VERSION (wheel) and $GTSAM_SOURCE_REF (source)." \
+             "Replacing it with the pinned wheel."
+        if "$UV" pip install --python "$VENV_PY" --reinstall \
+                -c "$REPO_ROOT/requirements.txt" \
+                "gtsam==$GTSAM_WHEEL_VERSION"; then
+            return
+        fi
+        # Report the failure rather than name a cause: a platform with no
+        # matching wheel and a venv holding root-owned files from an earlier
+        # sudo install both arrive here, and they need opposite fixes.
+        echo "Could not install GTSAM $GTSAM_WHEEL_VERSION; the reason is in" \
+             "the output above. Keeping GTSAM $GTSAM_INSTALLED." >&2
+        gtsam_dir="$(gtsam_install_dir || true)"
+        if [ -n "$gtsam_dir" ] && [ -e "$gtsam_dir" ] && [ ! -w "$gtsam_dir" ]; then
+            echo "$gtsam_dir is not writable by $(id -un): an earlier install" \
+                 "ran under sudo. 'sudo rm -rf $gtsam_dir'* and re-run." >&2
+        fi
+        # Rebuilding from source here would repeat a long build on every run
+        # for platforms no wheel covers, so it is left alone.
+        return
+    fi
+
+    # -c requirements.txt: gtsam declares numpy, and without the bound there uv
+    # installs numpy 2 into the venv over the distribution's numpy 1.
+    if "$UV" pip install --python "$VENV_PY" \
+            -c "$REPO_ROOT/requirements.txt" "gtsam==$GTSAM_WHEEL_VERSION"; then
+        return
+    fi
+
+    echo "No compatible GTSAM $GTSAM_WHEEL_VERSION wheel; building" \
+         "$GTSAM_SOURCE_REF from the $GTSAM_SUBMODULE_PATH submodule."
+    sudo apt-get install -y build-essential cmake libboost-all-dev libtbb-dev python3-dev
+    if [ -f "$REPO_ROOT/.git" ] || [ -d "$REPO_ROOT/.git" ]; then
+        ( cd "$REPO_ROOT" && git submodule update --init --recursive "$GTSAM_SUBMODULE_PATH" )
+    fi
+    if [ ! -f "$GTSAM_DIR/CMakeLists.txt" ]; then
+        echo "$GTSAM_DIR has no GTSAM sources. Initialise the" \
+             "$GTSAM_SUBMODULE_PATH submodule and re-run." >&2
+        exit 1
+    fi
+    cmake -S "$GTSAM_DIR" -B "$GTSAM_DIR/build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DGTSAM_BUILD_PYTHON=ON \
+        -DGTSAM_BUILD_UNSTABLE=OFF \
+        -DGTSAM_BUILD_TESTS=OFF \
+        -DGTSAM_BUILD_EXAMPLES_ALWAYS=OFF \
+        -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF \
+        -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+        -DGTSAM_PYTHON_VERSION="$EXPECTED_PYTHON_VERSION" \
+        -DPython_EXECUTABLE="$SYSTEM_PYTHON" \
+        -DPYTHON_EXECUTABLE="$SYSTEM_PYTHON"
+    cmake --build "$GTSAM_DIR/build" -j "$GTSAM_BUILD_JOBS"
+    sudo cmake --install "$GTSAM_DIR/build"
+    sudo ldconfig
+
+    # GTSAM's regular CMake install intentionally omits the Python module;
+    # its generated package lives in build/python. Copy it first: setuptools
+    # writes egg-info beside setup.py, and that build tree may contain files
+    # created by a prior sudo install. This places the prebuilt binding in the
+    # venv without compiling it again.
+    GTSAM_PYTHON_PACKAGE="$(mktemp -d)"
+    cp -R "$GTSAM_DIR/build/python/." "$GTSAM_PYTHON_PACKAGE/"
+    # Keep this build's cache under the selected venv. A shared uv cache may
+    # have entries created by sudo during an earlier container install.
+    UV_CACHE_DIR="$VENV_DIR/.uv-cache" \
+        "$UV" pip install --python "$VENV_PY" "$GTSAM_PYTHON_PACKAGE"
+    rm -rf "$GTSAM_PYTHON_PACKAGE"
+    "$VENV_PY" -c 'import gtsam; print("GTSAM Python bindings:", gtsam.__file__)'
+}
+
+install_vdbfusion() {
+    # Same shape as install_gtsam: a wheel where one exists, the pinned source
+    # submodule otherwise. vdbfusion publishes x86_64 wheels only, and only up
+    # to CPython 3.10, so Humble on x86_64 gets the wheel and everything else
+    # builds — which needs OpenVDB and a C++ toolchain.
+    if "$VENV_PY" -c 'import vdbfusion' >/dev/null 2>&1; then
+        echo "Already installed."
+        return
+    fi
+
+    if "$UV" pip install --python "$VENV_PY" \
+            -c "$REPO_ROOT/requirements.txt" \
+            "vdbfusion==$VDBFUSION_WHEEL_VERSION"; then
+        return
+    fi
+
+    echo "No compatible vdbfusion $VDBFUSION_WHEEL_VERSION wheel; building from" \
+         "the external/vdbfusion submodule."
+    sudo apt-get install -y build-essential cmake libeigen3-dev libtbb-dev \
+        libblosc-dev libboost-iostreams-dev
+    if [ "$VDBFUSION_DIR" = "$REPO_ROOT/external/vdbfusion" ] \
+       && { [ -f "$REPO_ROOT/.git" ] || [ -d "$REPO_ROOT/.git" ]; }; then
+        ( cd "$REPO_ROOT" && git submodule update --init external/vdbfusion )
+    fi
+    if [ ! -f "$VDBFUSION_DIR/setup.py" ] && [ ! -f "$VDBFUSION_DIR/pyproject.toml" ]; then
+        echo "$VDBFUSION_DIR has no vdbfusion sources in it. Initialise the" \
+             "external/vdbfusion submodule and re-run." >&2
+        exit 1
+    fi
+    # Same cache override install_gtsam uses for its source build: a shared uv
+    # cache can hold entries written by sudo during an earlier install, and
+    # building an sdist needs to take a lock inside it.
+    UV_CACHE_DIR="$VENV_DIR/.uv-cache" \
+        "$UV" pip install --python "$VENV_PY" \
+        -c "$REPO_ROOT/requirements.txt" "$VDBFUSION_DIR"
+    "$VENV_PY" -c 'import vdbfusion; print("vdbfusion:", vdbfusion.__file__)'
 }
 
 setup_distrobox_and_continue() {
@@ -104,7 +273,8 @@ unsupported_environment() {
         return 0
     fi
 
-    echo "ActiveSlam needs ROS 2 Jazzy on Ubuntu 24.04 with Python 3.12."
+    echo "ActiveSlam needs ROS 2 Humble (Ubuntu 22.04, Python 3.10) or" \
+         "ROS 2 Jazzy (Ubuntu 24.04, Python 3.12)."
     echo "This shell has ROS_DISTRO='${ROS_DISTRO:-unset}' and" \
          "$(/usr/bin/python3 --version 2>&1 || echo 'no /usr/bin/python3')."
     echo ""
@@ -124,18 +294,22 @@ usage() {
 Usage: ./bootstrap.sh [options]
 
 With no options it does everything a default run needs: submodules, Python
-deps, rosdep, the patched Stonefish (unless already installed), colcon build.
+deps, rosdep, the patched Stonefish (unless already installed), vdbfusion,
+colcon build.
 
   --skip-stonefish         Do not build or install Stonefish. Use when it is
                             installed somewhere CMake finds but this script
-                            does not look (it checks for StonefishConfig.cmake
-                            under the usual prefixes).
+                            does not look (it checks the usual prefixes for a
+                            StonefishConfig.cmake whose headers carry the API
+                            stonefish_ros2 needs, and rebuilds when they do
+                            not).
   --stonefish-dir <path>   Use an existing Stonefish checkout instead of the
                             submodule (default: $STONEFISH_DIR).
-  --with-vdbfusion         Build + pip install the vdbfusion submodule (needed
-                            for mapper:=tsdf; heavy — needs OpenVDB and a C++
-                            toolchain). The only option on aarch64, where no
-                            wheel is published.
+  --skip-vdbfusion         Do not install vdbfusion. mapper:=tsdf needs it, and
+                            without it that mapper exits on import. Installed
+                            from a wheel where one matches; elsewhere (aarch64,
+                            CPython 3.11+) built from the submodule, which is
+                            heavy — it needs OpenVDB and a C++ toolchain.
   --vdbfusion-dir <path>   Use an existing vdbfusion checkout instead of the
                             submodule (default: $VDBFUSION_DIR).
   --with-open3d            Build + pip install the Open3D submodule (FPFH
@@ -158,7 +332,9 @@ while [ $# -gt 0 ]; do
         # Accepted for compatibility: building Stonefish is now the default.
         --build-stonefish) shift ;;
         --stonefish-dir) STONEFISH_DIR="$2"; shift 2 ;;
-        --with-vdbfusion) WITH_VDBFUSION=true; shift ;;
+        --skip-vdbfusion) SKIP_VDBFUSION=true; shift ;;
+        # Accepted for compatibility: installing vdbfusion is now the default.
+        --with-vdbfusion) shift ;;
         --vdbfusion-dir) VDBFUSION_DIR="$2"; shift 2 ;;
         --with-open3d) WITH_OPEN3D=true; shift ;;
         --open3d-dir) OPEN3D_DIR="$2"; shift 2 ;;
@@ -170,11 +346,12 @@ while [ $# -gt 0 ]; do
 done
 
 echo "==> 1/8 Sanity checks"
-if ! command -v ros2 >/dev/null 2>&1 || [ "${ROS_DISTRO:-}" != "jazzy" ] || \
+if ! select_python_for_ros_distro || ! command -v ros2 >/dev/null 2>&1 || \
    [ ! -x "$SYSTEM_PYTHON" ] || ! python_is_expected "$SYSTEM_PYTHON"; then
     unsupported_environment
-    echo "Unsupported environment. Enter ROS 2 Jazzy on Ubuntu 24.04, source" \
-         "'/opt/ros/jazzy/setup.bash' (or setup.zsh), and re-run this script." >&2
+    echo "Unsupported environment. Enter ROS 2 Humble on Ubuntu 22.04 or ROS 2" \
+         "Jazzy on Ubuntu 24.04, source its setup.bash (or setup.zsh), and re-run" \
+         "this script." >&2
     exit 1
 fi
 if ! command -v rosdep >/dev/null 2>&1; then
@@ -185,9 +362,9 @@ if ! command -v rosdep >/dev/null 2>&1; then
 fi
 
 echo "==> 2/8 Submodules (patched Stonefish + ROS 2 bridge)"
-# Only the two required submodules by default. vdbfusion and Open3D are init'd
-# by --with-vdbfusion/--with-open3d instead: Open3D alone is ~350 MB, which is
-# a long clone to impose on everyone for an optional feature.
+# Only the two required submodules by default. vdbfusion is init'd on demand,
+# by the fallback in install_vdbfusion, and Open3D by --with-open3d: Open3D
+# alone is ~350 MB, a long clone to impose on everyone for an optional feature.
 REQUIRED_SUBMODULES="external/stonefish sim/stonefish_ros2"
 if [ -f "$REPO_ROOT/.gitmodules" ] && [ -d "$REPO_ROOT/.git" ] || \
    [ -f "$REPO_ROOT/.git" ]; then
@@ -195,6 +372,21 @@ if [ -f "$REPO_ROOT/.gitmodules" ] && [ -d "$REPO_ROOT/.git" ] || \
     ( cd "$REPO_ROOT" && git submodule update --init --recursive $REQUIRED_SUBMODULES )
 else
     echo "Not a git checkout, skipping submodule init."
+fi
+
+# The bridge is a fork already, but keep distro compatibility corrections as
+# explicit, idempotent patches beside this repository. This lets the pinned
+# submodule remain a reproducible upstream commit.
+if [ -d "$STONEFISH_ROS2_DIR/.git" ] || [ -f "$STONEFISH_ROS2_DIR/.git" ]; then
+    for patch_file in "$REPO_ROOT/$STONEFISH_ROS2_PATCH_DIR"/*.patch; do
+        [ -e "$patch_file" ] || continue
+        if git -C "$STONEFISH_ROS2_DIR" apply --reverse --check "$patch_file" \
+            >/dev/null 2>&1; then
+            continue
+        fi
+        git -C "$STONEFISH_ROS2_DIR" apply "$patch_file"
+        echo "Applied $(basename "$patch_file") to stonefish_ros2."
+    done
 fi
 
 echo "==> 3/8 Python dependencies (uv virtualenv + requirements.txt)"
@@ -205,11 +397,11 @@ fi
 if [ -x "$VENV_DIR/bin/python" ] && ! python_is_expected "$VENV_DIR/bin/python"; then
     VENV_PY_VERSION="$("$VENV_DIR/bin/python" --version 2>&1 || echo unknown)"
     if [ "${ACTIVESLAM_DISTROBOX_BOOTSTRAP:-}" = "1" ]; then
-        VENV_BACKUP="${VENV_DIR}.pre-jazzy-$(date +%Y%m%d-%H%M%S)"
+        VENV_BACKUP="${VENV_DIR}.pre-${ROS_DISTRO}-$(date +%Y%m%d-%H%M%S)"
         mv "$VENV_DIR" "$VENV_BACKUP"
         echo "Moved incompatible $VENV_PY_VERSION venv to $VENV_BACKUP."
     else
-        echo "$VENV_DIR uses $VENV_PY_VERSION instead of the required Python 3.12." \
+        echo "$VENV_DIR uses $VENV_PY_VERSION instead of the required Python $EXPECTED_PYTHON_VERSION." \
              "Deactivate it, move or remove that venv, and re-run bootstrap." >&2
         exit 1
     fi
@@ -231,37 +423,62 @@ if [ ! -x "$UV" ]; then
 fi
 # --allow-existing keeps this script re-runnable; --clear would discard
 # whatever the user has already installed into the venv.
-# --python /usr/bin/python3.12 is not optional: uv otherwise bases the venv on its
+# --python $SYSTEM_PYTHON is not optional: uv otherwise bases the venv on its
 # own managed CPython, whose --system-site-packages does not include Debian's
 # dist-packages — so rclpy imports and then dies on a missing PyYAML.
 "$UV" venv --python "$SYSTEM_PYTHON" --system-site-packages --allow-existing "$VENV_DIR"
 VENV_PY="$VENV_DIR/bin/python"
 if ! python_is_expected "$VENV_PY"; then
     VENV_PY_VERSION="$("$VENV_PY" --version 2>&1 || echo unavailable)"
-    echo "$VENV_DIR uses $VENV_PY_VERSION instead of the required Python 3.12." \
-         "Deactivate it, move or remove that venv, and re-run bootstrap from" \
-         "the supported Jazzy/Ubuntu 24.04 environment so it is recreated with" \
-         "$SYSTEM_PYTHON." >&2
+    echo "$VENV_DIR uses $VENV_PY_VERSION instead of the required Python $EXPECTED_PYTHON_VERSION." \
+        "Deactivate it, move or remove that venv, and re-run bootstrap from" \
+        "a supported ROS environment so it is recreated with" \
+        "$SYSTEM_PYTHON." >&2
     exit 1
 fi
 "$UV" pip install --python "$VENV_PY" -r "$REPO_ROOT/requirements.txt"
+install_gtsam
 
 echo "==> 4/8 rosdep (workspace root: $WS_ROOT)"
 ( cd "$WS_ROOT" && rosdep install --from-paths src -i -y )
 
 echo "==> 5/8 Patched Stonefish"
-stonefish_installed() {
+stonefish_prefix() {
     for prefix in /usr/local /usr /opt/stonefish; do
-        [ -f "$prefix/lib/cmake/Stonefish/StonefishConfig.cmake" ] && return 0
+        [ -f "$prefix/lib/cmake/Stonefish/StonefishConfig.cmake" ] \
+            && { echo "$prefix"; return 0; }
     done
     return 1
 }
+
+# Methods stonefish_ros2 calls that exist only in the patched fork. An older
+# Stonefish satisfies find_package(Stonefish) just as well, so testing only
+# that something is installed lets a stale one through — and it surfaces as a
+# compile error deep in the bridge rather than here.
+stonefish_missing_api() {
+    for pair in "sensors/vision/Camera.h:getLastCaptureTime" \
+                "sensors/vision/DepthCamera.h:getVerticalFOV"; do
+        grep -q "${pair##*:}" "$1/include/Stonefish/${pair%%:*}" 2>/dev/null \
+            || echo "${pair##*:}"
+    done
+}
+
+STONEFISH_PREFIX="$(stonefish_prefix || true)"
+STONEFISH_MISSING_API=""
+if [ -n "$STONEFISH_PREFIX" ]; then
+    STONEFISH_MISSING_API="$(stonefish_missing_api "$STONEFISH_PREFIX" \
+        | paste -sd' ' -)"
+fi
 if [ "$SKIP_STONEFISH" = true ]; then
     echo "Skipped (--skip-stonefish)."
-elif stonefish_installed; then
-    echo "Already installed, skipping the build. Force a rebuild by removing" \
-         "$STONEFISH_DIR/build and the installed StonefishConfig.cmake."
+elif [ -n "$STONEFISH_PREFIX" ] && [ -z "$STONEFISH_MISSING_API" ]; then
+    echo "Already installed at $STONEFISH_PREFIX, skipping the build."
 else
+    if [ -n "$STONEFISH_PREFIX" ]; then
+        echo "The Stonefish installed at $STONEFISH_PREFIX predates the" \
+             "patched fork — it has no $STONEFISH_MISSING_API, which" \
+             "stonefish_ros2 calls. Rebuilding and installing over it."
+    fi
     if [ ! -d "$STONEFISH_DIR/Library" ]; then
         echo "$STONEFISH_DIR looks empty. Run" \
              "'git submodule update --init external/stonefish' first," \
@@ -277,21 +494,16 @@ else
     # Installing is not optional: stonefish_ros2 does find_package(Stonefish),
     # which only resolves against an installed StonefishConfig.cmake.
     sudo cmake --install "$STONEFISH_DIR/build"
+    # Reinstalling over an older copy leaves the linker cache pointing at it.
+    sudo ldconfig
     echo "Stonefish built and installed from $STONEFISH_DIR/build."
 fi
 
 echo "==> 6/8 vdbfusion (mapper:=tsdf)"
-if [ "$WITH_VDBFUSION" = true ]; then
-    if [ "$VDBFUSION_DIR" = "$REPO_ROOT/external/vdbfusion" ]; then
-        ( cd "$REPO_ROOT" && git submodule update --init external/vdbfusion )
-    fi
-    if [ ! -f "$VDBFUSION_DIR/setup.py" ] && [ ! -f "$VDBFUSION_DIR/pyproject.toml" ]; then
-        echo "$VDBFUSION_DIR has no vdbfusion sources in it." >&2
-        exit 1
-    fi
-    "$UV" pip install --python "$VENV_PY" "$VDBFUSION_DIR"
+if [ "$SKIP_VDBFUSION" = true ]; then
+    echo "Skipped (--skip-vdbfusion). mapper:=tsdf will not run."
 else
-    echo "Skipped (pass --with-vdbfusion; only needed for mapper:=tsdf)."
+    install_vdbfusion
 fi
 
 echo "==> 7/8 Open3D (FPFH descriptors)"
@@ -330,30 +542,50 @@ echo "==> Scene meshes"
 MESH_DATA_DIR="$REPO_ROOT/sim/world/data"
 MESH_DIR="$MESH_DATA_DIR/obj"
 MESH_MANIFEST="$MESH_DATA_DIR/obj.sha256"
+# The BlueROV2 meshes are tracked in git. Of what stays out of band, only this
+# one is loaded by a scenario (scenario/waterlinked.scn); the rest are
+# unreferenced, so a checkout without them is still complete.
+REQUIRED_OUT_OF_BAND_MESHES="obj/off_shore_station.obj"
 if [ -n "$MESHES_FROM" ]; then
     mkdir -p "$MESH_DIR"
     cp -r "$MESHES_FROM"/. "$MESH_DIR"/
     echo "Copied meshes from $MESHES_FROM into $MESH_DIR."
 fi
-# Check against the manifest rather than just testing that the directory is
-# non-empty: a partial or corrupted copy otherwise fails much later, inside the
-# simulator, with no indication of which file is at fault.
+# Hash what is actually on disk instead of running sha256sum -c over the whole
+# manifest: the manifest also lists the unreferenced meshes, and those would be
+# reported as failures purely for being absent.
+MESH_INTACT=true
 if [ -f "$MESH_MANIFEST" ]; then
-    if ( cd "$MESH_DATA_DIR" && sha256sum -c --quiet "$MESH_MANIFEST" 2>/dev/null ); then
-        echo "All meshes present and matching $(basename "$MESH_MANIFEST")."
-    else
-        echo "Mesh assets are missing or do not match the manifest:" >&2
-        # || true: sha256sum's failure is the expected case here, and errexit
-        # would otherwise abort before the hint below and the build.
-        ( cd "$MESH_DATA_DIR" && sha256sum -c "$MESH_MANIFEST" 2>&1 \
-            | grep -vE ': OK$' | sed 's/^/  /' ) >&2 || true
-        echo "" >&2
-        echo "obj/ is gitignored and distributed out of band. Copy it from an" \
-             "existing checkout with --meshes-from <path>, or see" \
-             "sim/world/data/README.md." >&2
+    MESH_CHECKLIST="$(mktemp)"
+    while read -r mesh_sum mesh_path; do
+        case "$mesh_sum" in ''|'#'*) continue ;; esac
+        [ -f "$MESH_DATA_DIR/$mesh_path" ] \
+            && printf '%s  %s\n' "$mesh_sum" "$mesh_path"
+    done < "$MESH_MANIFEST" > "$MESH_CHECKLIST"
+    if [ -s "$MESH_CHECKLIST" ]; then
+        # sha256sum has already named the file at fault; errexit would abort
+        # before the hint below and the build.
+        if ! ( cd "$MESH_DATA_DIR" && sha256sum -c --quiet "$MESH_CHECKLIST" ) >&2
+        then
+            MESH_INTACT=false
+            echo "Recopy the mesh above with --meshes-from <path>." >&2
+        fi
     fi
+    rm -f "$MESH_CHECKLIST"
 else
     echo "No mesh manifest at $MESH_MANIFEST, skipping the integrity check." >&2
+fi
+MESH_MISSING=""
+for mesh in $REQUIRED_OUT_OF_BAND_MESHES; do
+    [ -f "$MESH_DATA_DIR/$mesh" ] || MESH_MISSING="$MESH_MISSING $mesh"
+done
+if [ -n "$MESH_MISSING" ]; then
+    echo "Missing scene meshes:$MESH_MISSING" >&2
+    echo "These are the meshes git does not carry. Copy them from an existing" \
+         "checkout with --meshes-from <path>, or see" \
+         "sim/world/data/README.md." >&2
+elif [ "$MESH_INTACT" = true ]; then
+    echo "Scene meshes present."
 fi
 
 echo "==> 8/8 colcon build"

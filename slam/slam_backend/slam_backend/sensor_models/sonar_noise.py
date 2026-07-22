@@ -97,6 +97,10 @@ class SonarNoiseNode(Node):
         self.declare_parameter('noise_seed', -1)
         self.declare_parameter('input_topic', '/cloud_in_raw')
         self.declare_parameter('output_topic', '/cloud_in')
+        # Relay unmodified regardless of the profile. The node still runs with
+        # the noise model off, because it is also what republishes the cloud on
+        # a QoS every consumer can match — see pointcloud_only.launch.py.
+        self.declare_parameter('passthrough', False)
 
         yaml_path = self.get_parameter('noise_profile_path').value
         if not yaml_path or not os.path.exists(yaml_path):
@@ -110,7 +114,7 @@ class SonarNoiseNode(Node):
 
         seed = resolve_seed(profile_seed, self.get_parameter('noise_seed').value, SEED_OFFSET)
         self._rng = np.random.default_rng(seed if seed != -1 else None)
-        self._passthrough = not any([
+        self._passthrough = self.get_parameter('passthrough').value or not any([
             self.profile.range_sigma0_m, self.profile.range_sigma_k,
             self.profile.range_quant_m,
             self.profile.lat_sigma_h_per_m, self.profile.lat_sigma_v_per_m,
