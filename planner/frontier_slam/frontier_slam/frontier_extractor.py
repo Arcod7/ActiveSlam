@@ -11,18 +11,35 @@ On each tick it:
 The goal's Z is set to the robot's current Z — but only for marker placement.
 The waypoint controller maintains its own fixed depth setpoint and ignores
 goal.point.z.
+
+/frontier_slam/suspend (std_msgs/Bool) lets an external planner (see
+revisit_planner.py) take over goal publication temporarily: while suspended,
+_update stops publishing its own goal and mutating GoalManager state (so it
+can't fight the external planner), but _replan keeps running at REPLAN_HZ so
+the externally-adopted goal still gets an obstacle-aware A* path. The
+external goal is adopted from the same /frontier_slam/goal topic this node
+itself publishes to — own-publication callbacks are ignored while not
+suspended, since rclpy delivers a node's own publications to its own
+subscriptions.
 """
 import math
 import os
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from geometry_msgs.msg import PointStamped, PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
+from scipy.spatial import cKDTree
+from sensor_msgs.msg import PointCloud2, PointField
+from std_msgs.msg import Bool, String
 
 from frontier_slam.control_utils import yaw_from_quat
-from frontier_slam.frontier_detection import find_frontier_clusters
+from frontier_slam.frontier_detection import (
+    find_frontier_clusters,
+    standoff_point_from_tsdf_surface,
+)
 from frontier_slam.goal_manager import GoalManager
 from frontier_slam.path_planner import CostGrid, build_cost_grid, find_path
 from frontier_slam.session_log import open_session_log
@@ -46,12 +63,31 @@ class FrontierExtractor(Node):
     UPDATE_HZ         = 0.5
     REPLAN_HZ         = 3.0
     REPLAN_FAIL_MAX   = 6    # consecutive A* failures before blacklisting goal as unreachable
+    TSDF_SOLID_STALE_S = 5.0
+    TSDF_SURFACE_STALE_S = 5.0
 
     def __init__(self):
         super().__init__('frontier_extractor')
 
         self.declare_parameter('odom_topic', '/StoneFish/Odometry')
+        self.declare_parameter('motion_status_topic', '/motion/status')
+        self.declare_parameter('tsdf_solid_points_topic', '/tsdf/occupied_voxels')
+        self.declare_parameter('tsdf_solid_containment_radius_m', 0.20)
+        self.declare_parameter('tsdf_surface_normals_topic', '/tsdf/surface_normals_cloud')
+        self.declare_parameter('tsdf_frontier_standoff_m', 1.0)
+        self.declare_parameter('tsdf_surface_normal_max_distance_m', 1.0)
         odom_topic = str(self.get_parameter('odom_topic').value)
+        motion_status_topic = str(self.get_parameter('motion_status_topic').value)
+        tsdf_solid_points_topic = str(
+            self.get_parameter('tsdf_solid_points_topic').value)
+        self._tsdf_solid_radius = max(0.0, float(
+            self.get_parameter('tsdf_solid_containment_radius_m').value))
+        tsdf_surface_normals_topic = str(
+            self.get_parameter('tsdf_surface_normals_topic').value)
+        self._tsdf_frontier_standoff = max(0.0, float(
+            self.get_parameter('tsdf_frontier_standoff_m').value))
+        self._tsdf_surface_normal_max_distance = max(0.0, float(
+            self.get_parameter('tsdf_surface_normal_max_distance_m').value))
 
         self._map: OccupancyGrid | None = None
         self._robot_pos: np.ndarray | None = None
@@ -63,6 +99,14 @@ class FrontierExtractor(Node):
         self._last_stuck_pct: int = 0
         self._astar_fail_count: int = 0
         self._astar_fail_goal: np.ndarray | None = None
+        self._suspended: bool = False
+        self._tsdf_solid_points = np.empty((0, 3), dtype=np.float64)
+        self._tsdf_solid_tree: cKDTree | None = None
+        self._tsdf_solid_received_at: float | None = None
+        self._tsdf_surface_points = np.empty((0, 3), dtype=np.float64)
+        self._tsdf_surface_normals = np.empty((0, 3), dtype=np.float64)
+        self._tsdf_surface_tree: cKDTree | None = None
+        self._tsdf_surface_received_at: float | None = None
 
         self._goals = GoalManager(
             min_explore_dist=3.0,
@@ -78,13 +122,24 @@ class FrontierExtractor(Node):
 
         self.create_subscription(OccupancyGrid, '/projected_map', self._map_cb,  1)
         self.create_subscription(Odometry,      odom_topic,      self._odom_cb, 10)
+        self.create_subscription(Bool, '/frontier_slam/suspend', self._suspend_cb, 1)
+        self.create_subscription(PointStamped, '/frontier_slam/goal', self._external_goal_cb, 1)
+        self.create_subscription(String, motion_status_topic, self._motion_status_cb, 1)
+        self.create_subscription(
+            PointCloud2, tsdf_solid_points_topic, self._tsdf_solid_cb, 1)
+        self.create_subscription(
+            PointCloud2, tsdf_surface_normals_topic, self._tsdf_surface_normals_cb, 1)
         self._goal_pub = self.create_publisher(PointStamped, '/frontier_slam/goal', 1)
         self._path_pub = self.create_publisher(Path,         '/frontier_slam/path', 1)
         self._viz      = FrontierVisualizer(self)
 
         self.create_timer(1.0 / self.UPDATE_HZ,  self._update)
         self.create_timer(1.0 / self.REPLAN_HZ,  self._replan)
-        self.get_logger().info(f'frontier_extractor ready — logging to {self._log.path}')
+        self.get_logger().info(
+            f'frontier_extractor ready — TSDF solid rejection={self._tsdf_solid_radius:.2f}m '
+            f'standoff={self._tsdf_frontier_standoff:.2f}m '
+            f'solid_topic={tsdf_solid_points_topic} '
+            f'normals_topic={tsdf_surface_normals_topic} — logging to {self._log.path}')
 
     # ------------------------------------------------------------------
     # ROS callbacks
@@ -98,6 +153,64 @@ class FrontierExtractor(Node):
         v = msg.twist.twist.linear
         self._robot_speed = math.hypot(v.x, v.y)
 
+    def _tsdf_solid_cb(self, msg: PointCloud2) -> None:
+        points = _parse_xyz_cloud(msg)
+        if points is None:
+            self.get_logger().warn(
+                'TSDF solid cloud has no readable float32 x/y/z fields — ignoring',
+                throttle_duration_sec=10.0)
+            return
+        self._tsdf_solid_points = points
+        self._tsdf_solid_tree = cKDTree(points) if len(points) else None
+        self._tsdf_solid_received_at = self._now()
+
+    def _tsdf_surface_normals_cb(self, msg: PointCloud2) -> None:
+        parsed = _parse_xyz_normals_cloud(msg)
+        if parsed is None:
+            self.get_logger().warn(
+                'TSDF normal cloud has no readable float32 x/y/z/normal fields — ignoring',
+                throttle_duration_sec=10.0)
+            return
+        points, normals = parsed
+        self._tsdf_surface_points = points
+        self._tsdf_surface_normals = normals
+        self._tsdf_surface_tree = cKDTree(points) if len(points) else None
+        self._tsdf_surface_received_at = self._now()
+
+    def _suspend_cb(self, msg: Bool) -> None:
+        if msg.data != self._suspended:
+            self.get_logger().info(
+                'Goal publication suspended — external planner active' if msg.data
+                else 'Goal publication resumed')
+        self._suspended = msg.data
+
+    def _external_goal_cb(self, msg: PointStamped) -> None:
+        if not self._suspended:
+            return   # not suspended: this is our own publication looping back, ignore
+        self._current_goal_xy = np.array([msg.point.x, msg.point.y])
+
+    def _motion_status_cb(self, msg: String) -> None:
+        """Consume a planner-agnostic motion failure report.
+
+        Motion nodes never select replacement goals.  This planner treats a
+        BLOCKED report as equivalent to repeated A* failure: blacklist the
+        committed goal and let its normal frontier selection pick the next one.
+        Other planners can publish or interpret the same topic independently.
+        """
+        if not msg.data.startswith('BLOCKED'):
+            return
+        if self._current_goal_xy is None or self._suspended:
+            return
+        gxy = self._current_goal_xy.copy()
+        self._goals.mark_unreachable(gxy, self._now())
+        self._current_goal_xy = None
+        self._current_path = []
+        self._astar_fail_count = 0
+        self._astar_fail_goal = None
+        self.get_logger().warn(
+            f'Motion reported {msg.data} for ({gxy[0]:.1f},{gxy[1]:.1f}) '
+            '— blacklisting and selecting a new frontier goal')
+
     def _now(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
 
@@ -110,11 +223,39 @@ class FrontierExtractor(Node):
         occ  = int(np.sum(data == 100))
         return free, occ, free + occ
 
+    def _tsdf_solid_contains(self, xy: np.ndarray) -> bool:
+        """Check strict 3-D solid-voxel containment at the vehicle depth."""
+        if (self._tsdf_solid_tree is None or self._tsdf_solid_received_at is None
+                or self._now() - self._tsdf_solid_received_at > self.TSDF_SOLID_STALE_S):
+            return False
+        query = np.array([xy[0], xy[1], self._robot_pos[2]], dtype=np.float64)
+        distance, _ = self._tsdf_solid_tree.query(
+            query, distance_upper_bound=self._tsdf_solid_radius)
+        return math.isfinite(distance)
+
+    def _tsdf_surface_standoff(self, frontier_xy: np.ndarray) -> np.ndarray:
+        """Move a frontier goal outward from its nearest TSDF wall surface."""
+        if (self._tsdf_frontier_standoff <= 0.0 or self._tsdf_surface_tree is None
+                or self._tsdf_surface_received_at is None
+                or self._now() - self._tsdf_surface_received_at > self.TSDF_SURFACE_STALE_S):
+            return frontier_xy
+        query = np.array([frontier_xy[0], frontier_xy[1], self._robot_pos[2]])
+        distance, index = self._tsdf_surface_tree.query(
+            query, distance_upper_bound=self._tsdf_surface_normal_max_distance)
+        if not math.isfinite(distance):
+            return frontier_xy
+        standoff = standoff_point_from_tsdf_surface(
+            self._tsdf_surface_points[index], self._tsdf_surface_normals[index],
+            self._tsdf_frontier_standoff)
+        return frontier_xy if standoff is None else standoff
+
     # ------------------------------------------------------------------
     # Main loop
     def _update(self) -> None:
         if self._map is None or self._robot_pos is None:
             return
+        if self._suspended:
+            return   # external planner owns goal publication and GoalManager state
 
         free_cells, occ_cells, mapped_cells = self._map_stats()
 
@@ -123,10 +264,43 @@ class FrontierExtractor(Node):
             self.get_logger().info('No frontiers found', throttle_duration_sec=5.0)
             return
 
+        # Put a TSDF frontier goal in free space, offset along the outward
+        # surface normal.  The nearest normal is queried at the vehicle depth;
+        # vertical surfaces give no horizontal offset and keep the old target.
+        for c in clusters:
+            c.wx, c.wy = self._tsdf_surface_standoff(np.array([c.wx, c.wy]))
+
         # Tag each cluster with its distance from the robot.
         for c in clusters:
             c.distance = float(np.hypot(c.wx - self._robot_pos[0],
                                         c.wy - self._robot_pos[1]))
+
+        # The OctoMap projection has no depth information: a 2-D frontier may
+        # land inside a vertical wall at the vehicle's current depth.  TSDF's
+        # confidently-solid voxels give the missing 3-D veto.  Do not apply a
+        # clearance buffer here; boundary frontiers are valid, only solid
+        # containment must be rejected.
+        original_count = len(clusters)
+        if self._tsdf_solid_tree is not None:
+            clusters = [
+                c for c in clusters
+                if not self._tsdf_solid_contains(np.array([c.wx, c.wy]))
+            ]
+        rejected_solid = original_count - len(clusters)
+        if rejected_solid:
+            self.get_logger().info(
+                f'Rejected {rejected_solid} frontier(s) inside solid TSDF voxels',
+                throttle_duration_sec=5.0)
+
+        if (self._current_goal_xy is not None
+                and self._tsdf_solid_contains(self._current_goal_xy)):
+            self.get_logger().warn(
+                f'Current goal ({self._current_goal_xy[0]:.1f},'
+                f'{self._current_goal_xy[1]:.1f}) is inside a solid TSDF voxel '
+                '— blacklisting it')
+            self._goals.mark_unreachable(self._current_goal_xy, self._now())
+            self._current_goal_xy = None
+            self._current_path = []
 
         selection = self._goals.select(clusters, self._robot_pos[:2], self._now())
 
@@ -253,12 +427,75 @@ class FrontierExtractor(Node):
         ])
 
 
+def _parse_xyz_cloud(msg: PointCloud2) -> 'np.ndarray | None':
+    """Parse finite XYZ points from a float32 PointCloud2 with any layout."""
+    offsets = {
+        field.name: field.offset for field in msg.fields
+        if field.datatype == PointField.FLOAT32
+    }
+    if (any(name not in offsets for name in ('x', 'y', 'z'))
+            or msg.point_step <= 0 or msg.width == 0 or msg.height == 0):
+        return np.empty((0, 3), dtype=np.float64) if msg.width == 0 else None
+    byte_order = '>' if msg.is_bigendian else '<'
+    cloud_dtype = np.dtype({
+        'names': ['x', 'y', 'z'],
+        'formats': [byte_order + 'f4'] * 3,
+        'offsets': [offsets['x'], offsets['y'], offsets['z']],
+        'itemsize': msg.point_step,
+    })
+    try:
+        data = np.ndarray(
+            shape=(msg.height, msg.width), dtype=cloud_dtype, buffer=msg.data,
+            strides=(msg.row_step, msg.point_step))
+    except (TypeError, ValueError):
+        return None
+    xyz = np.column_stack((data['x'].ravel(), data['y'].ravel(), data['z'].ravel()))
+    return xyz[np.isfinite(xyz).all(axis=1)].astype(np.float64, copy=False)
+
+
+def _parse_xyz_normals_cloud(msg: PointCloud2) -> 'tuple[np.ndarray, np.ndarray] | None':
+    """Parse finite XYZ points and normals from the TSDF normal cloud."""
+    names = ('x', 'y', 'z', 'normal_x', 'normal_y', 'normal_z')
+    offsets = {
+        field.name: field.offset for field in msg.fields
+        if field.datatype == PointField.FLOAT32
+    }
+    if any(name not in offsets for name in names) or msg.point_step <= 0:
+        return None
+    if msg.width == 0 or msg.height == 0:
+        empty = np.empty((0, 3), dtype=np.float64)
+        return empty, empty
+    byte_order = '>' if msg.is_bigendian else '<'
+    cloud_dtype = np.dtype({
+        'names': names,
+        'formats': [byte_order + 'f4'] * len(names),
+        'offsets': [offsets[name] for name in names],
+        'itemsize': msg.point_step,
+    })
+    try:
+        data = np.ndarray(
+            shape=(msg.height, msg.width), dtype=cloud_dtype, buffer=msg.data,
+            strides=(msg.row_step, msg.point_step))
+    except (TypeError, ValueError):
+        return None
+    points = np.column_stack((data['x'].ravel(), data['y'].ravel(), data['z'].ravel()))
+    normals = np.column_stack((
+        data['normal_x'].ravel(), data['normal_y'].ravel(), data['normal_z'].ravel()))
+    valid = np.isfinite(points).all(axis=1) & np.isfinite(normals).all(axis=1)
+    return points[valid].astype(np.float64, copy=False), normals[valid].astype(np.float64, copy=False)
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = FrontierExtractor()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
-        node._log.close()
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node._log.close()
+            node.destroy_node()
+            rclpy.try_shutdown()
+        except KeyboardInterrupt:
+            pass

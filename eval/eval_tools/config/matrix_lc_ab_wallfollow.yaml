@@ -1,0 +1,26 @@
+# Loop-closure A/B (see matrix_lc_ab.yaml for the frontier+octomap version),
+# this time motion:=wallfollow + mapper:=tsdf. The selected wall motion
+# executor consumes the frontier planner's goal/path and reports BLOCKED when
+# it cannot progress; the planner then selects another frontier. A prior
+# standalone wall-follow batch is not comparable to this planner-integrated
+# configuration.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_lc_ab_wallfollow.yaml
+batch_name: lc_ab_wallfollow
+duration_s: 250
+settle_s: 15
+seeds: [42]
+
+common_args:
+  slam: slam
+  mode: frontier
+  motion: wallfollow
+  mapper: tsdf
+  rviz: 'false'
+  noise_profile: realistic
+
+runs:
+  - name: lc_on
+    args: {loop_closure: 'true'}
+  - name: lc_off
+    args: {loop_closure: 'false'}

@@ -16,10 +16,10 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='romain',
-    maintainer_email='romain.tibaudo@etu.univ-cotedazur.fr',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    maintainer='antoine',
+    maintainer_email='antoine.esman7@gmail.com',
+    description='Keyboard teleop for the BlueROV2 (raw-terminal input, run standalone alongside demo.launch.py)',
+    license='MIT',
     extras_require={
         'test': [
             'pytest',

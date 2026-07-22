@@ -1694,3 +1694,106 @@ Stonefish, RViz, and the octomap build all confirmed working by Antoine directly
 - README.md / INSTALL.md: `colcon build --symlink-install` → `colcon build --symlink-install --cmake-args -Wno-dev`, silencing CMake dev-mode warnings (`CMP0144`/`CMP0074`) that PCL's own cmake modules trigger — noise from upstream PCL, not this project.
 
 **Observed impact**: ✅ `colcon build --symlink-install --cmake-args -Wno-dev` now produces zero stderr across all 6 packages (verified via isolated rebuild of `stonefish_ros2`, the only package that previously had output).
+
+## Change 55 — Implement Wall-normal tracking motion controller
+
+**Date**: 2026-07-03
+**Files**: `frontier_slam/control_utils.py`, `frontier_slam/wall_follower.py`, `launch/wall_follow.launch.py`, `bringup/launch/demo.launch.py`, `setup.py`
+
+**Objective**: Enable the ROV to lock onto the nearest TSDF surface and strafe along it at a fixed standoff distance.
+
+**What changed**:
+- Added `sway` command support to `control_utils.py` and modified `mix_thrusters` to map it to the 6-thruster layout (strafing sideway using the 4 horizontal thrusters).
+- Created `wall_follower.py`, a new node that listens to `/tsdf/surface_normals_cloud` (published by `tsdf_mapper.py`), computes distance to the nearest wall, and aligns the ROV heading perpendicular to the wall normal while strafing.
+- Created `wall_follow.launch.py` to start the wall follower node.
+- Updated `demo.launch.py` to introduce the `motion` launch argument. Users can run `ros2 launch bringup demo.launch.py motion:=wallfollow mapper:=tsdf` to engage the wall follower. (Using `motion` distinct from the operator `mode` argument).
+- Updated `setup.py` to register the new node and launch file.
+- Added closed-loop kinematic tests verifying the controller's convergence.
+
+**Observed impact**: ✅ The WallFollower successfully tracks the wall at a set standoff distance while orienting towards it and maintaining continuous movement along the tangent.
+
+## Change 56 — Filter /tsdf/voxels to confidently-solid, well-observed voxels only
+
+**Date**: 2026-07-05
+**Files**: `tsdf_mapper.py`
+
+**Objective**: The `/tsdf/voxels` `MarkerArray` scaled each cube's *size* by its
+observation-count weight (log-scale, 10 buckets, 0.1x-1.0x voxel size) to convey
+confidence. Differently-sized cubes at adjacent grid cells don't tile cleanly,
+which is what made the map look like everything was overlapping. Also, the
+only filter on what got shown was `d <= surface_thresh_m` (0.15 m) with
+`min_weight` hardcoded to 1.0 — practically no filtering at all, so
+low-confidence and single-observation voxels cluttered the view alongside
+real structure.
+
+**What changed**: Cube size is now fixed at the true grid resolution
+(`voxel_size`) for every voxel; the size channel is retired. Weight/confidence
+now drives *color* instead (log-scaled, orange = just past the observation
+floor, green = heavily observed) via a new `_confidence_colormap()`, replacing
+the old occupied/surface/free `_tsdf_colormap()` (which is dropped — with the
+new solid-only filter below, every remaining voxel is already known-occupied,
+so an occupied/free color axis has nothing left to distinguish). Two new
+parameters gate what's shown at all:
+- `voxel_min_weight` (default 10.0): hides voxels observed fewer times.
+- `voxel_min_solid_confidence` (default 0.95): using VDBFusion's TSDF
+  convention (`d=0` surface = maximally ambiguous, `d=-trunc` = fully
+  saturated occupied), `solid_confidence = (trunc - d) / (2*trunc)` — a
+  voxel must clear 0.95 (equivalently `d <= -0.9*trunc`) to be shown at all.
+  Both are real `declare_parameter`s, tunable from a launch file without a
+  rebuild if the default turns out too strict/loose for a given voxel/trunc
+  size pairing.
+
+**Observed impact**: ✅ Builds clean, live-verified against the real Stonefish
+sim (`demo.launch.py mode:=frontier mapper:=tsdf`, 40 s, zero exceptions):
+voxel count grows steadily as more of the scene gets confidently observed
+(307 → 741 → 909 → 1010 over ~24 s), confirming the stricter filter still
+passes real voxels rather than filtering the map down to nothing.
+
+## Change 57 — Fix /tsdf/voxels draw-order artifact (render opaque)
+
+**Date**: 2026-07-05
+**Files**: `tsdf_mapper.py`
+
+**Objective**: Change 56 fixed the size-mismatch overlap but voxels still
+rendered in visibly wrong front/back order. Root cause: `_confidence_colormap`
+published alpha=0.85 per cube; any marker alpha < 1 puts the whole CUBE_LIST
+into OGRE's transparent render queue, which draws in insertion order (i.e.
+VDB grid iteration order) rather than depth order. With thousands of cubes in
+one marker, overlapping ones then render in whatever order they happened to
+be added, not the order the camera would actually see them in.
+
+**What changed**: `_confidence_colormap` now returns alpha=1.0 (fully
+opaque) for every voxel. Opaque geometry is resolved per-pixel by the GPU's
+depth buffer regardless of draw order, so occlusion is always correct.
+`octomap_rviz_plugins` already does exactly this: its "Occupied Voxels" mode
+uses `Voxel Alpha: 1`, while its "Free Voxels" haze mode uses `~0.01` (low
+enough that the same sorting glitch is imperceptible) — confirmed by
+inspecting `bringup/rviz/demo.rviz`'s two `OccupancyGrid` display configs.
+Since this view is already gated to confidently-solid, well-observed voxels
+(Change 56), there was no real transparency information left to lose.
+
+**Observed impact**: ✅ Builds clean. Not yet re-verified visually in RViz on
+this machine (headless verification only, per Change 56) — worth eyeballing
+once RViz is run interactively.
+
+## Change 58 — Retune voxel_min_solid_confidence 0.95 → 0.80
+
+**Date**: 2026-07-05
+**Files**: `tsdf_mapper.py`
+
+**Objective**: Change 56's 0.95 default (`d <= -0.9*trunc`) is very strict at
+the default `trunc=0.6`, showing only voxels extremely close to fully
+saturated — after eyeballing the result, loosen the threshold to show more
+of the confidently-observed surface.
+
+**What changed**: `voxel_min_solid_confidence` default 0.95 → 0.80, which
+loosens the effective cutoff to `d <= -0.6*trunc` (was `-0.9*trunc`) — more
+near-surface voxels now clear the bar and get displayed. `_voxel_max_d`
+(derived from this parameter) updates automatically; no other logic changed.
+Supersedes the 0.95/-0.9·trunc numbers quoted in Change 56.
+
+**Observed impact**: ✅ Builds clean, live-verified against the real sim
+(`mapper:=tsdf`, 45 s): voxel/surface counts grow steadily as before
+(voxels 2130 → 4243 → 6651 → 6896, surface points climbing to 19598),
+confirming the looser threshold still passes real, growing voxel counts
+rather than flooding the map with noise.

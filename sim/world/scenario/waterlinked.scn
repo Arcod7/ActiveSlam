@@ -1,0 +1,80 @@
+<?xml version="1.0"?>
+<scenario>
+    <solver>
+        <!-- Optional parameters that override the default solver settings -->
+    </solver>
+    <environment>
+    	<ocean>
+        <water density="1031.0" jerlov="0.2" temperature="15.0"/>
+        <waves height="0.0"/>
+        <particles enabled="true"/>
+        <current type="uniform">
+            <velocity xyz="0.0 0.0 0.0"/>
+        </current>
+    </ocean>
+        <atmosphere>
+        <sun azimuth="20.0" elevation="50.0"/>
+        <conditions temperature="20.0" pressure="101300.0" humidity="0.5">
+        <wind type="uniform">
+            <velocity xyz="1.0 0.0 0.0"/>
+        </wind>
+        <wind type="jet">
+            <center xyz="0.0 0.0 3.0"/>
+            <outlet radius="0.2"/>
+            <velocity xyz="0.0 2.0 0.0"/>
+        </wind>
+        </conditions>
+        </atmosphere>
+        <ned latitude="40.0" longitude="3.0"/> 
+    </environment>
+    
+    <materials>
+	    <material name="Aluminium" density="2710.0" restitution="0.7"/>
+	    <material name="Steel" density="7891.0" restitution="0.9"/>
+	    <!-- Robot materials referenced by the included BlueROV2 scene.  Missing
+	         names silently fall back to the first material in Stonefish. -->
+	    <material name="HDPE" density="950.0" restitution="0.3"/>
+	    <material name="Neutral" density="1031.0" restitution="0.5"/>
+        <material name="Rock" density="2500.0" restitution="0.5"/>
+	    <friction_table>
+		<friction material1="Aluminium" material2="Aluminium" static="0.7" dynamic="0.4"/>
+		<friction material1="Steel" material2="Steel" static="0.4" dynamic="0.1"/>
+		<friction material1="Aluminium" material2="Steel" static="0.8" dynamic="0.5"/>
+		<friction material1="HDPE" material2="HDPE" static="0.5" dynamic="0.2"/>
+		<friction material1="Neutral" material2="Neutral" static="0.5" dynamic="0.2"/>
+		<friction material1="HDPE" material2="Neutral" static="0.5" dynamic="0.2"/>
+		<friction material1="Aluminium" material2="HDPE" static="0.5" dynamic="0.2"/>
+		<friction material1="Aluminium" material2="Neutral" static="0.5" dynamic="0.2"/>
+		<friction material1="Steel" material2="HDPE" static="0.5" dynamic="0.2"/>
+		<friction material1="Steel" material2="Neutral" static="0.5" dynamic="0.2"/>
+        <friction material1="Rock" material2="Rock" static="0.7" dynamic="0.5"/>
+		<friction material1="Rock" material2="Aluminium" static="0.5" dynamic="0.4"/>
+		<friction material1="Rock" material2="Steel" static="0.4" dynamic="0.3"/>
+		<friction material1="Rock" material2="HDPE" static="0.6" dynamic="0.4"/>
+		<friction material1="Rock" material2="Neutral" static="0.2" dynamic="0.1"/>
+	    </friction_table>
+    </materials>
+
+    <looks>
+        <look name="Gray" color="0.5 0.5 0.5" gray="0.5" roughness="0.3"/>
+        <look name="Yellow" color="1.0 1.0 0.0" gray="0.5" roughness="0.3"/>
+    </looks>
+
+    <!-- Eight-thruster BlueROV2 Heavy target used by the real experiment. -->
+    <include file="robot/bluerov2_unphy.scn"/>
+
+    <static name="OffShoreStation" type="model">
+        <physical>
+            <mesh filename="obj/off_shore_station.obj" scale="0.1" convex="false"/>
+            <origin rpy="-1.5708 0.0 0.0" xyz="0.0 0.0 0.0"/>
+        </physical>
+        <visual>
+            <mesh filename="obj/off_shore_station.obj" scale="0.1"/>
+            <origin rpy="-1.5708 0.0 0.0" xyz="0.0 0.0 0.0"/>
+        </visual>
+        <material name="Rock"/>
+        <look name="Gray"/>
+        <world_transform xyz="10.0 -2.0 8.0" rpy="0.0 0.0 0.0"/>
+    </static>
+
+</scenario>

@@ -1,0 +1,33 @@
+name: sonar_only
+seed: 42
+pressure:                    # near-perfect nav sensors (as noise_ideal.yaml)
+  sigma_depth_m: 0.001
+  bias_m: 0.0
+  publish_rate_hz: 10.0
+imu:
+  sigma_roll_rad: 0.001
+  sigma_pitch_rad: 0.001
+  sigma_yaw_rad: 0.005
+  gyro_bias_drift_rad_s: 0.0
+  publish_rate_hz: 50.0
+compass:
+  sigma_yaw_rad: 0.005
+  bias_drift_rad_s: 0.0
+  publish_rate_hz: 10.0
+dvl:
+  sigma_pct: 0.001
+  sigma_floor_m_s: 0.0001
+  bias_m_s: 0.0
+  scale_error_pct: 0.0
+  publish_rate_hz: 10.0
+sonar:                       # WaterLinked Sonar 3D-15 datasheet (as noise_realistic.yaml)
+  range_quant_m: 0.0015
+  range_sigma0_m: 0.005
+  range_sigma_k: 0.001
+  lat_sigma_h_per_m: 0.003
+  lat_sigma_v_per_m: 0.005
+  dropout_p0: 0.02
+  dropout_p_range: 0.05
+  outlier_p: 0.002
+  outlier_range_min_m: 0.3
+  outlier_range_max_m: 3.0

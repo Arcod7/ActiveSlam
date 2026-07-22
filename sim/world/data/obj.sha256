@@ -1,0 +1,23 @@
+# Checksums for the gitignored mesh assets in obj/.
+#
+# These files are too large for git (shipwreck.obj alone is 275 MiB, past
+# GitHub's 100 MB limit), so they are distributed out of band. This manifest
+# is what makes that checkable: it records exactly which files a working
+# checkout needs and what they should hash to.
+#
+# Verify with:   cd sim/world/data && sha256sum -c obj.sha256
+# bootstrap.sh runs this automatically.
+#
+# texture/br2.png is tracked in git and so is not listed here.
+
+8ea488fbcf91df8a27ebb2082031f15f7a12c869576dab369584df8ef7b81d9c  obj/bluerov2.obj
+30f2e1e6c4e4811ef5bb230c774866d0ab5da324e85462e77a26ba2db1b4d989  obj/bluerov2_phy.mtl
+65bd7fbab7371ff6fc7e601c5665d6b0c0aa27573a64a74163a87d87c48dfbb4  obj/bluerov2_phy.obj
+e67ddb9ffd794d21db3170e0dbfc1213c3e0dc5922ce166ec18d232da0ebef52  obj/bluerov2_ring.obj
+8a8b852be4ebcab8e78386e7e9cee213300a658763fbb1708473515523daf1cb  obj/bluerov2_wings.obj
+dec57815e4c811fabaac92869177ddd1afb0ea53a1b0cedb8fd2d348013936e2  obj/br2.obj
+855c9004dd8bbb56bd3de07402a1f7d2222b85c29897942c6dc94b8722c03c4e  obj/ccw.obj
+7ee6e8f8058883addb99b67ef9eee763c8b8525eef34fb945d93b3f5e2fe9be7  obj/cliff.obj
+ca806a538dcc31941f14e6b49f7492723e06ba710848071a4bf45e8008a8af20  obj/cw.obj
+ec4077f51b301a6ea91f317e9d1d07fbd3bbf14c7459f0689ba2ee4403a0b540  obj/off_shore_station.obj
+b664334fe7f5d6d29d9175f0301bab53b274247ec6566395f720bd5f8c528bae  obj/shipwreck.obj

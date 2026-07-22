@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float64MultiArray
+from geometry_msgs.msg import Twist
 import sys, select, termios, tty
 
 class BlueROV2Control(Node):
     def __init__(self):
         super().__init__('keyboard_control')
         self.publisher_ = self.create_publisher(
-            Float64MultiArray,
-            '/bluerov2/controller/thruster_setpoints_sim',
+            Twist,
+            '/motion/body_command',
             10)
 
         self.settings = termios.tcgetattr(sys.stdin)
@@ -46,29 +46,15 @@ class BlueROV2Control(Node):
                 elif key == 'f': pass  # all zero → stop
                 elif key == '\x03': break
 
-                # Mixer for 6 thrusters on simple_rov.scn
-                # Order matches XML: 0:FrontRight 1:FrontLeft 2:BackRight 3:BackLeft
-                #                    4:VertFront  5:VertBack
-                t = [0.0] * 6
-
-                # Horizontal (diagonal 45-deg layout)
-                t[0] =  f - s - y   # FrontRight
-                t[1] =  f + s + y   # FrontLeft
-                t[2] = -f - s + y   # BackRight
-                t[3] = -f + s - y   # BackLeft
-
-                # Vertical (forward = down in NED → negate for surface)
-                t[4] = -v           # VertFront
-                t[5] = -v           # VertBack
-
-                msg = Float64MultiArray()
-                msg.data = [float(max(min(val, 1.0), -1.0)) for val in t]
+                msg = Twist()
+                msg.linear.x = f
+                msg.linear.y = s
+                msg.linear.z = -v  # NED: negative body Z demand moves upward
+                msg.angular.z = y
                 self.publisher_.publish(msg)
 
         finally:
-            stop_msg = Float64MultiArray()
-            stop_msg.data = [0.0] * 6
-            self.publisher_.publish(stop_msg)
+            self.publisher_.publish(Twist())
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
 
 def main():

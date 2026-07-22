@@ -3,12 +3,12 @@
 <package format="3">
   <name>launch_tools</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="antoine@todo.todo">antoine</maintainer>
-  <license>TODO: License declaration</license>
+  <description>Keyboard teleop for the BlueROV2 (raw-terminal input, run standalone alongside demo.launch.py)</description>
+  <maintainer email="antoine.esman7@gmail.com">antoine</maintainer>
+  <license>MIT</license>
 
   <exec_depend>rclpy</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

@@ -1,7 +1,7 @@
-From 6a286891b4e89b72889a9addc84c88e41531861f Mon Sep 17 00:00:00 2001
+From 6ce9d51fd372125f04222f00e58ce2d69fcb974f Mon Sep 17 00:00:00 2001
 From: Arcod7 <antoine.esman@epitech.eu>
 Date: Mon, 15 Jun 2026 14:21:03 +0100
-Subject: [PATCH 2/2] feat: snapshot camera timestamps on the physics thread
+Subject: [PATCH 2/4] feat: snapshot camera timestamps on the physics thread
  for ground truth
 
 ---
@@ -301,7 +301,7 @@ index 82a3b9a..0a5b827 100644
  
  std::vector<Renderable> Camera::Render()
 diff --git a/Library/src/sensors/vision/Multibeam2.cpp b/Library/src/sensors/vision/Multibeam2.cpp
-index 1d96f36..e8999ad 100644
+index 8743c4e..db9cdfd 100644
 --- a/Library/src/sensors/vision/Multibeam2.cpp
 +++ b/Library/src/sensors/vision/Multibeam2.cpp
 @@ -26,6 +26,7 @@
@@ -312,7 +312,7 @@ index 1d96f36..e8999ad 100644
  #include "graphics/OpenGLPipeline.h"
  #include "graphics/OpenGLContent.h"
  #include "graphics/OpenGLDepthCamera.h"
-@@ -204,6 +205,7 @@ void Multibeam2::SetupCamera(size_t index, const Vector3& eye, const Vector3& di
+@@ -206,6 +207,7 @@ void Multibeam2::SetupCamera(size_t index, const Vector3& eye, const Vector3& di
      glm::vec3 dir_ = glm::vec3((GLfloat)dir.x(), (GLfloat)dir.y(), (GLfloat)dir.z());
      glm::vec3 up_ = glm::vec3((GLfloat)up.x(), (GLfloat)up.y(), (GLfloat)up.z());
      cameras[index].cam->SetupCamera(eye_, dir_, up_);
@@ -320,6 +320,3 @@ index 1d96f36..e8999ad 100644
  }
      
  void Multibeam2::InstallNewDataHandler(std::function<void(Multibeam2*)> callback)
--- 
-2.54.0
-

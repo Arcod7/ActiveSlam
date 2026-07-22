@@ -1,0 +1,32 @@
+ardusub_adapter:
+  ros__parameters:
+    # Create a dedicated external UDP endpoint in BlueOS that targets this port.
+    connection_url: "udpin:0.0.0.0:14560"
+    source_system: 191
+    source_component: 191
+    # BlueROV defaults. Confirm SYSID_THISMAV and autopilot component ID.
+    target_system: 1
+    target_component: 1
+
+    send_rate_hz: 20.0
+    poll_rate_hz: 100.0
+    command_timeout_s: 0.5
+    gate_status_timeout_s: 0.5
+    heartbeat_timeout_s: 2.0
+    neutral_burst_count: 5
+
+    # The adapter observes these conditions. It never arms or changes mode.
+    require_armed: true
+    required_mode: ""  # automatic: ALT_HOLD for manual, GUIDED for local NED
+
+    # Keep vertical authority with ArduSub depth hold for initial wet tests.
+    enable_vertical: false
+
+    # manual_control: fraction of the MAVLink axis range available to ROS.
+    manual_authority: 0.15
+
+    # local_ned_velocity: normalized ROS demand is scaled by these SI limits.
+    max_surge_mps: 0.15
+    max_sway_mps: 0.15
+    max_vertical_mps: 0.10
+    max_yaw_rate_rps: 0.15

@@ -16,8 +16,10 @@
   <depend>tf2_ros</depend>
   <depend>python3-numpy</depend>
   <depend>python3-scipy</depend>
+  <exec_depend>ament_index_python</exec_depend>
 
-  <!-- vdbfusion (tsdf_mapper only) has no rosdep key: pip install -r requirements.txt -->
+  <!-- vdbfusion and pymavlink have no Ubuntu 24.04 rosdep/apt key here.
+       Install the Python requirements documented at the repository root. -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

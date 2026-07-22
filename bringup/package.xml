@@ -10,7 +10,9 @@
   <exec_depend>stonefish_groundtruth_mapping</exec_depend>
   <exec_depend>frontier_slam</exec_depend>
   <exec_depend>launch_tools</exec_depend>
+  <exec_depend>motion_safety_rviz</exec_depend>
   <exec_depend>rviz2</exec_depend>
+  <exec_depend>octomap_server</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

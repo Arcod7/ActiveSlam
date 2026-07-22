@@ -10,7 +10,7 @@ package_name = 'world'
 data_files = [
     ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
     ('share/' + package_name, ['package.xml']),
-    ('share/' + package_name + '/scnenario', glob.glob('scnenario/*.scn')),
+    ('share/' + package_name + '/scenario', glob.glob('scenario/*.scn')),
     ('share/' + package_name + '/data/robot', glob.glob('data/robot/*.scn')),
     ('share/' + package_name + '/data/texture', glob.glob('data/texture/*.png')),
     ('share/' + package_name + '/data/obj', glob.glob('data/obj/*.obj') + glob.glob('data/obj/*.mtl')),

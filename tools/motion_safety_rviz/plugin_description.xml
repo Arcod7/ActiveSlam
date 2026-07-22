@@ -1,0 +1,10 @@
+<library path="motion_safety_rviz">
+  <class
+    name="motion_safety_rviz/MotionSafetyPanel"
+    type="motion_safety_rviz::MotionSafetyPanel"
+    base_class_type="rviz_common::Panel">
+    <description>
+      Enables or disables the ActiveSlam ROS motion gate and displays its live status.
+    </description>
+  </class>
+</library>

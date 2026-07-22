@@ -1,0 +1,25 @@
+# Fast pre-flight sanity check for run_matrix.py itself: 2 runs x 1 seed,
+# 120s each -- confirms the orchestrator's launch/kill/validity/plot/
+# aggregate pipeline works end-to-end (including a clean back-to-back
+# Stonefish restart) before queuing the full evaluation matrix.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_smoke.yaml
+batch_name: smoke
+duration_s: 120
+settle_s: 10
+seeds: [1]
+
+common_args:
+  slam: slam
+  mode: frontier
+  rviz: 'false'
+  noise_profile: realistic
+  loop_closure: 'true'
+  map_rebuild: 'false'
+  mapper: octomap
+
+runs:
+  - name: baseline
+    args: {}
+  - name: tsdf_rebuild
+    args: {mapper: tsdf, map_rebuild: 'true'}

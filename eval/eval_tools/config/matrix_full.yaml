@@ -1,0 +1,56 @@
+# Full evaluation matrix: 8 configs x 5 seeds = 40 runs, ~8 min each
+# (480s sim + ~50s launch/teardown/plot + 15s settle) -> ~6h total.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_full.yaml
+batch_name: full
+duration_s: 480
+settle_s: 15
+seeds: [101, 102, 103, 104, 105]
+
+common_args:
+  slam: slam
+  mode: frontier
+  rviz: 'false'
+  noise_profile: realistic
+  loop_closure: 'true'
+  map_rebuild: 'false'
+  mapper: octomap
+
+runs:
+  # Baseline: everything at its default under a realistic noise profile.
+  - name: baseline
+    args: {}
+
+  # Loop closure ON vs OFF -- the cleanest available A/B for "does loop
+  # closure actually reduce drift/uncertainty".
+  - name: lc_off
+    args: {loop_closure: 'false'}
+
+  # Mapper backend: octomap vs tsdf (map-quality metrics differ per backend
+  # -- see eval_tools/map_metrics.py).
+  - name: tsdf
+    args: {mapper: tsdf}
+
+  # Map rebuild after a big loop closure, tsdf-only (see tsdf_mapper.py /
+  # pose_graph.py) -- itself a benchmark axis, off by default elsewhere.
+  - name: tsdf_rebuild
+    args: {mapper: tsdf, map_rebuild: 'true'}
+
+  # Next-pose-choice axis: frontier (baseline's mode) vs wall-following.
+  # wallfollow consumes /tsdf/surface_normals_cloud, so it requires
+  # mapper:=tsdf (validated by run_matrix.py at load time).
+  - name: wallfollow
+    args: {mapper: tsdf, motion: wallfollow}
+
+  # Noise-profile sweep: ideal (near-perfect sensors) and degraded (turbid
+  # water / magnetic interference / bad bottom-lock) bracket the baseline's
+  # realistic profile.
+  - name: noise_ideal
+    args: {noise_profile: ideal}
+  - name: noise_degraded
+    args: {noise_profile: degraded}
+
+  # Uncertainty-triggered revisit planner (the Week 3 active-SLAM
+  # contribution) vs. passive frontier-only exploration.
+  - name: revisit_on
+    args: {revisit: 'true'}

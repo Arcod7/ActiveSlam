@@ -1,0 +1,33 @@
+name: realistic
+seed: -1
+pressure:
+  sigma_depth_m: 0.02        # Bar30: ±2cm resolution
+  bias_m: 0.0
+  publish_rate_hz: 10.0
+imu:                         # realistic gyro-integrated attitude
+  sigma_roll_rad: 0.02       # ~1.1° — typical MEMS accelerometer
+  sigma_pitch_rad: 0.02
+  sigma_yaw_rad: 0.01        # ~0.6° short-term gyro attitude
+  gyro_bias_drift_rad_s: 0.0001
+  publish_rate_hz: 50.0
+compass:                     # absolute magnetic heading
+  sigma_yaw_rad: 0.05        # ~2.9° after calibration
+  bias_drift_rad_s: 0.0001
+  publish_rate_hz: 10.0
+dvl:
+  sigma_pct: 0.01            # Pathfinder DVL: ±1% of speed + 0.1 cm/s
+  sigma_floor_m_s: 0.001
+  bias_m_s: 0.001
+  scale_error_pct: 0.002     # 0.2% constant scale error (sampled once per run)
+  publish_rate_hz: 10.0
+sonar:                       # WaterLinked Sonar 3D-15, 1.2MHz mode datasheet
+  range_quant_m: 0.0015      # range resolution
+  range_sigma0_m: 0.005      # noise floor ~ a few x range resolution
+  range_sigma_k: 0.001       # speckle/SNR term, ~0.1% of range
+  lat_sigma_h_per_m: 0.003   # 0.5 x tan(0.35 deg beam separation)
+  lat_sigma_v_per_m: 0.005   # 0.5 x tan(0.60 deg beam separation)
+  dropout_p0: 0.02           # oblique-incidence / low-reflectivity no-returns
+  dropout_p_range: 0.05      # extra dropout growth toward max range
+  outlier_p: 0.002           # sparse multipath returns
+  outlier_range_min_m: 0.3
+  outlier_range_max_m: 3.0

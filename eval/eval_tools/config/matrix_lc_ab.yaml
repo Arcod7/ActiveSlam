@@ -1,0 +1,23 @@
+# T1.2 (docs/plans/plan.md): controlled A/B, loop closure on vs off, same
+# scripted drift-and-return scenario (T1.1) and same noise seed -- isolates
+# the closure's effect on final ATE from run-to-run noise variance.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_lc_ab.yaml
+batch_name: lc_ab
+duration_s: 220
+settle_s: 15
+seeds: [42]
+
+common_args:
+  slam: slam
+  mode: frontier
+  mapper: octomap
+  rviz: 'false'
+  noise_profile: realistic
+  scenario: drift_return
+
+runs:
+  - name: lc_on
+    args: {loop_closure: 'true'}
+  - name: lc_off
+    args: {loop_closure: 'false'}

@@ -1,0 +1,30 @@
+From ad2e48df18163d2b4b224d1f045fa9b91f1bf696 Mon Sep 17 00:00:00 2001
+From: Arcod7 <antoine.esman@epitech.eu>
+Date: Tue, 21 Jul 2026 17:07:20 +0100
+Subject: [PATCH 3/4] fix: use GL_LINEAR for texture magnification filter
+
+GL_TEXTURE_MAG_FILTER only accepts GL_NEAREST or GL_LINEAR; the mipmap
+minification modes are not valid values for it. Passing
+GL_LINEAR_MIPMAP_LINEAR generates a GL_INVALID_ENUM error and the
+parameter is left unchanged (defaulting to GL_LINEAR), so this was a
+silent no-op that polluted the GL error state on every texture load.
+
+Set it to GL_LINEAR explicitly, matching every other magnification
+filter in the codebase and preserving the intended visual result.
+---
+ Library/src/graphics/OpenGLContent.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Library/src/graphics/OpenGLContent.cpp b/Library/src/graphics/OpenGLContent.cpp
+index 3c9eaa3..b171850 100644
+--- a/Library/src/graphics/OpenGLContent.cpp
++++ b/Library/src/graphics/OpenGLContent.cpp
+@@ -1476,7 +1476,7 @@ GLuint OpenGLContent::LoadTexture(const std::string& filename, bool srgb, bool a
+     else
+         glTexImage2D(GL_TEXTURE_2D, 0, alpha ? GL_RGBA8 : GL_RGB8, width, height, 0, alpha? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE, dataBuffer);
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR_MIPMAP_LINEAR);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+     if(anisotropy > 0.f)
+         glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, anisotropy);
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);

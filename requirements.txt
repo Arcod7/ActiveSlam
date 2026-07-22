@@ -1,7 +1,22 @@
-# Python dependencies not covered by rosdep (ROS packages come from rosdep instead).
-# Verified working versions (aarch64, ROS2 Jazzy container, 2026-07-02):
-numpy>=1.26
-scipy>=1.11
+# Python dependencies that rosdep genuinely cannot provide.
+#
+# Everything rosdep *can* resolve is declared in the package.xml of the package
+# that imports it (python3-numpy, python3-scipy, python3-matplotlib), so it is
+# installed by `rosdep install --from-paths src -i -y` and deliberately not
+# repeated here.
+#
+# Verified working versions (aarch64, ROS 2 Jazzy container, 2026-07-02):
+
+# No rosdep key exists for the Python bindings. rosdep's `gtsam` key maps to
+# ros-jazzy-gtsam, which ships only the C++ libraries (libgtsam.so and friends,
+# zero Python files), so it cannot satisfy `import gtsam` in slam_backend.
+gtsam==4.2.1
+
+# No rosdep key; PyPI wheel only. Used by slam_backend for scan matching.
+small-gicp
+
+# No rosdep key; PyPI wheel only. Needed only by the real ArduSub adapter.
+pymavlink==2.4.49
 
 # vdbfusion (mapper:=tsdf only) is NOT installable via this file: PyPI only ships wheels up
 # to cp310, on x86_64 only — no wheel exists for Python 3.11/3.12 (Ubuntu 24.04's default) on
