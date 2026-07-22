@@ -42,7 +42,9 @@ OPEN3D_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
 
 MESHES_FROM=""
 GTSAM_DIR="$REPO_ROOT/$GTSAM_SUBMODULE_PATH"
-GTSAM_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
+# The generated Python bindings have a high peak memory use.  A serial build is
+# reliable in constrained containers; callers with enough RAM can override it.
+GTSAM_BUILD_JOBS="${ACTIVESLAM_GTSAM_BUILD_JOBS:-1}"
 
 # Python deps go into a uv-managed virtualenv. --system-site-packages keeps
 # the distro's ROS Python packages visible inside it (and avoids PEP 668 on
