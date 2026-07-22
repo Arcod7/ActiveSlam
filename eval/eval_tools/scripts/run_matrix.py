@@ -348,9 +348,9 @@ def run_one(args: dict, output_dir: str, seed: int, duration_s: float,
 def run_matrix(cfg: dict, batch_root: str, dry_run: bool = False) -> str:
     batch_dir = os.path.join(
         batch_root, f"{cfg['batch_name']}_{time.strftime('%Y%m%d_%H%M')}")
-    if not dry_run:
-        os.makedirs(batch_dir, exist_ok=True)
 
+    # Before creating anything: a refused batch should leave no empty directory
+    # behind to be mistaken later for a run that produced nothing.
     if not dry_run:
         orphans = find_orphan_nodes()
         if orphans:
@@ -360,6 +360,7 @@ def run_matrix(cfg: dict, batch_root: str, dry_run: bool = False) -> str:
                 'vehicle, and every run in the batch would be wasted.\n  '
                 + '\n  '.join(orphans)
                 + '\nKill them (by PID, not the ros2 launch wrapper) and re-run.')
+        os.makedirs(batch_dir, exist_ok=True)
 
     total = len(cfg['runs']) * len(cfg['seeds'])
     est_hours = total * (cfg['duration_s'] + 50 + cfg['settle_s']) / 3600

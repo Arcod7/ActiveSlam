@@ -143,3 +143,38 @@ def test_orphan_scan_ignores_the_orchestrator_itself():
     # make every batch refuse to start.
     assert all('run_matrix.py' not in entry
                for entry in run_matrix.find_orphan_nodes())
+
+
+# ----------------------------------------------------------------------
+# batch pre-flight
+# ----------------------------------------------------------------------
+
+def _minimal_cfg():
+    return {'batch_name': 'unit', 'duration_s': 480, 'settle_s': 0,
+            'seeds': [1], 'common_args': {}, 'runs': [{'name': 'r', 'args': {}}]}
+
+
+def test_batch_refuses_to_start_when_orphans_are_alive(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_matrix, 'find_orphan_nodes',
+                        lambda: ['4242 octomap_server_node'])
+    with pytest.raises(SystemExit) as excinfo:
+        run_matrix.run_matrix(_minimal_cfg(), str(tmp_path))
+    assert '4242' in str(excinfo.value)
+
+
+def test_refused_batch_leaves_no_directory_behind(tmp_path, monkeypatch):
+    # An empty batch directory would later read as a batch that ran and
+    # produced nothing, which is a different and much more alarming failure.
+    monkeypatch.setattr(run_matrix, 'find_orphan_nodes',
+                        lambda: ['4242 stonefish_simulator'])
+    with pytest.raises(SystemExit):
+        run_matrix.run_matrix(_minimal_cfg(), str(tmp_path))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_dry_run_does_not_check_for_orphans(tmp_path, monkeypatch):
+    # --dry-run only prints commands; refusing it would make it useless for
+    # inspecting a matrix while the previous batch is still running.
+    monkeypatch.setattr(run_matrix, 'find_orphan_nodes',
+                        lambda: ['4242 stonefish_simulator'])
+    run_matrix.run_matrix(_minimal_cfg(), str(tmp_path), dry_run=True)
