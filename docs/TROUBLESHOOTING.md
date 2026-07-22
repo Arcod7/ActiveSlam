@@ -5,6 +5,26 @@ Install steps are in [`INSTALL.md`](INSTALL.md).
 
 ## Build
 
+**`gtsam==4.2.1 has no wheels with a matching Python implementation tag`
+(for example, `cp310`)**
+
+The virtualenv was created from an unsupported system Python. A virtualenv
+isolates installed packages, but it retains its base interpreter and version;
+one created from Python 3.10 is still Python 3.10. GTSAM 4.2.1 has wheels for
+CPython 3.11 and newer, and the supported ROS 2 Jazzy / Ubuntu 24.04
+environment supplies Python 3.12.
+
+Check the shell before running bootstrap:
+
+```bash
+echo "$ROS_DISTRO"       # jazzy
+/usr/bin/python3.12 --version  # Python 3.12.x
+```
+
+If those are correct but `<workspace>/.venv/bin/python --version` still says
+3.10, deactivate and move or remove the stale venv, then re-run
+`./bootstrap.sh`. It will recreate the venv from `/usr/bin/python3.12`.
+
 **`Could not find a package configuration file provided by "Stonefish"`**
 
 `stonefish_ros2` does `find_package(Stonefish)`, which resolves only against an

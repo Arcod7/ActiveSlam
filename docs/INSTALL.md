@@ -27,7 +27,10 @@ They must be on disk before the simulator can load the scenario. `bootstrap.sh
 against a checksum manifest.
 
 Everything else — build tools, Python packages, Stonefish's dependencies — is
-installed by `bootstrap.sh`.
+installed by `bootstrap.sh`. The Python packages go into a virtualenv, but the
+Python interpreter itself still comes from the supported Ubuntu 24.04
+environment: a virtualenv isolates packages; it does not change Python 3.10
+into Python 3.12.
 
 ## What `bootstrap.sh` does
 
@@ -35,7 +38,9 @@ Run it from the repo root, inside a shell where `ros2` is on `PATH`. It is
 idempotent: re-run it after a `git pull`, or whenever a step failed and you
 have fixed the cause.
 
-1. **Sanity checks** — refuses to continue without `ros2` and `rosdep`.
+1. **Sanity checks** — refuses to continue without ROS 2 Jazzy, `rosdep`, and
+   a system Python new enough for the published GTSAM wheel. Ubuntu 24.04's
+   Python 3.12 satisfies that requirement.
 2. **Submodules** — initialises the two required ones, `external/stonefish`
    (the patched library) and `sim/stonefish_ros2` (the patched ROS 2 bridge).
    The workspace does not build without them, so cloning with

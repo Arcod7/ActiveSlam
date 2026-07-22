@@ -39,6 +39,7 @@ MESHES_FROM=""
 # `pip install` there fails with PEP 668. --system-site-packages keeps the
 # distro's ROS Python packages visible inside it.
 VENV_DIR="$WS_ROOT/.venv"
+SYSTEM_PYTHON="/usr/bin/python3.12"
 
 usage() {
     cat <<EOF
@@ -97,10 +98,32 @@ if ! command -v ros2 >/dev/null 2>&1; then
          "and re-run this script." >&2
     exit 1
 fi
+if [ "${ROS_DISTRO:-}" != "jazzy" ]; then
+    echo "ActiveSlam requires ROS 2 Jazzy, but ROS_DISTRO is" \
+         "'${ROS_DISTRO:-unset}'. Enter a Jazzy/Ubuntu 24.04 shell, source" \
+         "'/opt/ros/jazzy/setup.bash' (or setup.zsh), and re-run this script." >&2
+    exit 1
+fi
 if ! command -v rosdep >/dev/null 2>&1; then
     echo "rosdep not found. Install it first:" \
          "'sudo apt install python3-rosdep && sudo rosdep init && rosdep update'" \
          "(see docs/INSTALL.md)." >&2
+    exit 1
+fi
+
+# A venv isolates packages but keeps the Python implementation/version it was
+# created from. The supported Jazzy/Ubuntu 24.04 environment supplies Python
+# 3.12, and we select that exact interpreter below. Catch an
+# Ubuntu 22.04/Humble-style Python 3.10 environment before uv produces a much
+# less actionable dependency-resolution error.
+python_is_expected() {
+    "$1" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'
+}
+if [ ! -x "$SYSTEM_PYTHON" ] || ! python_is_expected "$SYSTEM_PYTHON"; then
+    echo "ActiveSlam requires $SYSTEM_PYTHON from the supported ROS 2 Jazzy /" \
+         "Ubuntu 24.04 environment. A virtualenv does not change the Python" \
+         "version it is created from. Enter that environment and re-run this" \
+         "script." >&2
     exit 1
 fi
 
@@ -139,11 +162,19 @@ if [ ! -x "$UV" ]; then
 fi
 # --allow-existing keeps this script re-runnable; --clear would discard
 # whatever the user has already installed into the venv.
-# --python /usr/bin/python3 is not optional: uv otherwise bases the venv on its
+# --python /usr/bin/python3.12 is not optional: uv otherwise bases the venv on its
 # own managed CPython, whose --system-site-packages does not include Debian's
 # dist-packages — so rclpy imports and then dies on a missing PyYAML.
-"$UV" venv --python /usr/bin/python3 --system-site-packages --allow-existing "$VENV_DIR"
+"$UV" venv --python "$SYSTEM_PYTHON" --system-site-packages --allow-existing "$VENV_DIR"
 VENV_PY="$VENV_DIR/bin/python"
+if ! python_is_expected "$VENV_PY"; then
+    VENV_PY_VERSION="$("$VENV_PY" --version 2>&1 || echo unavailable)"
+    echo "$VENV_DIR uses $VENV_PY_VERSION instead of the required Python 3.12." \
+         "Deactivate it, move or remove that venv, and re-run bootstrap from" \
+         "the supported Jazzy/Ubuntu 24.04 environment so it is recreated with" \
+         "$SYSTEM_PYTHON." >&2
+    exit 1
+fi
 "$UV" pip install --python "$VENV_PY" -r "$REPO_ROOT/requirements.txt"
 
 echo "==> 4/8 rosdep (workspace root: $WS_ROOT)"
@@ -263,7 +294,7 @@ echo "==> 8/8 colcon build"
 # interpreter runs colcon, and only the venv can import gtsam and the other
 # wheels; and CMake's FindPython3 takes the first python3 on PATH, which on a
 # machine with a uv- or pyenv-managed Python in ~/.local/bin is one without
-# catkin_pkg. The venv answers both, being /usr/bin/python3 with
+# catkin_pkg. The venv answers both, being /usr/bin/python3.12 with
 # --system-site-packages.
 ( cd "$WS_ROOT" && PATH="$VENV_DIR/bin:$PATH" \
     colcon build --symlink-install --cmake-args -Wno-dev )
