@@ -21,3 +21,6 @@ pymavlink==2.4.49
 # vdbfusion (mapper:=tsdf only) is NOT installable via this file: PyPI only ships wheels up
 # to cp310, on x86_64 only — no wheel exists for Python 3.11/3.12 (Ubuntu 24.04's default) on
 # any architecture. Build from source instead — see docs/INSTALL.md.
+#
+# open3d (FPFH descriptors only) is not installable here either: no aarch64 wheel exists on
+# any Python version. Pinned as a submodule and built from source — see docs/INSTALL.md.

@@ -41,8 +41,9 @@ them, and the workspace will not build without `external/stonefish` (the
 library `stonefish_ros2` compiles against) or `sim/stonefish_ros2` (a package
 `stonefish_groundtruth_mapping` depends on). Clone with
 `--recurse-submodules`, or run `git submodule update --init --recursive`
-afterwards — `./bootstrap.sh` does this for you. `external/vdbfusion` is the
-one genuinely optional submodule; it is only needed for `mapper:=tsdf`.
+afterwards — `./bootstrap.sh` does this for you. `external/vdbfusion` and
+`external/open3d` are the genuinely optional submodules: the first is only
+needed for `mapper:=tsdf`, the second only for FPFH descriptor work.
 
 The ROS 2 bridge is a patched fork too — see
 [`stonefish_ros2_fork.md`](stonefish_ros2_fork.md).
@@ -83,14 +84,31 @@ Python dependencies are split by who can install them:
 - **[`requirements.txt`](../requirements.txt) is only what `rosdep` cannot
   provide** — install with:
 
+Ubuntu 24.04 — ROS 2 Jazzy's own target — marks its system Python
+externally-managed, so a bare `pip install` there fails with PEP 668.
+`./bootstrap.sh` therefore puts these into a [uv](https://docs.astral.sh/uv/)
+virtualenv at `<workspace>/.venv`, installing `uv` itself first if it is
+missing. `--system-site-packages` keeps `rclpy` and the rest of the distro's
+ROS 2 Python visible from inside it, and an already-active virtualenv is
+reused rather than replaced. Activate it before building or launching:
+
 ```bash
-pip install -r requirements.txt   # or --break-system-packages / inside a venv
+./bootstrap.sh                    # creates the venv and installs into it
+source <workspace>/.venv/bin/activate
+```
+
+By hand, without the script:
+
+```bash
+uv venv --python /usr/bin/python3 --system-site-packages --allow-existing .venv
+uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
 `gtsam` and `small-gicp` (needed only for `slam:=slam`) and `pymavlink` (needed
 only for the real ArduSub adapter) are PyPI wheels and install cleanly this way
 on aarch64 as well as x86_64. `vdbfusion` (needed only for `mapper:=tsdf`) is
-the exception — see below, it needs a source build instead.
+the exception — see below, it needs a source build instead, and so does
+`open3d`.
 
 **`vdbfusion` is NOT installable via this file.**
 PyPI only publishes wheels up to Python 3.10, x86_64
@@ -108,6 +126,36 @@ Follow [vdbfusion's own `INSTALL.md`](https://github.com/PRBonn/vdbfusion/blob/m
 first if the build fails — it needs OpenVDB and a C++ toolchain, which aren't
 part of this project's own dependency list. Skip this entirely if you only
 plan to run the default `mapper:=octomap`.
+
+**`open3d` is NOT installable via this file either.**
+No wheel is published for aarch64 on any Python version (`pip install open3d`
+reports no matching distribution at all), so on Apple Silicon or a Raspberry Pi
+a source build is the only option. It is pinned as a submodule at `v0.19.0` for
+the same reason vdbfusion is:
+
+```bash
+git submodule update --init external/open3d
+./bootstrap.sh --with-open3d
+```
+
+The build is heavy — it fetches and compiles Open3D's own third-party
+dependencies, including VTK from source, for which no aarch64 binary is
+published — and is configured with CUDA, the GUI, examples and unit tests off,
+since none of them are used here. Skip it unless you are working on FPFH
+submap descriptors or point-cloud registration.
+
+Two things can go wrong on aarch64, neither of them specific to this project:
+
+- `import open3d` raising `cannot allocate memory in static TLS block`.
+  The module reserves initial-exec thread-local storage that the loader cannot
+  place after the fact; on a kernel with 16 KB pages there is less surplus to
+  take it from. Raise the loader's reserve for the process:
+  `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2097152`.
+- VTK's download failing with `SSL connect error` from inside a container that
+  reaches other hosts fine. Fetch
+  `https://vtk.org/files/release/9.1/VTK-9.1.0.tar.gz` from the host into
+  `external/open3d/3rdparty_downloads/vtk/` and re-run; CMake verifies the
+  SHA-256 and skips the download.
 
 ## Verify
 

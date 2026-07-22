@@ -1,7 +1,7 @@
 #!/bin/bash
 # Idempotent install helper — collapses docs/INSTALL.md into one command.
 # Fast/testable path (deps + rosdep + colcon build) runs by default; the heavy
-# C++ builds (patched Stonefish, vdbfusion) are opt-in via flags.
+# C++ builds (patched Stonefish, vdbfusion, Open3D) are opt-in via flags.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +15,7 @@ else
          "for the standard layout (see docs/INSTALL.md)." >&2
 fi
 
-# Stonefish and vdbfusion are git submodules under external/, pinned to exact
+# Stonefish, vdbfusion and Open3D are git submodules under external/, pinned to exact
 # commits, so there is nothing to clone or patch by hand and the versions cannot
 # drift from what this repo was tested against.
 BUILD_STONEFISH=false
@@ -25,7 +25,17 @@ STONEFISH_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
 WITH_VDBFUSION=false
 VDBFUSION_DIR="$REPO_ROOT/external/vdbfusion"
 
+WITH_OPEN3D=false
+OPEN3D_DIR="$REPO_ROOT/external/open3d"
+OPEN3D_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
+
 MESHES_FROM=""
+
+# Python deps go into a uv-managed virtualenv: Ubuntu 24.04 (ROS 2 Jazzy's
+# target) marks its system Python externally-managed, so a plain
+# `pip install` there fails with PEP 668. --system-site-packages keeps the
+# distro's ROS Python packages visible inside it.
+VENV_DIR="$WS_ROOT/.venv"
 
 usage() {
     cat <<EOF
@@ -44,6 +54,15 @@ Fast path (default): pip deps, rosdep, colcon build.
                             wheel is published.
   --vdbfusion-dir <path>   Use an existing vdbfusion checkout instead of the
                             submodule (default: $VDBFUSION_DIR).
+  --with-open3d            Build + pip install the Open3D submodule (FPFH
+                            descriptors and point-cloud registration; heavy
+                            C++ build). The only option on aarch64, where no
+                            wheel is published.
+  --open3d-dir <path>      Use an existing Open3D checkout instead of the
+                            submodule (default: $OPEN3D_DIR).
+  --venv <path>            Virtualenv for the Python dependencies
+                            (default: $VENV_DIR). Ignored when a virtualenv is
+                            already active.
   --meshes-from <path>     Copy sim/world/data/obj/ from an existing checkout.
   -h, --help               Show this help.
 EOF
@@ -55,13 +74,16 @@ while [ $# -gt 0 ]; do
         --stonefish-dir) STONEFISH_DIR="$2"; shift 2 ;;
         --with-vdbfusion) WITH_VDBFUSION=true; shift ;;
         --vdbfusion-dir) VDBFUSION_DIR="$2"; shift 2 ;;
+        --with-open3d) WITH_OPEN3D=true; shift ;;
+        --open3d-dir) OPEN3D_DIR="$2"; shift 2 ;;
+        --venv) VENV_DIR="$2"; shift 2 ;;
         --meshes-from) MESHES_FROM="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
     esac
 done
 
-echo "==> 1/7 Sanity checks"
+echo "==> 1/8 Sanity checks"
 if ! command -v ros2 >/dev/null 2>&1; then
     echo "ros2 not found on PATH. Enter the ROS 2 Jazzy environment first" \
          "(e.g. 'distrobox enter ros2-jazzy && source /opt/ros/jazzy/setup.zsh')" \
@@ -75,7 +97,7 @@ if ! command -v rosdep >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "==> 2/7 Submodules (pinned Stonefish + vdbfusion sources)"
+echo "==> 2/8 Submodules (pinned Stonefish + vdbfusion + Open3D sources)"
 if [ -f "$REPO_ROOT/.gitmodules" ] && [ -d "$REPO_ROOT/.git" ] || \
    [ -f "$REPO_ROOT/.git" ]; then
     ( cd "$REPO_ROOT" && git submodule update --init --recursive )
@@ -83,13 +105,34 @@ else
     echo "Not a git checkout, skipping submodule init."
 fi
 
-echo "==> 3/7 Python dependencies (requirements.txt)"
-pip install -r "$REPO_ROOT/requirements.txt"
+echo "==> 3/8 Python dependencies (uv virtualenv + requirements.txt)"
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+    VENV_DIR="$VIRTUAL_ENV"
+    echo "Using the already-active virtualenv at $VENV_DIR."
+fi
+if ! command -v uv >/dev/null 2>&1; then
+    echo "uv not found, installing it to ~/.local/bin"
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+if ! command -v uv >/dev/null 2>&1; then
+    echo "uv still not on PATH after install. Add ~/.local/bin to PATH" \
+         "(or install uv yourself: https://docs.astral.sh/uv/) and re-run." >&2
+    exit 1
+fi
+# --allow-existing keeps this script re-runnable; --clear would discard
+# whatever the user has already installed into the venv.
+# --python /usr/bin/python3 is not optional: uv otherwise bases the venv on its
+# own managed CPython, whose --system-site-packages does not include Debian's
+# dist-packages — so rclpy imports and then dies on a missing PyYAML.
+uv venv --python /usr/bin/python3 --system-site-packages --allow-existing "$VENV_DIR"
+VENV_PY="$VENV_DIR/bin/python"
+uv pip install --python "$VENV_PY" -r "$REPO_ROOT/requirements.txt"
 
-echo "==> 4/7 rosdep (workspace root: $WS_ROOT)"
+echo "==> 4/8 rosdep (workspace root: $WS_ROOT)"
 ( cd "$WS_ROOT" && rosdep install --from-paths src -i -y )
 
-echo "==> 5/7 Patched Stonefish"
+echo "==> 5/8 Patched Stonefish"
 if [ "$BUILD_STONEFISH" = true ]; then
     if [ ! -d "$STONEFISH_DIR/Library" ]; then
         echo "$STONEFISH_DIR looks empty. Run" \
@@ -107,7 +150,7 @@ else
     echo "Skipped (pass --build-stonefish to build the pinned submodule)."
 fi
 
-echo "==> 6/7 vdbfusion (mapper:=tsdf)"
+echo "==> 6/8 vdbfusion (mapper:=tsdf)"
 if [ "$WITH_VDBFUSION" = true ]; then
     if [ ! -f "$VDBFUSION_DIR/setup.py" ] && [ ! -f "$VDBFUSION_DIR/pyproject.toml" ]; then
         echo "$VDBFUSION_DIR looks empty. Run" \
@@ -115,9 +158,39 @@ if [ "$WITH_VDBFUSION" = true ]; then
              "or point --vdbfusion-dir at an existing checkout." >&2
         exit 1
     fi
-    pip install "$VDBFUSION_DIR"
+    uv pip install --python "$VENV_PY" "$VDBFUSION_DIR"
 else
     echo "Skipped (pass --with-vdbfusion; only needed for mapper:=tsdf)."
+fi
+
+echo "==> 7/8 Open3D (FPFH descriptors)"
+if [ "$WITH_OPEN3D" = true ]; then
+    if [ ! -f "$OPEN3D_DIR/CMakeLists.txt" ]; then
+        echo "$OPEN3D_DIR looks empty. Run" \
+             "'git submodule update --init external/open3d' first," \
+             "or point --open3d-dir at an existing checkout." >&2
+        exit 1
+    fi
+    # setuptools and wheel are build-time only (the pip-package target runs
+    # setup.py), so they live here rather than in requirements.txt.
+    uv pip install --python "$VENV_PY" setuptools wheel
+    # BUILD_CUDA_MODULE=OFF: no CUDA on the target machines, and its absence
+    # otherwise fails configuration rather than degrading.
+    # Python3_EXECUTABLE: without it CMake picks whichever python3 is first on
+    # PATH, which is not necessarily the venv the wheel gets installed into.
+    cmake -S "$OPEN3D_DIR" -B "$OPEN3D_DIR/build" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DBUILD_CUDA_MODULE=OFF \
+          -DBUILD_GUI=OFF \
+          -DBUILD_EXAMPLES=OFF \
+          -DBUILD_UNIT_TESTS=OFF \
+          -DBUILD_PYTHON_MODULE=ON \
+          -DPython3_EXECUTABLE="$VENV_PY"
+    cmake --build "$OPEN3D_DIR/build" -j "$OPEN3D_BUILD_JOBS" --target pip-package
+    uv pip install --python "$VENV_PY" \
+        "$OPEN3D_DIR"/build/lib/python_package/pip_package/open3d-*.whl
+else
+    echo "Skipped (pass --with-open3d; only needed for FPFH descriptor work)."
 fi
 
 echo "==> Scene meshes"
@@ -148,7 +221,10 @@ else
     echo "No mesh manifest at $MESH_MANIFEST, skipping the integrity check." >&2
 fi
 
-echo "==> 7/7 colcon build"
+echo "==> 8/8 colcon build"
 ( cd "$WS_ROOT" && colcon build --symlink-install --cmake-args -Wno-dev )
 
-echo "==> Done. source $WS_ROOT/install/setup.zsh, then: python3 launcher.py"
+echo "==> Done. Activate the virtualenv, source the workspace, then launch:"
+echo "      source $VENV_DIR/bin/activate"
+echo "      source $WS_ROOT/install/setup.zsh"
+echo "      python3 launcher.py"

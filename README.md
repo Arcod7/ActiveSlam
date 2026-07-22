@@ -88,8 +88,10 @@ launcher drives the same underlying launch files.
 Requires ROS 2 Jazzy and a patched build of Stonefish. The patched Stonefish
 library and the patched ROS 2 bridge are both pinned git submodules
 (`external/stonefish`, `sim/stonefish_ros2`) and are **required** — clone with
-`--recurse-submodules` or the workspace will not build. `external/vdbfusion` is
-optional, needed only for `mapper:=tsdf`.
+`--recurse-submodules` or the workspace will not build. `external/vdbfusion`
+(for `mapper:=tsdf`) and `external/open3d` (for FPFH descriptor work) are
+optional source builds — neither publishes an aarch64 wheel; see
+[`docs/INSTALL.md`](docs/INSTALL.md).
 The scene meshes (~313 MB, gitignored — see
 [`sim/world/data/README.md`](sim/world/data/README.md)) must be present on
 disk separately; they don't come from `git clone`.
@@ -97,11 +99,14 @@ disk separately; they don't come from `git clone`.
 ```bash
 mkdir -p ~/ros_ws/src && cd ~/ros_ws/src
 git clone --recurse-submodules git@github.com:Arcod7/ActiveSlam.git
-cd ~/ros_ws
-rosdep install --from-paths src -i -y
-colcon build --symlink-install --cmake-args -Wno-dev
-source install/setup.zsh
+cd ~/ros_ws/src/ActiveSlam && ./bootstrap.sh          # uv venv + rosdep + build
+source ~/ros_ws/.venv/bin/activate
+source ~/ros_ws/install/setup.zsh
 ```
+
+Python dependencies live in a uv-managed virtualenv (`<workspace>/.venv`,
+`--system-site-packages`): Ubuntu 24.04 rejects a bare `pip install` under
+PEP 668. `bootstrap.sh` installs `uv` if it isn't already present.
 
 Full details (including if `rosdep` isn't already set up): [`docs/INSTALL.md`](docs/INSTALL.md).
 

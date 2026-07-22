@@ -4,3 +4,6 @@ eval/legacy_logs/
 eval/runs/
 sim/world/data/obj/
 repomix-output.xml
+
+# uv virtualenv, when created inside the repo instead of the workspace root
+.venv/
