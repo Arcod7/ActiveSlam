@@ -332,8 +332,22 @@ class SessionLog:
         self._write("launcher", text)
 
     def follow(self, label, path, offset=0):
-        """Interleave a per-group log into the session log from offset on."""
+        """Interleave a per-group log into the session log from offset on.
+
+        Replaces any existing source for the same file: a restarted group
+        appends to the log it used before, and following it twice emits every
+        line once per restart.
+
+        The existing offset wins when there is one. It is at or behind the new
+        one, and the bytes between them are the previous process's last words —
+        skipping to the restarted process's offset would drop exactly the
+        output that says why it was restarted.
+        """
         with self._lock:
+            for src in self._sources:
+                if src[1] == path:
+                    src[0] = label
+                    return
             self._sources.append([label, path, offset, b""])
 
     def start(self):
