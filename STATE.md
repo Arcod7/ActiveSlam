@@ -250,7 +250,7 @@ one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.3
   default; live-verified 429 → 0 near-field returns/ping at `near_cutoff:=1.6`, far geometry
   untouched. Hides reverb rather than retuning it; lowering `reverb_p` is the alternative.
   Exposed in the launcher TUI as **"Noise Attenuation"** (none / cut_close) under the SLAM section
-  (Phase 33); cut_close maps to `near_cutoff:=1.6`.
+  (Phase 33); cut_close uses the advanced **"Cut distance (m)"** param (`near_cutoff_m`, default 1.6).
 - ✅ **Range-image view** (Phase 34): `range_image` node renders the noised cloud back to a 2D
   depth-camera-style Image. `/cloud_in/range_image` (what SLAM gets) and `/cloud_in_raw/range_image`
   (clean) publish from `pointcloud_only.launch.py`; RViz layouts show them as "SLAM input (noised

@@ -140,8 +140,14 @@ PARAMS = [
           "closer to the clean ground truth.",
           ["none", "cut_close"],
           {"none": "Keep every return the profile produces.",
-           "cut_close": "Gate out the near-field reverberation spray (< ~1.6 m)."},
+           "cut_close": "Gate out the near-field reverberation spray."},
           visible=_slam),
+    Param("near_cutoff_m", "Cut distance (m)", "float", 1.6, "slam",
+          "cut_close only: drop sonar returns nearer than this. Raise it to "
+          "clear a larger near-field spray (e.g. the degraded profile reaches "
+          "~2.5 m); lower it to keep more close geometry.",
+          advanced=True, step=0.1, lo=0.2, hi=15.0,
+          visible=lambda v: _slam(v) and v["noise_attenuation"] == "cut_close"),
     Param("loop_closure", "Loop closure", "bool", True, "slam",
           "Detect revisited places and add graph constraints that correct "
           "accumulated drift. Turning it off is the A/B baseline: the pose "

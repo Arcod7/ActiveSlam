@@ -1258,3 +1258,22 @@ a 6 m wall renders as 6.00-8.61 m (euclidean range grows off-axis), frame_id
 preserved. Toggling Noise Attenuation none/cut_close changes the
 `SLAM input (noised range)` image live; the clean image stays put for
 comparison. 9 packages build, 31 sonar tests unaffected.
+
+## Phase 35 — Tunable cut distance for Noise Attenuation (advanced TUI param)
+
+**Date**: 2026-07-23
+**Files**: `launcher_model.py`, `launcher_core.py`
+
+**Objective**: The Phase 33 "Noise Attenuation: cut_close" hardcoded a 1.6 m
+gate, too short for profiles whose reverberation reaches further (degraded goes
+to ~2.5 m) and not adjustable from the interface.
+
+**What changed**: An advanced float parameter **"Cut distance (m)"**
+(`near_cutoff_m`, default 1.6, range 0.2-15.0) in the SLAM section, visible only
+in advanced mode when `noise_attenuation == cut_close`. The `cloud` group passes
+its value as `near_cutoff:=<m>` and lists it in `depends`, so editing it
+restarts only the point-cloud layer.
+
+**Observed impact**: Smoke-tested — the parameter is advanced, bounded, and
+visible only under slam + cut_close; the emitted command carries the chosen
+distance (`cut_close` at 2.5 -> `near_cutoff:=2.5`, `none` -> `-1.0`).
