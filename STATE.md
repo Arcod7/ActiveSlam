@@ -234,6 +234,17 @@ one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.3
   yet, so these are geometrically-motivated stress-test values, not a calibrated model.
   Note when reading raw range statistics that the multipath outlier term (~0.077 m std)
   swamps the speckle (~0.008 m) and must be rejected before the correlation terms are visible.
+- ✅ **Imaging-sonar geometry** (Phase 31): an organized-image stage ahead of the per-point
+  noise adds strongest-return ranging (beam-window arg-max: thin targets fade, edges bleed),
+  projection-aware lateral jitter (per-pixel pinhole beam width, not a uniform constant),
+  volume reverberation (correlated near-field backscatter, elevated on weak returns), and
+  geometric multipath (screen-space second bounce: phantoms in concave corners, none on flat
+  walls). Live-verified: `ideal` still byte-exact passthrough; `realistic` fades a floated
+  blob, fires multipath on ~0.4% of the image at the concave seam only, and injects ~250
+  reverb returns/ping. **The projection-aware jitter changes lateral error magnitude across
+  the image and breaks strict comparability with pre-Phase-31 benchmark runs** (centre kept
+  near the old value, so it is a redistribution). Multipath models in-frustum bounces only.
+  Still not fitted to hardware.
 - ✅ **Benchmarking switches** (Phase 16): `loop_closure:=false` keeps
   `/slam/loop_closure_count` at 0 (default still closes loops); `noise_seed:=7` reaches all
   four sensor nodes; a forced-threshold live run fired 4 map-rebuild cycles cleanly

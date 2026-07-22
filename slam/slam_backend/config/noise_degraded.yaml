@@ -41,3 +41,11 @@ sonar:                       # WaterLinked Sonar 3D-15, turbid/degraded conditio
   outlier_p: 0.01
   outlier_range_min_m: 0.3
   outlier_range_max_m: 5.0
+  argmax_window_px: 5        # coarser range image, more edge bleed
+  argmax_beam_sigma_px: 2.0
+  lat_sigma_beam_frac: 0.8
+  reverb_p: 0.06             # turbid water: strong volume reverberation
+  reverb_max_m: 2.5
+  reverb_weak_boost: 5.0
+  multipath_p: 0.15
+  multipath_grazing_exp: 1.0

@@ -34,3 +34,7 @@ sonar:                       # ground-truth (as noise_ideal.yaml)
   range_corr_frac: 0.0
   sos_scale_error_pct: 0.0
   outlier_p: 0.0
+  argmax_window_px: 0.0
+  lat_sigma_beam_frac: 0.0
+  reverb_p: 0.0
+  multipath_p: 0.0

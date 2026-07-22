@@ -75,12 +75,19 @@ aside for time. A rosbag-based comparison (same sensor stream through an
 external SLAM system) remains the cleanest way to position the pose-graph
 backend against established systems.
 
-## Sonar multipath effects
+## Sonar noise model: hardware fitting
 
-The sonar noise model covers range noise, lateral jitter, dropout, and
-outliers, but not multipath returns, which matter in confined structures
-such as wrecks. A multipath term would strengthen the degraded-conditions
-benchmark.
+The sonar noise model now covers range noise, projection-aware lateral jitter,
+grazing/range dropout, correlated speckle, speed-of-sound scale, strongest-
+return ranging, volume reverberation, and geometric multipath. Every parameter
+is argued from the datasheet and acoustics, not fitted — no real Sonar 3D-15
+range images have been recorded on this project. A short tank session (a flat
+wall swept through incidence angles, a 90-degree corner, still vs. stirred
+water, and a static scene held ~30 s) would constrain nearly every parameter
+and convert the model from geometrically motivated to measured. Two effects
+also remain unmodelled: multipath bounces off geometry outside the camera
+frustum (notably the water surface behind the sensor), and beam-density
+resampling from the sim's pinhole layout onto the device's uniform-angle grid.
 
 ## Real-vehicle campaign
 

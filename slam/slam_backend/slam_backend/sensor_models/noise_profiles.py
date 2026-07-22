@@ -53,6 +53,14 @@ class SonarNoise:
     corr_rho_time: float = 0.0         # AR(1) correlation between consecutive pings
     range_corr_frac: float = 0.0       # fraction of range-noise variance that is correlated
     sos_scale_error_pct: float = 0.0   # per-run speed-of-sound range scale error
+    argmax_window_px: float = 0.0      # strongest-return search window (px, 0/1 = nearest-surface)
+    argmax_beam_sigma_px: float = 1.5  # beam-pattern width for the strongest-return weighting
+    lat_sigma_beam_frac: float = 0.0   # lateral jitter as a fraction of local beam spacing (0 = use per-m consts)
+    reverb_p: float = 0.0              # volume-reverberation return probability
+    reverb_max_m: float = 1.5          # near-field extent of reverberation returns
+    reverb_weak_boost: float = 0.0     # extra reverb where the surface return is weak (far/grazing)
+    multipath_p: float = 0.0           # geometric (screen-space) multipath probability
+    multipath_grazing_exp: float = 1.0 # shape of the (1 - cos incidence) multipath weighting
 
 @dataclass
 class NoiseProfile:

@@ -6,10 +6,25 @@ import pytest
 
 from slam_backend.sensor_models.noise_profiles import SonarNoise, load_noise_profile
 from slam_backend.sensor_models.sonar_noise import (
-    apply_sonar_noise, correlated_field, incidence_cosine)
+    apply_sonar_noise, correlated_field, incidence_cosine, multipath_range,
+    pixel_angular_spacing, reverberation_range, strongest_reflection_range,
+    surface_normals, DEPTH_MIN_M, MAX_RANGE_M)
 
 CONFIG_DIR = Path(__file__).parents[1] / 'config'
 SHAPE = (64, 128)
+
+
+def pinhole_grid(shape=SHAPE, hfov_deg=90.0, distance=4.0):
+    """Organized cloud of a frontal wall sampled by a pinhole camera, as the sim
+    depth camera samples it: x = z*tan(theta), uniform in pixel, not in angle."""
+    h, w = shape
+    fx = (w / 2.0) / np.tan(np.radians(hfov_deg) / 2.0)
+    fy = fx
+    j, i = np.meshgrid(np.arange(w), np.arange(h))
+    x_over_z = (j - (w - 1) / 2.0) / fx
+    y_over_z = (i - (h - 1) / 2.0) / fy
+    z = np.full(shape, distance)
+    return np.stack([x_over_z * z, y_over_z * z, z], axis=-1)
 
 
 def plane_grid(tilt_deg, shape=SHAPE, distance=5.0):
@@ -168,3 +183,182 @@ def test_realistic_profile_enables_every_new_term():
     assert 0 < p.corr_rho_time < 1
     assert 0 < p.range_corr_frac <= 1
     assert p.sos_scale_error_pct > 0
+    assert p.argmax_window_px > 1
+    assert p.lat_sigma_beam_frac > 0
+    assert p.reverb_p > 0
+    assert p.multipath_p > 0
+
+
+# --- item 3: strongest-return ranging ---------------------------------------
+
+def wall_with_bar(bar_range=2.0, wall_range=3.0, bar_cols=slice(64, 65)):
+    """A one-pixel-wide near bar standing in front of a flat far wall, as ranges
+    on a frontal organized grid (rays straight ahead in z). One column is thin
+    relative to any beam window, so its echo is outvoted by the wall's."""
+    r = np.full(SHAPE, wall_range)
+    r[:, bar_cols] = bar_range
+    z = r
+    x, y = np.zeros(SHAPE), np.zeros(SHAPE)
+    return r, np.stack([x, y, z], axis=-1)
+
+
+def test_argmax_disabled_is_identity():
+    r, _ = wall_with_bar()
+    cos = np.ones(SHAPE)
+    assert np.array_equal(strongest_reflection_range(r, cos, 0, 1.5), r)
+    assert np.array_equal(strongest_reflection_range(r, cos, 1, 1.5), r)
+
+
+def test_argmax_thin_structure_fades_behind_wall():
+    """A one-pixel bar loses to the many wall pixels of the beam behind it."""
+    r, _ = wall_with_bar()
+    cos = np.ones(SHAPE)
+    out = strongest_reflection_range(r, cos, 5, 2.0)
+    bar = r == 2.0
+    replaced = (out[bar] > 2.5).mean()   # bar pixels now reporting wall range
+    assert replaced > 0.8
+    # A far wall pixel deep in the wall keeps its range (no nearer strong echo).
+    assert out[32, 10] == pytest.approx(3.0)
+
+
+def test_argmax_never_invents_a_nan_or_out_of_band_range():
+    r, _ = wall_with_bar()
+    r[:, :4] = np.nan          # a no-return / invalid strip
+    cos = np.ones(SHAPE)
+    out = strongest_reflection_range(r, cos, 5, 1.5)
+    finite = np.isfinite(out)
+    assert np.all((out[finite] >= DEPTH_MIN_M) & (out[finite] <= MAX_RANGE_M))
+    # A pixel two columns into the invalid strip has no valid candidate: stays NaN.
+    assert np.isnan(out[32, 0])
+
+
+# --- item 4: projection mismatch / beam spacing -----------------------------
+
+def test_angular_spacing_follows_pinhole_law():
+    """dtheta/pixel = cos^2(theta)/f for a pinhole, so it shrinks toward the edge."""
+    grid = pinhole_grid(hfov_deg=90.0)
+    u = grid / np.linalg.norm(grid, axis=2, keepdims=True)
+    dh, _ = pixel_angular_spacing(u)
+    row = SHAPE[0] // 2
+    centre = dh[row, SHAPE[1] // 2]
+    edge = dh[row, 5]
+    assert centre > edge                      # pinhole packs more angle per pixel at centre
+    assert edge / centre == pytest.approx(np.cos(np.radians(45.0)) ** 2, rel=0.1)
+
+
+def test_beam_frac_jitter_grows_from_centre_to_edge_is_disabled_at_zero():
+    grid = pinhole_grid(hfov_deg=90.0)
+    xyz = grid.reshape(-1, 3)
+    r = np.linalg.norm(xyz, axis=1)
+    cos = incidence_cosine(grid).ravel()
+    dh, dv = pixel_angular_spacing(grid / np.linalg.norm(grid, axis=2, keepdims=True))
+
+    def jitter_std(cols):
+        p = SonarNoise(lat_sigma_beam_frac=0.5)
+        rng = np.random.default_rng(3)
+        z = np.zeros(len(r))
+        out = apply_sonar_noise(xyz, r, cos, z, z, p, rng, beam_h=dh.ravel(), beam_v=dv.ravel())
+        lateral = out - xyz            # jitter is perpendicular; x carries most of it here
+        sel = np.zeros(SHAPE, bool); sel[:, cols] = True
+        return np.std((out[:, 0] - xyz[:, 0])[sel.ravel()])
+
+    centre = jitter_std(slice(SHAPE[1] // 2 - 4, SHAPE[1] // 2 + 4))
+    edge = jitter_std(slice(0, 8))
+    assert centre > edge               # wider pinhole beam at centre -> more cross-range jitter
+
+    # frac=0 falls back to the per-metre constants; here both are zero -> no jitter.
+    p0 = SonarNoise(lat_sigma_beam_frac=0.0)
+    rng = np.random.default_rng(3)
+    z = np.zeros(len(r))
+    out0 = apply_sonar_noise(xyz, r, cos, z, z, p0, rng, beam_h=dh.ravel(), beam_v=dv.ravel())
+    assert np.allclose(out0, xyz, atol=1e-9)
+
+
+# --- item 6: volume reverberation -------------------------------------------
+
+def test_reverberation_injects_correlated_near_returns():
+    r = np.full(SHAPE, 6.0)
+    cos = np.ones(SHAPE)
+    valid = np.ones(SHAPE, bool)
+    p = SonarNoise(reverb_p=0.1, reverb_max_m=1.5, corr_length_px=6.0)
+    rng = np.random.default_rng(11)
+    field, _ = correlated_field(rng, SHAPE, p.corr_length_px)
+    out, mask = reverberation_range(r, cos, valid, field, rng, p)
+
+    assert mask.mean() == pytest.approx(0.1, abs=0.04)
+    assert np.all((out[mask] >= DEPTH_MIN_M) & (out[mask] <= 1.5))   # near-field only
+    assert np.all(out[~mask] == 6.0)                                  # surface untouched
+    # Correlated field -> reverb pixels clump rather than scatter per-pixel.
+    nb = (mask[:-2, 1:-1].astype(int) + mask[2:, 1:-1] + mask[1:-1, :-2] + mask[1:-1, 2:])
+    isolated = (nb[mask[1:-1, 1:-1]] == 0).mean()
+    assert isolated < 0.2
+
+
+def test_reverberation_hits_weak_returns_more():
+    """reverb_weak_boost raises the rate on far/grazing surfaces."""
+    cos = np.ones(SHAPE)
+    valid = np.ones(SHAPE, bool)
+    p = SonarNoise(reverb_p=0.05, reverb_max_m=1.5, reverb_weak_boost=5.0)
+    rng = np.random.default_rng(12)
+    field, _ = correlated_field(rng, SHAPE, 0.0)   # iid, so rate tracks the local probability
+    near = reverberation_range(np.full(SHAPE, 2.0), cos, valid, field, rng, p)[1].mean()
+    rng = np.random.default_rng(12)
+    field, _ = correlated_field(rng, SHAPE, 0.0)
+    far = reverberation_range(np.full(SHAPE, 14.0), cos, valid, field, rng, p)[1].mean()
+    assert far > near
+
+
+def test_reverberation_disabled_is_identity():
+    r = np.full(SHAPE, 6.0)
+    out, mask = reverberation_range(r, np.ones(SHAPE), np.ones(SHAPE, bool),
+                                    np.zeros(SHAPE), np.random.default_rng(0),
+                                    SonarNoise(reverb_p=0.0))
+    assert np.array_equal(out, r) and not mask.any()
+
+
+# --- item 7: geometric multipath --------------------------------------------
+
+def corner_grid(shape=SHAPE, size=4.0):
+    """A right-angle corner: left half is a wall facing +x, right half faces +y,
+    meeting along a concave seam. Reflected rays off one face strike the other."""
+    h, w = shape
+    fx = (w / 2.0) / np.tan(np.radians(45.0))
+    fy = fx
+    j, i = np.meshgrid(np.arange(w), np.arange(h))
+    ax = (j - (w - 1) / 2.0) / fx        # x/z per pixel
+    ay = (i - (h - 1) / 2.0) / fy        # y/z per pixel
+    # Wall A: x = size (normal -x). Wall B: y = size (normal -y). Take the nearer.
+    with np.errstate(divide='ignore', invalid='ignore'):
+        zA = np.where(ax > 1e-3, size / ax, np.inf)
+        zB = np.where(ay > 1e-3, size / ay, np.inf)
+    z = np.minimum(zA, zB)
+    z[~np.isfinite(z)] = size
+    return np.stack([ax * z, ay * z, z], axis=-1)
+
+
+def _multipath_fraction(grid, p, seed=5):
+    r = np.linalg.norm(grid, axis=2)
+    u = grid / r[..., None]
+    normal = surface_normals(grid)
+    cos = incidence_cosine(grid, normal)
+    valid = np.isfinite(r) & (r > DEPTH_MIN_M) & (r < MAX_RANGE_M)
+    out = multipath_range(np.where(valid, r, np.nan), grid, u, normal, cos, valid,
+                          np.random.default_rng(seed), p)
+    changed = valid & np.isfinite(out) & (np.abs(out - r) > 1e-6)
+    return changed.sum() / valid.sum(), out, r, valid
+
+
+def test_multipath_fires_in_a_corner_not_on_a_flat_wall():
+    p = SonarNoise(multipath_p=1.0)   # deterministic given a hit, to isolate geometry
+    corner_frac, out, r, valid = _multipath_fraction(corner_grid(), p)
+    flat_frac, _, _, _ = _multipath_fraction(pinhole_grid(hfov_deg=90.0), p)
+    assert corner_frac > 0.05
+    assert flat_frac < 0.01
+    # every phantom is a late arrival
+    changed = valid & (out != r)
+    assert np.all(out[changed] > r[changed])
+
+
+def test_multipath_disabled_is_identity():
+    frac, _, _, _ = _multipath_fraction(corner_grid(), SonarNoise(multipath_p=0.0))
+    assert frac == 0.0

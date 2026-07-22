@@ -1085,3 +1085,78 @@ them needs a tank session: a flat wall swept through incidence angles gives
 the dropout-vs-incidence curve directly, and a 90° corner exposes multipath.
 
 Tests: 19 in `slam/slam_backend/`, 12 of them new.
+
+## Phase 31 — Strongest-return ranging, projection-aware jitter, reverberation, geometric multipath
+
+**Date**: 2026-07-22
+**Files**: `slam/slam_backend/slam_backend/sensor_models/sonar_noise.py`,
+`slam/slam_backend/slam_backend/sensor_models/noise_profiles.py`,
+`slam/slam_backend/config/noise_{ideal,realistic,degraded,sonar_only,odom_only,odom_pos_only}.yaml`,
+`slam/slam_backend/test/test_sonar_noise.py`
+
+**Objective**: The Phase 30 model was still geometry-blind in four ways that
+separate a z-buffer from an imaging sonar. The depth camera reports the nearest
+surface per pixel; the real device (`RangeImage` in the WaterLinked 3D-15
+protocol) reports the strongest echo per beam. Its beams are one contiguous
+concave structure away from the sim's independent pixels, and there was no
+mechanism for volume backscatter or for geometry-dependent multipath.
+
+**What changed**: An organized-image stage now runs ahead of the per-point
+noise, skipped for unorganized clouds and for the `ideal` profile.
+
+*Strongest-return ranging (`argmax_window_px`).* A beam is wider than a pixel,
+so within a small window each candidate surface is scored by a beam-pattern
+weight times cos(incidence)/range^2, candidates are grouped by range, and the
+range of the strongest group wins. A structure thin in both image dimensions
+fills few window pixels and is outvoted by the broad surface behind it (it
+fades); a bright near surface pulls neighbouring beams toward its range
+(edges bleed). A one-pixel-wide vertical wire does **not** fade — the beam
+integrates its whole column — which is physically correct and worth
+remembering when reading results.
+
+*Projection-aware lateral jitter (`lat_sigma_beam_frac`).* The scenario's depth
+camera is a 90-degree pinhole, so the per-pixel angular step runs from
+~0.45 deg at the image centre to ~0.22 deg at the 45-degree edge (cos^2 law),
+not the uniform separation the old constant `lat_sigma_*_per_m` assumed. Each
+pixel is one beam in this approximation, so the cross-range jitter is now the
+measured local beam width times range times the fraction, and it varies across
+the image as the real per-pixel footprint does. **This changes the lateral
+error magnitude across the image and so breaks strict comparability with
+pre-Phase-31 benchmark runs**; `realistic` keeps the image-centre jitter near
+the old value so the change is a redistribution, not a global inflation. The
+per-metre constants remain as the fallback when the fraction is zero.
+
+*Volume reverberation (`reverb_p`, `reverb_max_m`, `reverb_weak_boost`).*
+Particles, bubbles and the tether backscatter sound; because the device reports
+the strongest echo, a near-field volume return can beat a weak surface return.
+Fired on a spatially correlated field so returns clump, at a rate elevated
+where the surface echo is weak (its strength falls as cos(incidence)/range^2),
+with the replaced range drawn from a 1/r^2 backscatter density over
+[0.2, reverb_max_m]. Off in clear-water `ideal`, small in `realistic`, a
+defining feature of `degraded`.
+
+*Geometric multipath (`multipath_p`).* Screen-space second bounce: reflect each
+beam about its surface normal and march the depth buffer (intrinsics recovered
+from the cloud's own pinhole layout); a re-intersection reports the late path
+length r + t_hit, fired with probability rising as the direct return weakens.
+A flat wall reflects away from all geometry and produces no phantom; a concave
+corner does. Replaces the geometry-blind `outlier_p` term for the corner case
+(that term is kept, additive, and unchanged). **Limitation**: a single
+rasterized view cannot see a bounce off geometry outside the frustum (notably
+the water surface behind the sensor), so only in-frustum multipath is modelled.
+
+**Observed impact**: 29 tests (10 new), all passing, plus a live node probe
+against a synthetic corner with a floated blob. `ideal` remains a byte-exact
+passthrough end to end (0 dropout, 0 multipath, 0 reverb, scale 1.0). On
+`realistic`: the blob fades to the background, multipath fires on ~0.4% of the
+image concentrated at the concave seam and nowhere on the open faces (every
+phantom a late arrival), reverberation injects ~250 near-field returns per
+ping, and degraded turbidity roughly triples the reverberation.
+
+**Still not fitted to hardware.** As with Phase 30, every value is argued from
+the datasheet and acoustics, not measured — no real 3D-15 range images exist on
+this project. A tank session (flat wall swept through incidence, a 90-degree
+corner, still vs. stirred water, a static scene held 30 s) would constrain
+nearly every parameter added across Phases 30 and 31.
+
+Tests: 29 in `slam/slam_backend/`, 22 of them for the sonar model.
