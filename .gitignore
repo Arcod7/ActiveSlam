@@ -2,8 +2,15 @@ __pycache__/
 *.pyc
 eval/legacy_logs/
 eval/runs/
-sim/world/data/obj/
 repomix-output.xml
+
+# Out-of-band meshes: too large for git, or provenance not yet established.
+# The BlueROV2 set beside them is Apache-2.0 and tracked; see
+# sim/world/data/README.md.
+sim/world/data/obj/shipwreck.obj
+sim/world/data/obj/cliff.obj
+sim/world/data/obj/off_shore_station.obj
+sim/world/data/obj/br2.obj
 
 # uv virtualenv, when created inside the repo instead of the workspace root
 .venv/

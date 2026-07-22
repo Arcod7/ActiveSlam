@@ -25,11 +25,12 @@ sudo rosdep init   # only if rosdep has never been set up on this machine
 rosdep update
 ```
 
-**The scene meshes.** `sim/world/data/obj/` (~313 MB) is gitignored and
-distributed out of band — see [`sim/world/data/README.md`](../sim/world/data/README.md).
-They must be on disk before the simulator can load the scenario. `bootstrap.sh
---meshes-from <path>` copies them from an existing checkout and verifies them
-against a checksum manifest.
+**The scene mesh.** The BlueROV2 meshes are tracked in git, but
+`off_shore_station.obj` — the environment `scenario/waterlinked.scn` loads — is
+distributed out of band, as its provenance is unrecorded. It must be on disk
+before the simulator can load the scenario. `bootstrap.sh --meshes-from <path>`
+copies it from an existing checkout and verifies it against a checksum
+manifest. See [`sim/world/data/README.md`](../sim/world/data/README.md).
 
 Everything else — build tools, Python packages, Stonefish's dependencies — is
 installed by `bootstrap.sh`. The Python packages go into a virtualenv, but the
@@ -72,10 +73,11 @@ or whenever a step failed and you have fixed the cause.
    standard prefix; `--skip-stonefish` forces the skip. Building takes a while.
 6. **vdbfusion**, only with `--with-vdbfusion` — needed for `mapper:=tsdf`.
 7. **Open3D**, only with `--with-open3d` — needed for FPFH descriptor work.
-8. **Scene meshes** — copies them with `--meshes-from`, then verifies every
-   file against `sim/world/data/obj.sha256`. A missing or partial copy is
-   reported here rather than failing later inside the simulator. This is a
-   warning, not a failure: the rest of the build still completes.
+8. **Scene meshes** — copies the out-of-band ones with `--meshes-from`, then
+   hashes whatever is on disk against `sim/world/data/obj.sha256`. A missing or
+   corrupted mesh a scenario needs is reported here rather than failing later
+   inside the simulator. This is a warning, not a failure: the rest of the
+   build still completes.
 9. **`colcon build --symlink-install`** over the whole workspace, with the venv
    on `PATH` — which is all that activating it does. Rebuild the same way:
 

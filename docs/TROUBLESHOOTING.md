@@ -118,10 +118,11 @@ A declared dependency is not installed. Re-run `rosdep install --from-paths src
 
 **Stonefish exits complaining about the scenario, or meshes look absent**
 
-`sim/world/data/obj/` is gitignored and distributed out of band, so a fresh
-clone does not have it. `./bootstrap.sh --meshes-from <existing-checkout>/sim/world/data/obj`
-copies it and verifies every file against `sim/world/data/obj.sha256`. Running
-bootstrap prints exactly which files are missing or corrupted.
+The BlueROV2 meshes are tracked in git, but `off_shore_station.obj` is
+distributed out of band, so a fresh clone has the robot and no environment.
+`./bootstrap.sh --meshes-from <existing-checkout>/sim/world/data/obj` copies it
+and verifies it against `sim/world/data/obj.sha256`. Running bootstrap prints
+exactly which files are missing or corrupted.
 
 **Nothing moves, however you drive it**
 

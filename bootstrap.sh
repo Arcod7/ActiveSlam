@@ -430,30 +430,50 @@ echo "==> Scene meshes"
 MESH_DATA_DIR="$REPO_ROOT/sim/world/data"
 MESH_DIR="$MESH_DATA_DIR/obj"
 MESH_MANIFEST="$MESH_DATA_DIR/obj.sha256"
+# The BlueROV2 meshes are tracked in git. Of what stays out of band, only this
+# one is loaded by a scenario (scenario/waterlinked.scn); the rest are
+# unreferenced, so a checkout without them is still complete.
+REQUIRED_OUT_OF_BAND_MESHES="obj/off_shore_station.obj"
 if [ -n "$MESHES_FROM" ]; then
     mkdir -p "$MESH_DIR"
     cp -r "$MESHES_FROM"/. "$MESH_DIR"/
     echo "Copied meshes from $MESHES_FROM into $MESH_DIR."
 fi
-# Check against the manifest rather than just testing that the directory is
-# non-empty: a partial or corrupted copy otherwise fails much later, inside the
-# simulator, with no indication of which file is at fault.
+# Hash what is actually on disk instead of running sha256sum -c over the whole
+# manifest: the manifest also lists the unreferenced meshes, and those would be
+# reported as failures purely for being absent.
+MESH_INTACT=true
 if [ -f "$MESH_MANIFEST" ]; then
-    if ( cd "$MESH_DATA_DIR" && sha256sum -c --quiet "$MESH_MANIFEST" 2>/dev/null ); then
-        echo "All meshes present and matching $(basename "$MESH_MANIFEST")."
-    else
-        echo "Mesh assets are missing or do not match the manifest:" >&2
-        # || true: sha256sum's failure is the expected case here, and errexit
-        # would otherwise abort before the hint below and the build.
-        ( cd "$MESH_DATA_DIR" && sha256sum -c "$MESH_MANIFEST" 2>&1 \
-            | grep -vE ': OK$' | sed 's/^/  /' ) >&2 || true
-        echo "" >&2
-        echo "obj/ is gitignored and distributed out of band. Copy it from an" \
-             "existing checkout with --meshes-from <path>, or see" \
-             "sim/world/data/README.md." >&2
+    MESH_CHECKLIST="$(mktemp)"
+    while read -r mesh_sum mesh_path; do
+        case "$mesh_sum" in ''|'#'*) continue ;; esac
+        [ -f "$MESH_DATA_DIR/$mesh_path" ] \
+            && printf '%s  %s\n' "$mesh_sum" "$mesh_path"
+    done < "$MESH_MANIFEST" > "$MESH_CHECKLIST"
+    if [ -s "$MESH_CHECKLIST" ]; then
+        # sha256sum has already named the file at fault; errexit would abort
+        # before the hint below and the build.
+        if ! ( cd "$MESH_DATA_DIR" && sha256sum -c --quiet "$MESH_CHECKLIST" ) >&2
+        then
+            MESH_INTACT=false
+            echo "Recopy the mesh above with --meshes-from <path>." >&2
+        fi
     fi
+    rm -f "$MESH_CHECKLIST"
 else
     echo "No mesh manifest at $MESH_MANIFEST, skipping the integrity check." >&2
+fi
+MESH_MISSING=""
+for mesh in $REQUIRED_OUT_OF_BAND_MESHES; do
+    [ -f "$MESH_DATA_DIR/$mesh" ] || MESH_MISSING="$MESH_MISSING $mesh"
+done
+if [ -n "$MESH_MISSING" ]; then
+    echo "Missing scene meshes:$MESH_MISSING" >&2
+    echo "These are the meshes git does not carry. Copy them from an existing" \
+         "checkout with --meshes-from <path>, or see" \
+         "sim/world/data/README.md." >&2
+elif [ "$MESH_INTACT" = true ]; then
+    echo "Scene meshes present."
 fi
 
 echo "==> 8/8 colcon build"

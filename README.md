@@ -34,8 +34,9 @@ logging ATE/RPE against ground truth.
 
 ## Install
 
-Needs ROS 2 Jazzy (Ubuntu 24.04) and the scene meshes, which are ~313 MB and
-distributed out of band — see [`sim/world/data/README.md`](sim/world/data/README.md).
+Needs ROS 2 Jazzy (Ubuntu 24.04). The robot meshes are in the repo; the scene
+mesh is distributed out of band — see
+[`sim/world/data/README.md`](sim/world/data/README.md).
 
 ```bash
 mkdir -p ~/ros_ws/src && cd ~/ros_ws/src
@@ -45,8 +46,8 @@ cd ActiveSlam && ./bootstrap.sh
 
 `bootstrap.sh` is idempotent and does the whole job: submodules, Python
 dependencies in a uv virtualenv, rosdep, the patched Stonefish (built and
-installed unless it already is), and the colcon build. Copy the meshes in with
-`--meshes-from <path-to-an-existing-checkout>/sim/world/data/obj`, and add
+installed unless it already is), and the colcon build. Copy the out-of-band
+meshes in with `--meshes-from <path-to-an-existing-checkout>/sim/world/data/obj`, and add
 `--with-vdbfusion` if you want the TSDF mapper. `./bootstrap.sh --help` lists
 the rest.
 
