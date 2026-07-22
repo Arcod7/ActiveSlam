@@ -183,6 +183,15 @@ Check what is in effect with `echo "$RMW_IMPLEMENTATION"`; empty is the
 default. Note it must match across every terminal involved, including the one
 running the launcher.
 
+**RViz: `The plugin for class 'octomap_rviz_plugins/OccupancyGrid' failed to
+load`**
+
+`octomap_rviz_plugins` is not installed. `rviz/demo_slam.rviz` uses it, and
+`bringup` declares it, so `rosdep install --from-paths src -i -y` — or
+`./bootstrap.sh` — pulls it in. A workspace set up before that declaration
+existed needs one of those re-run. RViz itself still opens; only the octomap
+display is missing.
+
 **Nothing moves, however you drive it**
 
 Working as designed: the motion safety gate is fail-closed and starts disabled.
