@@ -249,6 +249,8 @@ one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.3
   returns nearer than the threshold — clears the reverberation spray around the vehicle. Off by
   default; live-verified 429 → 0 near-field returns/ping at `near_cutoff:=1.6`, far geometry
   untouched. Hides reverb rather than retuning it; lowering `reverb_p` is the alternative.
+  Exposed in the launcher TUI as **"Noise Attenuation"** (none / cut_close) under the SLAM section
+  (Phase 33); cut_close maps to `near_cutoff:=1.6`.
 - ✅ **Benchmarking switches** (Phase 16): `loop_closure:=false` keeps
   `/slam/loop_closure_count` at 0 (default still closes loops); `noise_seed:=7` reaches all
   four sensor nodes; a forced-threshold live run fired 4 map-rebuild cycles cleanly

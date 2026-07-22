@@ -1206,3 +1206,25 @@ profile — real clear water has little volume reverberation — so lowering
 tuning `reverb_p` is the modelling fix. Neither is fitted to hardware.
 
 Tests: 31 in `slam/slam_backend/`, 24 of them for the sonar model.
+
+## Phase 33 — Expose the near-field gate in the launcher TUI ("Noise Attenuation")
+
+**Date**: 2026-07-23
+**Files**: `launcher_model.py`, `launcher_core.py`
+
+**Objective**: Phase 32 added the `near_cutoff` launch argument, but the TUI
+launcher (`launcher.py`) composes the individual launch files itself and never
+passed it, so the knob was invisible to the interface actually used to start
+runs.
+
+**What changed**: A `noise_attenuation` parameter (label **"Noise Attenuation"**,
+enum `none` / `cut_close`) in the SLAM section of the launcher model, visible
+under `slam:=slam` alongside the noise profile. The `cloud` group now maps it to
+the launch argument — `cut_close` -> `near_cutoff:=1.6`, `none` ->
+`near_cutoff:=-1.0` (profile default) — and lists `noise_attenuation` in its
+`depends`, so changing it restarts only the point-cloud layer.
+
+**Observed impact**: Smoke-tested — the parameter registers with the expected
+label and choices, and the emitted `pointcloud_only.launch.py` command carries
+`near_cutoff:=1.6` for `cut_close` and `near_cutoff:=-1.0` for `none`. The
+existing 31 sonar tests are unaffected.

@@ -114,11 +114,13 @@ def build_groups(bringup_share=""):
 
     def cloud(v):
         noise = "true" if v["slam"] == "slam" else "false"
+        cut = "1.6" if v.get("noise_attenuation") == "cut_close" else "-1.0"
         return [["ros2", "launch", "stonefish_groundtruth_mapping",
                  "pointcloud_only.launch.py",
                  f"sonar_noise:={noise}",
                  f"noise_profile:={v['noise_profile']}",
-                 f"noise_seed:={v['noise_seed']}"]]
+                 f"noise_seed:={v['noise_seed']}",
+                 f"near_cutoff:={cut}"]]
 
     def mapper(v):
         cmds = [["ros2", "launch", "stonefish_groundtruth_mapping",
@@ -210,7 +212,7 @@ def build_groups(bringup_share=""):
               "depth_image_proc turns the depth image into /cloud_in. Under "
               "slam:=slam a datasheet-grounded WaterLinked Sonar 3D-15 noise "
               "model is spliced in ahead of every consumer.",
-              cloud, depends=["slam", "noise_profile", "noise_seed"]),
+              cloud, depends=["slam", "noise_profile", "noise_seed", "noise_attenuation"]),
         Group("mapper", "Map backend",
               "OctoMap occupancy grid or VDBFusion TSDF. Consumes /cloud_in "
               "only, so the backend can be swapped without touching the sim.",
