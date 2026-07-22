@@ -59,7 +59,7 @@ refresh_apt_source_view() {
     # filter a legacy main file into a container-local copy as well.
     if [ -f /etc/apt/sources.list ]; then
         sed -E \
-            '\|nvidia\.github\.io/(libnvidia-container|nvidia-container-runtime|nvidia-docker)|d' \
+            '/nvidia\.github\.io\/(libnvidia-container|nvidia-container-runtime|nvidia-docker)/d' \
             /etc/apt/sources.list \
             | sudo tee "$ACTIVESLAM_APT_MAIN_VIEW" >/dev/null
     else
