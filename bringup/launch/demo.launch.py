@@ -52,12 +52,19 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-from ament_index_python.packages import get_package_share_directory, get_package_prefix
+from ament_index_python.packages import (
+    PackageNotFoundError,
+    get_package_share_directory,
+    get_package_prefix,
+)
 
 
 def _octomap_preload_path():
     """Path to liboctomap.so for RViz's LD_PRELOAD, or '' if it can't be found."""
-    prefix = get_package_prefix("octomap")
+    try:
+        prefix = get_package_prefix("octomap")
+    except PackageNotFoundError:
+        return ""
     triplet = sysconfig.get_config_var("MULTIARCH") or ""
     candidates = [os.path.join(prefix, "lib", triplet, "liboctomap.so")] if triplet else []
     candidates.append(os.path.join(prefix, "lib", "liboctomap.so"))
