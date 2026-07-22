@@ -140,12 +140,16 @@ if [ "$BUILD_STONEFISH" = true ]; then
              "or point --stonefish-dir at an existing checkout." >&2
         exit 1
     fi
+    # Stonefish's own dependencies (its README): glm, SDL2, Freetype, OpenGL.
+    # rosdep does not cover them — it only reads this workspace's package.xml files.
+    sudo apt-get install -y libglm-dev libsdl2-dev libfreetype-dev libgl1-mesa-dev
     cmake -S "$STONEFISH_DIR" -B "$STONEFISH_DIR/build" \
           -DCMAKE_BUILD_TYPE=Release
     cmake --build "$STONEFISH_DIR/build" -j "$STONEFISH_BUILD_JOBS"
-    echo "Stonefish built at $STONEFISH_DIR/build." \
-         "Install it (sudo cmake --install) if it is not already on the" \
-         "library path — see docs/INSTALL.md."
+    # Installing is not optional: stonefish_ros2 does find_package(Stonefish),
+    # which only resolves against an installed StonefishConfig.cmake.
+    sudo cmake --install "$STONEFISH_DIR/build"
+    echo "Stonefish built and installed from $STONEFISH_DIR/build."
 else
     echo "Skipped (pass --build-stonefish to build the pinned submodule)."
 fi
@@ -210,8 +214,10 @@ if [ -f "$MESH_MANIFEST" ]; then
         echo "All meshes present and matching $(basename "$MESH_MANIFEST")."
     else
         echo "Mesh assets are missing or do not match the manifest:" >&2
+        # || true: sha256sum's failure is the expected case here, and errexit
+        # would otherwise abort before the hint below and the build.
         ( cd "$MESH_DATA_DIR" && sha256sum -c "$MESH_MANIFEST" 2>&1 \
-            | grep -vE ': OK$' | sed 's/^/  /' ) >&2
+            | grep -vE ': OK$' | sed 's/^/  /' ) >&2 || true
         echo "" >&2
         echo "obj/ is gitignored and distributed out of band. Copy it from an" \
              "existing checkout with --meshes-from <path>, or see" \
