@@ -10,6 +10,8 @@ settle_s: 10
 seeds: [1]
 
 common_args:
+  # Motion gate is fail-closed; headless runs never arm it otherwise.
+  safety_start_enabled: 'true'
   slam: slam
   mode: frontier
   rviz: 'false'
