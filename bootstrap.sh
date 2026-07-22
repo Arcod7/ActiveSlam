@@ -34,6 +34,8 @@ OPEN3D_DIR="$REPO_ROOT/external/open3d"
 OPEN3D_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
 
 MESHES_FROM=""
+GTSAM_VERSION="4.2.0"
+GTSAM_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
 
 # Python deps go into a uv-managed virtualenv. --system-site-packages keeps
 # the distro's ROS Python packages visible inside it (and avoids PEP 668 on
@@ -62,6 +64,47 @@ select_python_for_ros_distro() {
 
 python_is_expected() {
     "$1" -c "import sys; raise SystemExit(sys.version_info[:2] != (${EXPECTED_PYTHON_VERSION%.*}, ${EXPECTED_PYTHON_VERSION#*.}))"
+}
+
+install_humble_gtsam() {
+    # GTSAM 4.2.1 has no CPython 3.10 wheel.  Version 4.2.0 still has one on
+    # x86_64, but not on ARM64, so build the same pinned release there.
+    if "$VENV_PY" -c 'import gtsam' >/dev/null 2>&1; then
+        return
+    fi
+
+    if [ "$(uname -m)" = "x86_64" ]; then
+        "$UV" pip install --python "$VENV_PY" "gtsam==$GTSAM_VERSION"
+        return
+    fi
+
+    GTSAM_ROOT="$WS_ROOT/.deps/gtsam-$GTSAM_VERSION"
+    GTSAM_SOURCE="$GTSAM_ROOT/src"
+    GTSAM_BUILD="$GTSAM_ROOT/build"
+
+    echo "Building GTSAM $GTSAM_VERSION Python bindings from source for $(uname -m)..."
+    sudo apt-get install -y build-essential cmake libboost-all-dev libtbb-dev python3-dev
+    if [ ! -d "$GTSAM_SOURCE/.git" ]; then
+        mkdir -p "$GTSAM_ROOT"
+        git clone --depth 1 --branch "$GTSAM_VERSION" \
+            https://github.com/borglab/gtsam.git "$GTSAM_SOURCE"
+    fi
+    cmake -S "$GTSAM_SOURCE" -B "$GTSAM_BUILD" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DGTSAM_BUILD_PYTHON=ON \
+        -DGTSAM_BUILD_UNSTABLE=OFF \
+        -DGTSAM_BUILD_TESTS=OFF \
+        -DGTSAM_BUILD_EXAMPLES_ALWAYS=OFF \
+        -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF \
+        -DPYTHON_EXECUTABLE="$SYSTEM_PYTHON"
+    cmake --build "$GTSAM_BUILD" -j "$GTSAM_BUILD_JOBS"
+    sudo cmake --install "$GTSAM_BUILD"
+    sudo ldconfig
+
+    GTSAM_SITE_PACKAGES="$("$VENV_PY" -c 'import site; print(site.getsitepackages()[0])')"
+    printf '%s\n' /usr/local/python > "$GTSAM_SITE_PACKAGES/activeslam-gtsam.pth"
+    "$VENV_PY" -c 'import gtsam; print("GTSAM Python bindings:", gtsam.__file__)'
 }
 
 setup_distrobox_and_continue() {
@@ -262,7 +305,12 @@ if ! python_is_expected "$VENV_PY"; then
         "$SYSTEM_PYTHON." >&2
     exit 1
 fi
-"$UV" pip install --python "$VENV_PY" -r "$REPO_ROOT/requirements.txt"
+if [ "${ROS_DISTRO:-}" = "humble" ]; then
+    "$UV" pip install --python "$VENV_PY" -r "$REPO_ROOT/requirements-humble.txt"
+    install_humble_gtsam
+else
+    "$UV" pip install --python "$VENV_PY" -r "$REPO_ROOT/requirements.txt"
+fi
 
 echo "==> 4/8 rosdep (workspace root: $WS_ROOT)"
 ( cd "$WS_ROOT" && rosdep install --from-paths src -i -y )

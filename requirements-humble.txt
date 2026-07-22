@@ -1,0 +1,7 @@
+# ROS 2 Humble uses CPython 3.10. GTSAM is installed separately by
+# bootstrap.sh: 4.2.1 has no cp310 wheel, while the 4.2.0 cp310 wheel is
+# x86_64-only and ARM64 therefore builds the pinned upstream source.
+
+small-gicp
+pymavlink==2.4.49
+colcon-common-extensions
