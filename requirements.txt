@@ -31,3 +31,5 @@ colcon-common-extensions
 #
 # open3d (FPFH descriptors only) is not installable here either: no aarch64 wheel exists on
 # any Python version. Pinned as a submodule and built from source — see docs/INSTALL.md.
+# The built module imports and computes FPFH on aarch64 once
+# GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2097152 is set — see docs/TROUBLESHOOTING.md.

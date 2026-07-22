@@ -134,7 +134,9 @@ Goal: choose actions using uncertainty, not just information gain.
 - [x] **Utility trade-off + decision rule**: `revisit:=true` breaks off exploration when
       D-optimality crosses a threshold, drives to a previously-seen target, and resumes.
 - [ ] **Submap saliency v0** (FPFH → k-means → idf rarity): not built. Target scoring uses
-      keyframe density. Blocked on aarch64 (no `open3d` wheel) and descoped for time.
+      keyframe density. Descoped for time — *not* platform-blocked: the `external/open3d`
+      submodule builds on aarch64 and `compute_fpfh_feature` runs once
+      `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2097152` is set.
 
 Done when: the robot autonomously breaks off exploration to close a loop and the logged
 uncertainty drops afterward. — **Met** (Phase 20): forced-trigger run completes the full

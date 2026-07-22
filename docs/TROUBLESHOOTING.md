@@ -128,6 +128,14 @@ Raise the loader's static TLS reserve for the process:
 GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2097152
 ```
 
+This resolves it — verified 2026-07-22: `import open3d` succeeds and
+`compute_fpfh_feature` returns a 33xN descriptor matrix on a 2000-point cloud.
+A ROS node needing Open3D must have the variable in its environment before the
+process starts, so set it from the launch file (`SetEnvironmentVariable` or a
+node's `additional_env`), not from inside the module. The trailing
+`OpenBLAS : munmap failed` and `error code=22` lines printed at interpreter
+exit are harmless allocator complaints on a 16 KB-page kernel, not a failure.
+
 Upgrading Open3D does not avoid this. Its own fix
 (`add_compile_options("-ftls-model=global-dynamic")` under `LINUX_AARCH64`) is
 identical in v0.19.0 and on `main`, and no commit since has touched static TLS.

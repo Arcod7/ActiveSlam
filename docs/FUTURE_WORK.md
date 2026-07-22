@@ -31,8 +31,15 @@ The revisit planner scores candidate keyframes by local keyframe density.
 The intended upgrade — FPFH descriptors clustered into a vocabulary with
 rarity weighting, following Suresh et al. — is unimplemented. Keyframe
 clouds are already stored in body frame ready for a descriptor pipeline.
-Open3D has no aarch64 wheel, so FPFH needs a numpy/scipy implementation or
-a small PCL C++ node.
+
+**This is descoped for time, not blocked by the platform.** Open3D publishes
+no aarch64 wheel, but the pinned `external/open3d` submodule builds and runs
+here: with `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2097152` set (see
+`docs/TROUBLESHOOTING.md`), `import open3d` succeeds and
+`compute_fpfh_feature` returns a 33xN descriptor matrix. A node needing it
+can set that variable through the launch file's environment. Earlier
+revisions of this file and the roadmap called FPFH blocked on aarch64; that
+was true before the submodule build landed and is no longer accurate.
 
 ## Per-candidate uncertainty propagation
 
