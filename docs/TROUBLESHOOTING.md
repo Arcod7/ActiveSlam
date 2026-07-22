@@ -1,0 +1,126 @@
+# Troubleshooting
+
+Failure modes seen on real installs, and what each one actually means.
+Install steps are in [`INSTALL.md`](INSTALL.md).
+
+## Build
+
+**`Could not find a package configuration file provided by "Stonefish"`**
+
+`stonefish_ros2` does `find_package(Stonefish)`, which resolves only against an
+*installed* `StonefishConfig.cmake` — building the library is not enough. Run
+`./bootstrap.sh`; it builds and installs it. If Stonefish is installed
+somewhere `bootstrap.sh` does not look but CMake does, pass `--skip-stonefish`.
+
+**`fatal error: glm/glm.hpp: No such file or directory`**
+
+Stonefish's own dependencies are missing. `rosdep` cannot supply them — it only
+reads this workspace's `package.xml` files, and Stonefish is not a ROS package:
+
+```bash
+sudo apt install libglm-dev libsdl2-dev libfreetype-dev libgl1-mesa-dev
+```
+
+**`ModuleNotFoundError: No module named 'catkin_pkg'`, from a Python that is
+not `/usr/bin/python3`**
+
+CMake picked up a non-system interpreter — typically a uv- or pyenv-managed
+Python earlier on `PATH` (`~/.local/bin/python3.x`). It lacks ROS 2's Python
+packages. `bootstrap.sh` pins the right one, so this only appears when building
+by hand; pass the same flag:
+
+```bash
+colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+```
+
+Wipe `build/` before retrying either way — the wrong interpreter is cached in
+`CMakeCache.txt`, and a plain rebuild keeps using it.
+
+**A renamed or added file in a `setup.py` `data_files` list is not installed
+correctly**
+
+`colcon` does not prune installed files when a `data_files` entry changes, so an
+incremental `--symlink-install` rebuild can leave a stale symlink beside the new
+file. Remove `build/ install/ log/` and build again.
+
+**CMake dev warnings from PCL (`CMP0144`/`CMP0074` about `_ROOT` variables)**
+
+Noise from upstream PCL's own cmake modules, not this project. `bootstrap.sh`
+passes `-Wno-dev` to silence it.
+
+## Launch
+
+**`PackageNotFoundError: package 'octomap' not found`**
+
+A declared dependency is not installed. Re-run `rosdep install --from-paths src
+-i -y` from the workspace root, or just `./bootstrap.sh`.
+
+**Stonefish exits complaining about the scenario, or meshes look absent**
+
+`sim/world/data/obj/` is gitignored and distributed out of band, so a fresh
+clone does not have it. `./bootstrap.sh --meshes-from <existing-checkout>/sim/world/data/obj`
+copies it and verifies every file against `sim/world/data/obj.sha256`. Running
+bootstrap prints exactly which files are missing or corrupted.
+
+**Nothing moves, however you drive it**
+
+Working as designed: the motion safety gate is fail-closed and starts disabled.
+Arm it from the RViz panel, the launcher's `m` key, or
+`safety_start_enabled:=true`. `/motion/safety_status` reports what is blocking —
+including `MULTIPLE_COMMAND_SOURCES`, which stops all motion when two publishers
+share `/motion/body_command` (e.g. teleop while the frontier planner is live).
+
+**RViz dies with `Invalid parentWindowHandle` / `Unable to create the rendering
+window after 100 tries`**
+
+Qt is failing to pick a working platform plugin, seen on Wayland sessions with
+some GL drivers. Force X11 in the shell you launch from:
+
+```bash
+export QT_QPA_PLATFORM=xcb
+```
+
+This belongs in your own shell profile, not in the repo — it depends on the
+machine, not the project.
+
+## Python dependencies
+
+**`error: externally-managed-environment` (PEP 668)**
+
+Ubuntu 24.04 refuses a bare `pip install` into the system Python. The project
+uses a uv virtualenv at `<workspace>/.venv` for exactly this reason —
+`./bootstrap.sh` creates it. Activate it before running anything:
+`source <workspace>/.venv/bin/activate`.
+
+**`pip install vdbfusion` or `pip install open3d` finds no matching
+distribution**
+
+Expected: neither publishes a wheel this project can use (see
+[`INSTALL.md`](INSTALL.md#optional-components)). Build from the pinned
+submodules with `./bootstrap.sh --with-vdbfusion` / `--with-open3d`.
+
+## aarch64 (Apple Silicon, Raspberry Pi)
+
+**`import open3d` raises `cannot allocate memory in static TLS block`**
+
+Raise the loader's static TLS reserve for the process:
+
+```bash
+GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2097152
+```
+
+Upgrading Open3D does not avoid this. Its own fix
+(`add_compile_options("-ftls-model=global-dynamic")` under `LINUX_AARCH64`) is
+identical in v0.19.0 and on `main`, and no commit since has touched static TLS.
+The built module needs 12 KB of thread-local storage and carries a single
+initial-exec relocation (`R_AARCH64_TLS_TPREL64`) against nine well-behaved
+`TLSDESC` ones; that one relocation forces the whole block into the static TLS
+area at `dlopen`, and a 16 KB-page kernel leaves less surplus to satisfy it
+from. It is not in any of the bundled static libraries.
+
+**VTK's download fails with `SSL connect error` from inside a container that
+reaches other hosts fine**
+
+Fetch `https://vtk.org/files/release/9.1/VTK-9.1.0.tar.gz` from the host into
+`external/open3d/3rdparty_downloads/vtk/` and re-run. CMake verifies the
+SHA-256 and skips the download.
