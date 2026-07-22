@@ -116,7 +116,8 @@ reports which condition is blocking.
 - `noise_realistic.yaml`: matches Bar30 pressure + Pathfinder DVL + gyro/compass attitude; sonar section
   derived from the WaterLinked Sonar 3D-15 datasheet (`ActiveSlam-Resources/3d-sonar`)
 - `noise_degraded.yaml`: turbid water / magnetic interference / degraded bottom-lock; sonar section
-  worse-than-datasheet (full beam-separation lateral jitter, higher dropout/outlier rates)
+  worse-than-datasheet (full beam-separation lateral jitter, higher dropout/outlier rates,
+  stronger specular loss, larger dropout patches, uncalibrated speed of sound)
 
 Each profile's `seed:` (42 for `ideal`/`sonar_only`/`odom_pos_only`/`odom_only`,
 -1/random for `realistic`/`degraded`) is combined with a per-sensor offset
@@ -225,6 +226,14 @@ one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.3
   fraction vs. range, exact quantization lattice, NaN/no-return pixels untouched, and
   bytes-identical `ideal`-profile passthrough. Live: `/cloud_in_raw`/`/cloud_in`/`/gt/cloud_in`
   all ~5 Hz with correct frame IDs; `slam:=none` unaffected.
+- ✅ **Geometry-aware sonar noise** (Phase 30): grazing-incidence dropout (0.024 head-on →
+  0.151 at 75° on `realistic`), spatially and temporally correlated speckle/dropout fields
+  (ping-to-ping +0.426, spatial lag-1 +0.559, was ~0 iid), and a per-run speed-of-sound
+  range scale. Variance-preserving, so the `realistic` error *magnitude* is unchanged —
+  only its structure. **Not fitted to hardware**: no real Sonar 3D-15 range images exist
+  yet, so these are geometrically-motivated stress-test values, not a calibrated model.
+  Note when reading raw range statistics that the multipath outlier term (~0.077 m std)
+  swamps the speckle (~0.008 m) and must be rejected before the correlation terms are visible.
 - ✅ **Benchmarking switches** (Phase 16): `loop_closure:=false` keeps
   `/slam/loop_closure_count` at 0 (default still closes loops); `noise_seed:=7` reaches all
   four sensor nodes; a forced-threshold live run fired 4 map-rebuild cycles cleanly

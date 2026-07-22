@@ -44,9 +44,15 @@ class SonarNoise:
     lat_sigma_v_per_m: float = 0.0      # vertical beam-spread jitter per metre range
     dropout_p0: float = 0.0            # base dropout probability
     dropout_p_range: float = 0.0       # extra dropout probability at max range
+    dropout_p_grazing: float = 0.0     # extra dropout probability at grazing incidence
+    dropout_grazing_exp: float = 2.0   # shape of the (1 - cos incidence) dropout term
     outlier_p: float = 0.0             # multipath outlier probability
     outlier_range_min_m: float = 0.3   # late-arrival excess range, lower bound
     outlier_range_max_m: float = 3.0   # late-arrival excess range, upper bound
+    corr_length_px: float = 0.0        # spatial correlation length of the noise fields (px)
+    corr_rho_time: float = 0.0         # AR(1) correlation between consecutive pings
+    range_corr_frac: float = 0.0       # fraction of range-noise variance that is correlated
+    sos_scale_error_pct: float = 0.0   # per-run speed-of-sound range scale error
 
 @dataclass
 class NoiseProfile:

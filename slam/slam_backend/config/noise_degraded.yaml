@@ -28,6 +28,16 @@ sonar:                       # WaterLinked Sonar 3D-15, turbid/degraded conditio
   lat_sigma_v_per_m: 0.010   # full tan(0.60 deg beam separation)
   dropout_p0: 0.10
   dropout_p_range: 0.20
+  dropout_p_grazing: 0.60    # specular loss, worse in turbid water
+  corr_length_px: 10.0       # larger dropout patches
+  corr_rho_time: 0.85
+  range_corr_frac: 0.7
+  sos_scale_error_pct: 0.015 # uncalibrated speed of sound
+  dropout_p_grazing: 0.60    # specular loss, worse in turbid water
+  corr_length_px: 10.0       # larger dropout patches
+  corr_rho_time: 0.85
+  range_corr_frac: 0.7
+  sos_scale_error_pct: 0.015 # uncalibrated speed of sound
   outlier_p: 0.01
   outlier_range_min_m: 0.3
   outlier_range_max_m: 5.0

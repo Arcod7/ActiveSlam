@@ -1019,3 +1019,69 @@ complete the TLS handshake.
 
 Tests: 127 in `planner/frontier_slam/` and `eval/eval_tools/`, including 10 new
 run-validity cases and 8 for the carving geometry.
+
+## Phase 30 — Geometry-aware sonar noise: grazing dropout, correlated speckle, sound-speed scale
+
+**Date**: 2026-07-22
+**Files**: `slam/slam_backend/slam_backend/sensor_models/sonar_noise.py`,
+`slam/slam_backend/slam_backend/sensor_models/noise_profiles.py`,
+`slam/slam_backend/config/noise_{ideal,realistic,degraded,sonar_only,odom_only,odom_pos_only}.yaml`,
+`slam/slam_backend/test/test_sonar_noise.py` (new)
+
+**Objective**: Every term in the Phase 15 sonar noise model was drawn
+independently per point, and none of them looked at the geometry being
+measured. Two consequences. First, dropouts fell as uniform per-beam confetti
+at a rate set only by range, whereas the dominant real no-return mechanism is
+specular: a smooth surface at oblique incidence reflects energy away from the
+transducer and an edge-on wall returns almost nothing. Second, independent
+noise is precisely the kind a pose graph averages out, so the model flattered
+the pipeline — real speckle is partly frozen between pings and real dropouts
+arrive in patches.
+
+**What changed**: Three additions, all inside `sonar_noise`.
+
+*Grazing-incidence dropout.* The node now estimates a per-pixel surface normal
+from the organized cloud and adds `dropout_p_grazing * (1 - cos θ)^n` to the
+dropout probability. Degenerate normals (borders, NaN neighbours) fall back to
+normal incidence; depth discontinuities yield edge-on normals and so a grazing
+penalty, which matches real sonar dropping returns at object edges. The
+unorganized-cloud path falls back to the previous range-only behaviour.
+
+*Correlated noise fields.* Range error and dropout are drawn from smooth
+Gaussian random fields (white noise filtered at `corr_length_px`, rescaled by
+the analytic `2s*sqrt(pi)` so variance stays unit) rather than per point, with
+AR(1) correlation `corr_rho_time` between consecutive pings. `range_corr_frac`
+splits the range error between an independent and a correlated draw with
+weights that keep total variance at sigma^2, so enabling correlation changes
+the structure of the error without changing its magnitude. Dropout thresholds
+the field at its own quantile, so the dropout *rate* is unchanged and only its
+spatial arrangement becomes patchy.
+
+*Speed-of-sound scale error.* One `sos_scale_error_pct` draw per run
+multiplies every range. Unlike every other term it is systematic, so no amount
+of averaging removes it; it is the mechanism behind map-scale drift.
+
+**Observed impact**: 19 tests in `slam/slam_backend/`, and a live node probe
+against synthetic walls at controlled incidence. Grazing dropout on the
+`realistic` profile rises 0.024 (head-on) to 0.151 (75°), and 0.245 on
+`degraded`. With outliers rejected, speckle std at 3 m is 0.00859 m against a
+predicted `sigma0 + k*r` of 0.008; ping-to-ping correlation is +0.426 against
+~0.35 predicted by `range_corr_frac * corr_rho_time`; spatial lag-1 correlation
+is +0.559 where the old model gave ~0. The `ideal` profile remains an exact
+passthrough (0.000 dropout, 0.0000 m error) end to end.
+
+**Worth recording for anyone reading the raw statistics**: the multipath
+outlier term dominates them. At `outlier_p` 0.002 with 0.3-3.0 m excursions it
+contributes ~0.077 m of range-error std against ~0.008 m of speckle, so
+uncorrected frame-to-frame correlation reads +0.002 and hides the effect
+entirely. Any future check of the correlation terms has to reject outliers
+first.
+
+**Not validated against hardware.** No real Sonar 3D-15 range images have been
+recorded, so these terms are geometrically motivated, not fitted. The numbers
+in the profiles are argued from the datasheet and from the physics, and should
+be treated as a stress test rather than a calibrated sensor model. Fitting
+them needs a tank session: a flat wall swept through incidence angles gives
+the dropout-vs-incidence curve directly, and a 90° corner exposes multipath.
+
+Tests: 19 in `slam/slam_backend/`, 12 of them new.
