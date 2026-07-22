@@ -111,8 +111,10 @@ install_gtsam() {
     sudo cmake --install "$GTSAM_DIR/build"
     sudo ldconfig
 
-    GTSAM_SITE_PACKAGES="$("$VENV_PY" -c 'import site; print(site.getsitepackages()[0])')"
-    printf '%s\n' /usr/local/python > "$GTSAM_SITE_PACKAGES/activeslam-gtsam.pth"
+    # GTSAM's regular CMake install intentionally omits the Python module;
+    # its generated package lives in build/python. Installing that prebuilt
+    # package places the binding in this venv without compiling it again.
+    "$UV" pip install --python "$VENV_PY" "$GTSAM_DIR/build/python"
     "$VENV_PY" -c 'import gtsam; print("GTSAM Python bindings:", gtsam.__file__)'
 }
 
