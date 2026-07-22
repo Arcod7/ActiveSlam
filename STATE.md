@@ -251,6 +251,10 @@ one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.3
   untouched. Hides reverb rather than retuning it; lowering `reverb_p` is the alternative.
   Exposed in the launcher TUI as **"Noise Attenuation"** (none / cut_close) under the SLAM section
   (Phase 33); cut_close maps to `near_cutoff:=1.6`.
+- ✅ **Range-image view** (Phase 34): `range_image` node renders the noised cloud back to a 2D
+  depth-camera-style Image. `/cloud_in/range_image` (what SLAM gets) and `/cloud_in_raw/range_image`
+  (clean) publish from `pointcloud_only.launch.py`; RViz layouts show them as "SLAM input (noised
+  range)" and "Clean cloud (range)". Toggling Noise Attenuation changes the SLAM-input image live.
 - ✅ **Benchmarking switches** (Phase 16): `loop_closure:=false` keeps
   `/slam/loop_closure_count` at 0 (default still closes loops); `noise_seed:=7` reaches all
   four sensor nodes; a forced-threshold live run fired 4 map-rebuild cycles cleanly

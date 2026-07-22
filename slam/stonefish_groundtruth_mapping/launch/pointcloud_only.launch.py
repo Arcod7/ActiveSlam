@@ -115,7 +115,18 @@ def generate_launch_description():
         }],
     )
 
+    # RViz-facing range images: the noised cloud is only a PointCloud2, so render
+    # it (and the clean reference) back to depth-camera-style Image topics.
+    range_image_slam = Node(
+        package='slam_backend', executable='range_image', name='range_image_slam',
+        parameters=[{'input_topic': '/cloud_in', 'output_topic': '/cloud_in/range_image'}],
+    )
+    range_image_raw = Node(
+        package='slam_backend', executable='range_image', name='range_image_raw',
+        parameters=[{'input_topic': '/cloud_in_raw', 'output_topic': '/cloud_in_raw/range_image'}],
+    )
+
     return LaunchDescription([
         sonar_noise_arg, noise_profile_arg, noise_seed_arg, near_cutoff_arg,
-        depth_to_cloud, sonar_noise_node,
+        depth_to_cloud, sonar_noise_node, range_image_slam, range_image_raw,
     ])

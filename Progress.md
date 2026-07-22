@@ -1228,3 +1228,33 @@ the launch argument — `cut_close` -> `near_cutoff:=1.6`, `none` ->
 label and choices, and the emitted `pointcloud_only.launch.py` command carries
 `near_cutoff:=1.6` for `cut_close` and `near_cutoff:=-1.0` for `none`. The
 existing 31 sonar tests are unaffected.
+
+## Phase 34 — Range-image view of the SLAM input cloud in RViz
+
+**Date**: 2026-07-23
+**Files**: `slam/slam_backend/slam_backend/sensor_models/range_image.py` (new),
+`slam/slam_backend/setup.py`,
+`slam/stonefish_groundtruth_mapping/launch/pointcloud_only.launch.py`,
+`bringup/rviz/demo.rviz`, `bringup/rviz/demo_slam.rviz`, `bringup/rviz/demo_tsdf.rviz`
+
+**Objective**: The noised sonar data only existed as a PointCloud2 (/cloud_in),
+so there was no depth-camera-style 2D image of what SLAM actually consumes — no
+way to look at the noise profile and the near-field gate the way the clean depth
+camera (/sensor_msgs/image_depth) can be viewed.
+
+**What changed**: A `range_image` node renders any organized cloud back into a
+`sensor_msgs/Image` (32FC1, per-pixel euclidean range in metres, dropouts and
+no-returns = 0). `pointcloud_only.launch.py` runs two instances:
+`/cloud_in -> /cloud_in/range_image` (what SLAM receives: noise profile plus
+whatever Noise Attenuation is active) and `/cloud_in_raw -> /cloud_in_raw/range_image`
+(the clean reference). All three RViz layouts (`demo`, `demo_slam`, `demo_tsdf`)
+gain an Image display **"SLAM input (noised range)"** (enabled) and
+**"Clean cloud (range)"** (off by default), beside the existing DepthCamera
+display. The launcher TUI already loads these layouts and launches
+`pointcloud_only.launch.py`, so no launcher change was needed.
+
+**Observed impact**: Verified the node publishes a valid 32FC1 257x67 image —
+a 6 m wall renders as 6.00-8.61 m (euclidean range grows off-axis), frame_id
+preserved. Toggling Noise Attenuation none/cut_close changes the
+`SLAM input (noised range)` image live; the clean image stays put for
+comparison. 9 packages build, 31 sonar tests unaffected.
