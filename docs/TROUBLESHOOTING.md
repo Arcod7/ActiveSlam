@@ -25,6 +25,17 @@ creating the Python 3.12 venv.
 The prompt appears only on a terminal; non-interactive invocations fail rather
 than installing host software unexpectedly.
 
+**`NO_PUBKEY DDCAE044F796ECB0` for an `nvidia.github.io` repository inside
+the Distrobox**
+
+Legacy NVIDIA Container Toolkit apt sources from an Ubuntu 22.04 host can be
+reproduced in the Ubuntu 24.04 guest without their old signing key. They are
+not required for Distrobox's `--nvidia` driver-library integration. Re-run the
+updated `./bootstrap.sh`: its guest setup moves only the affected
+`libnvidia-container`, `nvidia-container-runtime`, and `nvidia-docker` source
+files to `.disabled-by-activeslam*` backups before retrying apt. It does not
+disable apt signature verification or delete the source definitions.
+
 **`gtsam==4.2.1 has no wheels with a matching Python implementation tag`
 (for example, `cp310`)**
 

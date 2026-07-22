@@ -22,6 +22,31 @@ if [ "${VERSION_CODENAME:-}" != "noble" ]; then
     exit 1
 fi
 
+# Some Ubuntu 22.04 NVIDIA installations leave old libnvidia-container,
+# nvidia-container-runtime and nvidia-docker apt feeds behind. Distrobox's
+# --nvidia setup can reproduce those definitions in the Noble guest without
+# their legacy signing key, making every apt update fail. They are not needed:
+# --nvidia exposes the host driver libraries directly. Preserve the files with
+# a non-apt extension instead of weakening signature checks or deleting them.
+for ACTIVESLAM_APT_SOURCE in \
+    /etc/apt/sources.list.d/*.list \
+    /etc/apt/sources.list.d/*.sources; do
+    [ -f "$ACTIVESLAM_APT_SOURCE" ] || continue
+    if grep -Eq \
+        'nvidia\.github\.io/(libnvidia-container|nvidia-container-runtime|nvidia-docker)' \
+        "$ACTIVESLAM_APT_SOURCE"; then
+        ACTIVESLAM_DISABLED_SOURCE="${ACTIVESLAM_APT_SOURCE}.disabled-by-activeslam"
+        ACTIVESLAM_DISABLED_SUFFIX=1
+        while [ -e "$ACTIVESLAM_DISABLED_SOURCE" ]; do
+            ACTIVESLAM_DISABLED_SOURCE="${ACTIVESLAM_APT_SOURCE}.disabled-by-activeslam.${ACTIVESLAM_DISABLED_SUFFIX}"
+            ACTIVESLAM_DISABLED_SUFFIX=$((ACTIVESLAM_DISABLED_SUFFIX + 1))
+        done
+        sudo mv "$ACTIVESLAM_APT_SOURCE" "$ACTIVESLAM_DISABLED_SOURCE"
+        echo "Disabled legacy NVIDIA apt source: $ACTIVESLAM_APT_SOURCE"
+        echo "  Preserved as: $ACTIVESLAM_DISABLED_SOURCE"
+    fi
+done
+
 if [ ! -f /opt/ros/jazzy/setup.bash ]; then
     echo "==> Installing ROS 2 Jazzy Desktop inside Distrobox"
     sudo apt-get update
