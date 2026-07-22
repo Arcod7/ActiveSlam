@@ -7,12 +7,9 @@
 #
 # Verified working versions (aarch64, ROS 2 Jazzy container, 2026-07-02):
 
-# No rosdep key exists for the Python bindings. rosdep's `gtsam` key maps to
-# ros-jazzy-gtsam, which ships only the C++ libraries (libgtsam.so and friends,
-# zero Python files), so it cannot satisfy `import gtsam` in slam_backend.
-# PyPI publishes 4.2.1 wheels for CPython 3.11+; bootstrap checks this before
-# invoking uv (the supported Jazzy/Ubuntu 24.04 environment uses Python 3.12).
-gtsam==4.2.1
+# GTSAM is managed by bootstrap.sh rather than this requirements file. It tries
+# the wheel release in dependencies.conf first, then builds the pinned GTSAM
+# submodule when that wheel is unavailable for the active Python/architecture.
 
 # No rosdep key; PyPI wheel only. Used by slam_backend for scan matching.
 small-gicp

@@ -5,6 +5,13 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPENDENCY_CONFIG="$REPO_ROOT/dependencies.conf"
+if [ ! -r "$DEPENDENCY_CONFIG" ]; then
+    echo "Missing dependency manifest: $DEPENDENCY_CONFIG" >&2
+    exit 1
+fi
+# shellcheck source=dependencies.conf
+source "$DEPENDENCY_CONFIG"
 ORIGINAL_ARGS=("$@")
 PARENT_DIR="$(dirname "$REPO_ROOT")"
 if [ "$(basename "$PARENT_DIR")" = "src" ]; then
@@ -34,7 +41,7 @@ OPEN3D_DIR="$REPO_ROOT/external/open3d"
 OPEN3D_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
 
 MESHES_FROM=""
-GTSAM_VERSION="4.2.0"
+GTSAM_DIR="$REPO_ROOT/$GTSAM_SUBMODULE_PATH"
 GTSAM_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
 
 # Python deps go into a uv-managed virtualenv. --system-site-packages keeps
@@ -66,30 +73,29 @@ python_is_expected() {
     "$1" -c "import sys; raise SystemExit(sys.version_info[:2] != (${EXPECTED_PYTHON_VERSION%.*}, ${EXPECTED_PYTHON_VERSION#*.}))"
 }
 
-install_humble_gtsam() {
-    # GTSAM 4.2.1 has no CPython 3.10 wheel.  Version 4.2.0 still has one on
-    # x86_64, but not on ARM64, so build the same pinned release there.
+install_gtsam() {
+    # Prefer a prebuilt wheel. The pinned source submodule is the portable
+    # fallback, notably for Humble's CPython 3.10 and ARM64.
     if "$VENV_PY" -c 'import gtsam' >/dev/null 2>&1; then
         return
     fi
 
-    if [ "$(uname -m)" = "x86_64" ]; then
-        "$UV" pip install --python "$VENV_PY" "gtsam==$GTSAM_VERSION"
+    if "$UV" pip install --python "$VENV_PY" "gtsam==$GTSAM_WHEEL_VERSION"; then
         return
     fi
 
-    GTSAM_ROOT="$WS_ROOT/.deps/gtsam-$GTSAM_VERSION"
-    GTSAM_SOURCE="$GTSAM_ROOT/src"
-    GTSAM_BUILD="$GTSAM_ROOT/build"
-
-    echo "Building GTSAM $GTSAM_VERSION Python bindings from source for $(uname -m)..."
+    echo "No compatible GTSAM $GTSAM_WHEEL_VERSION wheel; building" \
+         "$GTSAM_SOURCE_REF from the $GTSAM_SUBMODULE_PATH submodule."
     sudo apt-get install -y build-essential cmake libboost-all-dev libtbb-dev python3-dev
-    if [ ! -d "$GTSAM_SOURCE/.git" ]; then
-        mkdir -p "$GTSAM_ROOT"
-        git clone --depth 1 --branch "$GTSAM_VERSION" \
-            https://github.com/borglab/gtsam.git "$GTSAM_SOURCE"
+    if [ -f "$REPO_ROOT/.git" ] || [ -d "$REPO_ROOT/.git" ]; then
+        ( cd "$REPO_ROOT" && git submodule update --init --recursive "$GTSAM_SUBMODULE_PATH" )
     fi
-    cmake -S "$GTSAM_SOURCE" -B "$GTSAM_BUILD" \
+    if [ ! -f "$GTSAM_DIR/CMakeLists.txt" ]; then
+        echo "$GTSAM_DIR has no GTSAM sources. Initialise the" \
+             "$GTSAM_SUBMODULE_PATH submodule and re-run." >&2
+        exit 1
+    fi
+    cmake -S "$GTSAM_DIR" -B "$GTSAM_DIR/build" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DGTSAM_BUILD_PYTHON=ON \
@@ -99,8 +105,8 @@ install_humble_gtsam() {
         -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
         -DPYTHON_EXECUTABLE="$SYSTEM_PYTHON"
-    cmake --build "$GTSAM_BUILD" -j "$GTSAM_BUILD_JOBS"
-    sudo cmake --install "$GTSAM_BUILD"
+    cmake --build "$GTSAM_DIR/build" -j "$GTSAM_BUILD_JOBS"
+    sudo cmake --install "$GTSAM_DIR/build"
     sudo ldconfig
 
     GTSAM_SITE_PACKAGES="$("$VENV_PY" -c 'import site; print(site.getsitepackages()[0])')"
@@ -306,12 +312,8 @@ if ! python_is_expected "$VENV_PY"; then
         "$SYSTEM_PYTHON." >&2
     exit 1
 fi
-if [ "${ROS_DISTRO:-}" = "humble" ]; then
-    "$UV" pip install --python "$VENV_PY" -r "$REPO_ROOT/requirements-humble.txt"
-    install_humble_gtsam
-else
-    "$UV" pip install --python "$VENV_PY" -r "$REPO_ROOT/requirements.txt"
-fi
+"$UV" pip install --python "$VENV_PY" -r "$REPO_ROOT/requirements.txt"
+install_gtsam
 
 echo "==> 4/8 rosdep (workspace root: $WS_ROOT)"
 ( cd "$WS_ROOT" && rosdep install --from-paths src -i -y )
