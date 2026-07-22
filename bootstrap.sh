@@ -35,17 +35,33 @@ OPEN3D_BUILD_JOBS="$(nproc 2>/dev/null || echo 2)"
 
 MESHES_FROM=""
 
-# Python deps go into a uv-managed virtualenv: Ubuntu 24.04 (ROS 2 Jazzy's
-# target) marks its system Python externally-managed, so a plain
-# `pip install` there fails with PEP 668. --system-site-packages keeps the
-# distro's ROS Python packages visible inside it.
+# Python deps go into a uv-managed virtualenv. --system-site-packages keeps
+# the distro's ROS Python packages visible inside it (and avoids PEP 668 on
+# Ubuntu 24.04).
 VENV_DIR="$WS_ROOT/.venv"
-SYSTEM_PYTHON="/usr/bin/python3.12"
 DISTROBOX_NAME="activeslam-jazzy"
 DISTROBOX_IMAGE="quay.io/toolbx/ubuntu-toolbox:24.04"
 
+select_python_for_ros_distro() {
+    case "${ROS_DISTRO:-}" in
+        jazzy)
+            SYSTEM_PYTHON="/usr/bin/python3.12"
+            EXPECTED_PYTHON_VERSION="3.12"
+            ;;
+        humble)
+            SYSTEM_PYTHON="/usr/bin/python3.10"
+            EXPECTED_PYTHON_VERSION="3.10"
+            ;;
+        *)
+            SYSTEM_PYTHON=""
+            EXPECTED_PYTHON_VERSION=""
+            return 1
+            ;;
+    esac
+}
+
 python_is_expected() {
-    "$1" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'
+    "$1" -c "import sys; raise SystemExit(sys.version_info[:2] != (${EXPECTED_PYTHON_VERSION%.*}, ${EXPECTED_PYTHON_VERSION#*.}))"
 }
 
 setup_distrobox_and_continue() {
@@ -104,7 +120,8 @@ unsupported_environment() {
         return 0
     fi
 
-    echo "ActiveSlam needs ROS 2 Jazzy on Ubuntu 24.04 with Python 3.12."
+    echo "ActiveSlam needs ROS 2 Humble (Ubuntu 22.04, Python 3.10) or" \
+         "ROS 2 Jazzy (Ubuntu 24.04, Python 3.12)."
     echo "This shell has ROS_DISTRO='${ROS_DISTRO:-unset}' and" \
          "$(/usr/bin/python3 --version 2>&1 || echo 'no /usr/bin/python3')."
     echo ""
@@ -170,11 +187,12 @@ while [ $# -gt 0 ]; do
 done
 
 echo "==> 1/8 Sanity checks"
-if ! command -v ros2 >/dev/null 2>&1 || [ "${ROS_DISTRO:-}" != "jazzy" ] || \
+if ! select_python_for_ros_distro || ! command -v ros2 >/dev/null 2>&1 || \
    [ ! -x "$SYSTEM_PYTHON" ] || ! python_is_expected "$SYSTEM_PYTHON"; then
     unsupported_environment
-    echo "Unsupported environment. Enter ROS 2 Jazzy on Ubuntu 24.04, source" \
-         "'/opt/ros/jazzy/setup.bash' (or setup.zsh), and re-run this script." >&2
+    echo "Unsupported environment. Enter ROS 2 Humble on Ubuntu 22.04 or ROS 2" \
+         "Jazzy on Ubuntu 24.04, source its setup.bash (or setup.zsh), and re-run" \
+         "this script." >&2
     exit 1
 fi
 if ! command -v rosdep >/dev/null 2>&1; then
@@ -205,11 +223,11 @@ fi
 if [ -x "$VENV_DIR/bin/python" ] && ! python_is_expected "$VENV_DIR/bin/python"; then
     VENV_PY_VERSION="$("$VENV_DIR/bin/python" --version 2>&1 || echo unknown)"
     if [ "${ACTIVESLAM_DISTROBOX_BOOTSTRAP:-}" = "1" ]; then
-        VENV_BACKUP="${VENV_DIR}.pre-jazzy-$(date +%Y%m%d-%H%M%S)"
+        VENV_BACKUP="${VENV_DIR}.pre-${ROS_DISTRO}-$(date +%Y%m%d-%H%M%S)"
         mv "$VENV_DIR" "$VENV_BACKUP"
         echo "Moved incompatible $VENV_PY_VERSION venv to $VENV_BACKUP."
     else
-        echo "$VENV_DIR uses $VENV_PY_VERSION instead of the required Python 3.12." \
+        echo "$VENV_DIR uses $VENV_PY_VERSION instead of the required Python $EXPECTED_PYTHON_VERSION." \
              "Deactivate it, move or remove that venv, and re-run bootstrap." >&2
         exit 1
     fi
@@ -231,17 +249,17 @@ if [ ! -x "$UV" ]; then
 fi
 # --allow-existing keeps this script re-runnable; --clear would discard
 # whatever the user has already installed into the venv.
-# --python /usr/bin/python3.12 is not optional: uv otherwise bases the venv on its
+# --python $SYSTEM_PYTHON is not optional: uv otherwise bases the venv on its
 # own managed CPython, whose --system-site-packages does not include Debian's
 # dist-packages — so rclpy imports and then dies on a missing PyYAML.
 "$UV" venv --python "$SYSTEM_PYTHON" --system-site-packages --allow-existing "$VENV_DIR"
 VENV_PY="$VENV_DIR/bin/python"
 if ! python_is_expected "$VENV_PY"; then
     VENV_PY_VERSION="$("$VENV_PY" --version 2>&1 || echo unavailable)"
-    echo "$VENV_DIR uses $VENV_PY_VERSION instead of the required Python 3.12." \
-         "Deactivate it, move or remove that venv, and re-run bootstrap from" \
-         "the supported Jazzy/Ubuntu 24.04 environment so it is recreated with" \
-         "$SYSTEM_PYTHON." >&2
+    echo "$VENV_DIR uses $VENV_PY_VERSION instead of the required Python $EXPECTED_PYTHON_VERSION." \
+        "Deactivate it, move or remove that venv, and re-run bootstrap from" \
+        "a supported ROS environment so it is recreated with" \
+        "$SYSTEM_PYTHON." >&2
     exit 1
 fi
 "$UV" pip install --python "$VENV_PY" -r "$REPO_ROOT/requirements.txt"
