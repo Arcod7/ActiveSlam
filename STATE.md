@@ -1,6 +1,6 @@
 # ActiveSlam SLAM Backend — Current State
 
-Mutable snapshot. Overwrite, never append. Last updated: 2026-07-22.
+Mutable snapshot. Overwrite, never append. Last updated: 2026-07-23.
 
 Change log → `Progress.md`. Detailed design + as-built deltas → `docs/SLAM_PLAN.md`.
 
@@ -138,7 +138,8 @@ published used `ideal`, so no quoted numbers are affected. Override with `noise_
 | `min_inlier_ratio` | 0.3 | Registration gate: fraction of source points matched |
 | `min_inlier_count` | 50 | Registration gate: absolute inlier floor |
 | `max_error_per_inlier` | 0.05 | Registration gate: GICP error normalized per inlier |
-| `icp_sigma_rot` / `icp_sigma_trans` | 0.05 / 0.05 | Shared noise model for ALL Between factors |
+| `odom_sigma_rot` / `odom_sigma_trans` | 0.02 / 0.02 | Dead-reckoning BetweenFactor noise (tight, non-robust: the DVL is accurate and must not be down-weighted by a bad closure) |
+| `scan_sigma_rot` / `scan_sigma_trans` | 0.08 / 0.12 | Scan-match + loop-closure BetweenFactor noise (looser, Huber-robust: sparse-sonar registration is decimeter-level) |
 | `scan_voxel_size` | 0.1 | small_gicp downsampling resolution |
 | `map_rebuild_enabled` | false | Rebuild the belief TSDF map after a big loop closure (TSDF only) |
 | `rebuild_min_move_m` / `rebuild_min_move_rad` | 0.3 / 0.15 | Min keyframe shift to trigger a rebuild |
@@ -178,7 +179,7 @@ ros2 launch slam_backend sensors_only.launch.py noise_profile:=degraded  # senso
 # Benchmarking switches (all slam:=slam only, all default to current behavior):
 ros2 launch bringup demo.launch.py slam:=slam loop_closure:=false                    # A/B: no loop closure
 ros2 launch bringup demo.launch.py slam:=slam mapper:=tsdf map_rebuild:=true         # rebuild belief TSDF after big closures
-ros2 launch bringup demo.launch.py slam:=slam noise_seed:=7                          # reproducible, decorrelated noise draws
+ros2 launch bringup demo.launch.py slam:=slam noise_seed:=7                          # repeatable, decorrelated sensor-noise draws
 ros2 launch bringup demo.launch.py slam:=slam output_dir:=/path/to/run              # label eval output instead of a timestamp
 ros2 launch bringup demo.launch.py slam:=slam mode:=frontier revisit:=true          # Week 3: uncertainty-triggered revisit
 ros2 launch bringup demo.launch.py mode:=frontier scan_style:=spin                  # pre-2026-07-21 full-revolution scan (default is sweep)
@@ -204,17 +205,71 @@ one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.3
 - ✅ Sensor fusion chain (pressure+IMU+DVL→dead_reckoning): profile-dependent drift confirmed via standalone rclpy harness
 - ✅ `ScanMatcher` gating: correctly rejects a synthetic zero-overlap match despite `converged=True`
 - ✅ Pose graph + loop closure logic: synthetic square-loop test (wiring/logic sanity check only, not representative of real numbers — see caveat below)
-- ✅ **Real benchmark, refreshed** (`demo.launch.py slam:=slam mode:=frontier
+- ⚠️ **Historical real benchmark** (`demo.launch.py slam:=slam mode:=frontier
   noise_profile:=realistic noise_seed:=42`, real Stonefish sim, 600s / 94 metrics
   rows / 35 loop closures, post re-detect fix and incl. the Phase 15 sonar noise
   model): final cumulative ATE **0.5356 m**, final instantaneous error 0.7908 m,
   mean RPE (translation) 0.1137 m, map coverage 0.9651, occupied-cell IoU 0.5194.
-  Seeded and reproducible (`noise_seed:=42`). The earlier 0.58 m / 157 s figure is
+  This predates Phase 36 and sampled only irregularly-spaced keyframe poses, so
+  its ATE/RPE are not directly comparable with current continuous-odometry metrics.
+  `noise_seed:=42` repeats the sensor RNG draws, but does not make asynchronous
+  Stonefish/ROS/planner execution deterministic. The earlier 0.58 m / 157 s figure is
   superseded — it predated both the re-detect fix and the sonar noise model, so
   the two numbers happen to land close but aren't measuring the same system.
   Loop closure remains opportunistic-only — the robot never revisits anything
   on its own; closing this gap is the Week 3 active-SLAM contribution (see
   "Not yet implemented" below).
+- ✅ **Evaluation audit and repair (Phase 36)**: ATE now samples corrected
+  `/slam/odometry` continuously instead of weighting sparse keyframes; RPE uses a fixed
+  temporal delta. Two identical pre-fix 120 s runs on commit `4011d3b`/seed 1 measured
+  ATE 1.255 vs 0.709 m and 45 vs 25 loop closures, demonstrating that a noise seed is
+  not an end-to-end determinism guarantee. Matrix validity now unwraps yaw, detects
+  pre-shutdown child deaths/non-zero launch exits, ignores orphan nodes in other ROS
+  domains, accepts `near_cutoff`, and labels its status as structural validity only.
+- ✅ **TSDF cloud/TF arrival-order loss fixed (Phases 37–38)**: a read-only 65 s timing probe
+  observed 302 `/cloud_in` messages. TF was available immediately for 151; of the
+  remaining 151, 150 became transformable within 0.5 s and only one expired. The
+  mapper now uses ROS Jazzy's maintained `Buffer.wait_for_transform_async()` and a
+  10-cloud/0.5 s bounded FIFO, preserving exact timestamps and capture order without
+  falling back to latest TF. In the matched 70 s post-fix run, the belief mapper
+  deferred 141/290 clouds, recovered 140, expired one, and overflowed none by 60 s.
+  A 180 s stress run stayed at zero overflow/future failures; a deterministic rebuild
+  reset and replayed 258 retained scans in 1.32 s, then ran another 30 s cleanly.
+- ⚠️ **Fixed-duration shutdown can interrupt a late rebuild**: the Phase 38 stress
+  run naturally began replaying 547 scans only 1.7 s before its 180 s deadline and
+  was stopped by the planned SIGINT. Its structural status was still `ok`. For map
+  quality comparisons, inspect rebuild-start/completion counts and rerun or extend
+  any cell that ends mid-replay; choosing automatic overtime versus invalidation is
+  an evaluation-policy decision, not a mapper correctness fix.
+- ⚠️ **A rebuild-correlated position jump was traced upstream to loop closure
+  (Phase 39)**: in a 240 s wall-oriented/frontier/realistic-noise run, absolute
+  error jumped 0.347 -> 0.862 m 36 ms after node 84's closure update and 139 ms
+  before TSDF rebuild began. The graph moved 40/85 keyframes by up to 0.99 m;
+  TSDF subsequently replayed all 606 scans in 2.04 s. Ten-second pre/post mean
+  errors were 0.323/0.795 m, and the error remained high after replay. The mapper
+  cannot change SLAM pose, so rebuild is a downstream indicator of the large graph
+  correction, not its cause. Current closure gating checks local ICP convergence,
+  overlap, and residual but not ICP-vs-prediction innovation or mutual consistency
+  across several accepted closures. Do not add an arbitrary correction cutoff from
+  this one event: it could reject legitimate drift correction. Add per-candidate
+  diagnostics and validate a consistency gate across labelled closure events first.
+- ✅ **Split odometry/scan noise model (Phase 40)** — the fix for the above: the
+  Phase 39 jump was one symptom of a single over-confident noise model (σ=0.05 m)
+  shared by DVL dead-reckoning and sonar scan-matching. The DVL is cm-accurate
+  per keyframe while sonar GICP is decimeter-level, so the shared σ let scan
+  constraints override good odometry — dragging the estimate via sequential
+  factors (2.6× worse than raw odometry with loop closure off) and warping it via
+  loop closures (peak error to 1.3 m). Split into a tight, non-robust
+  `odom_sigma` (0.02) and a looser, Huber-robust `scan_sigma` (0.08/0.12).
+  Validated on a wall-oriented / realistic-noise, 4-arm × 3-seed, 240 s batch:
+  mean final error fell 0.454→0.150 m (loop-closure off), 0.677→0.104 m
+  (clean-sonar), 0.265→0.137 m (near_cutoff), unchanged where already healthy
+  (baseline 0.176→0.180 m); worst per-run peak error 1.30→0.30 m and the largest
+  single closure-induced step 1.23→0.11 m, with every run now degrading gradually
+  rather than jumping. Clean-sonar SLAM now beats raw dead-reckoning on all three
+  seeds despite firing 111–456 closures. Caveat: n=3 per arm and asynchronous
+  execution dominates run-to-run variance, so the arm means are directional, not
+  precise; the tail elimination is the robust result.
 - ✅ Regression check: `slam:=none` (default) unchanged, no SLAM nodes started, `odom_tf_sync` still the TF source
 - ✅ Ground-truth reference map (`gt_map.launch.py`): live-verified both `mapper:=octomap`
   and `mapper:=tsdf`. Not yet visually confirmed in RViz (headless verification only, no GUI here).
@@ -292,11 +347,13 @@ one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.3
   `KeyboardInterrupt` as benign rather than `crashed_soft`. This means the prior
   full-matrix batch's `crashed_soft` statuses were an artifact of teardown noise,
   not real failures — the fresh 600 s baseline confirms zero harmful tracebacks
-  under the same shutdown sequence. `run_matrix` statuses are now meaningful going
-  forward; old manifests are left as historical record, not retroactively fixed.
+  under the same shutdown sequence. `run_matrix` statuses are meaningful as
+  structural-validity labels only; they do not impose an accuracy threshold.
+  Old manifests are left as historical record, not retroactively fixed.
 - ⚠️ The synthetic square-loop test's "70% ATE reduction" (Progress.md Phase 6) is superseded
   by the real benchmark above — its dense, easily-overlapping synthetic point clouds make loop
-  closure fire far more readily than real depth-camera data does. Use the 0.58 m figure, not 70%.
+  closure fire far more readily than real depth-camera data does. Both it and the old
+  0.58 m keyframe-sampled figure are historical; rerun with Phase 36's continuous metrics.
 - ✅ **Uncertainty-triggered revisit planner** (Phase 20, `revisit:=true`): forced-trigger
   live test (`ros2 param set /revisit_planner dopt_trigger 0.002`) went through the full
   cycle — suspend, drive to target, loop closure fires, dopt drops, resume. Natural-trigger

@@ -136,10 +136,25 @@ Switches, all `slam:=slam` only, all defaulting to current behaviour:
 ```bash
 ros2 launch bringup demo.launch.py slam:=slam loop_closure:=false             # A/B: no loop closure
 ros2 launch bringup demo.launch.py slam:=slam mapper:=tsdf map_rebuild:=true  # rebuild belief TSDF after big closures
-ros2 launch bringup demo.launch.py slam:=slam noise_seed:=7                   # reproducible, decorrelated noise draws
+ros2 launch bringup demo.launch.py slam:=slam noise_seed:=7                   # repeatable, decorrelated sensor-noise draws
 ros2 launch bringup demo.launch.py slam:=slam output_dir:=/path/to/run        # label eval output instead of a timestamp
 ros2 launch bringup demo.launch.py slam:=slam mode:=frontier revisit:=true    # break off exploration to close loops when uncertainty grows
 ```
+
+The TSDF mapper preserves capture-time geometry when cloud and TF messages arrive
+out of order: it waits asynchronously for the exact timestamp in a bounded FIFO
+(defaults: 10 clouds, 0.5 s) rather than substituting the latest pose. Its periodic
+`Cloud/TF stats` log reports received, deferred, recovered, expired, failed, and
+overflow counts; sustained expiry/overflow indicates TF or processing overload.
+
+A TSDF rebuild is triggered by a large pose-graph correction and therefore often
+appears at the same time as a position-error change, but the mapper does not write
+SLAM pose. To attribute a regression, align `metrics.csv` with the `Loop closure`,
+`Map rebuild starting`, and `Map rebuild replay complete` timestamps in
+`launch.log`. If error jumps before rebuild start, investigate closure acceptance;
+if a fixed-duration run lacks `replay complete`, extend or invalidate that cell
+before comparing map quality. Phase 39 contains a reproduced wall-oriented case
+where error jumped 139 ms before rebuild start.
 
 Plot a finished run:
 
@@ -156,6 +171,17 @@ and the example matrices in [`eval/eval_tools/config/`](../eval/eval_tools/confi
 python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_smoke.yaml  # ~5min pre-flight check
 python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_full.yaml   # 35 runs, ~5.3h
 ```
+
+`noise_seed` controls the sensor RNG streams; it does not serialize Stonefish,
+ROS callbacks, map updates, or planner decisions. Repeating an identical seed can
+therefore produce a different path and different loop closures. Use a multi-seed
+matrix for comparisons rather than treating one seeded run as an exact replay.
+
+`metrics.csv` scores the continuously corrected `/slam/odometry` stream. ATE is
+therefore approximately time-uniform, and RPE uses a fixed one-second separation
+by default (`eval.launch.py rpe_delta:=<seconds>`). Matrix `status` is only a
+structural-validity result (data present, real motion, adequate duration, no
+traceback/process death); it is not an accuracy pass/fail threshold.
 
 ## RViz views
 

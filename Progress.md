@@ -1277,3 +1277,217 @@ restarts only the point-cloud layer.
 **Observed impact**: Smoke-tested — the parameter is advanced, bounded, and
 visible only under slam + cut_close; the emitted command carries the chosen
 distance (`cut_close` at 2.5 -> `near_cutoff:=2.5`, `none` -> `-1.0`).
+
+## Phase 36 — Evaluation audit: time-uniform metrics and trustworthy structural validity
+
+**Date**: 2026-07-23
+**Files**: `eval/eval_tools/eval_tools/benchmark.py`,
+`eval/eval_tools/launch/eval.launch.py`,
+`eval/eval_tools/scripts/run_matrix.py`,
+`eval/eval_tools/test/{test_benchmark_metrics,test_run_validity}.py`,
+`slam/slam_backend/slam_backend/sensor_models/sonar_noise.py`,
+`slam/slam_backend/test/test_sonar_noise.py`, `STATE.md`, `docs/RUN.md`
+
+**Objective**: A live audit found that the benchmark scored only irregular
+`/slam/pose` keyframes. Initial turning generated many low-error samples while
+straight travel generated few, biasing cumulative ATE; RPE's sample-count delta
+also represented a different time span on every interval. The audit additionally
+reproduced a yaw-wrap false negative in the frozen-run guard, rejection of the
+current `near_cutoff` launch argument, cross-domain false positives in orphan
+detection, and expected all-NaN image borders warning inside the sonar model.
+
+**What changed**: `benchmark.py` now writes and scores continuously corrected
+`/slam/odometry` at the dead-reckoning rate, and `rpe_delta` now means a fixed
+number of seconds (default 1.0). `run_matrix.py` unwraps yaw before measuring its
+excursion, matches actual node executables instead of arbitrary command-line
+substrings, compares each candidate process's `ROS_DOMAIN_ID`, accepts
+`near_cutoff`, counts pre-shutdown child deaths and non-zero launch exits, and
+records `status_scope=structural_validity_only`. The pinhole fit skips fully
+invalid rows/columns before taking medians, eliminating normal all-NaN warnings.
+
+**Observed impact**: Two identical pre-fix 120 s runs on commit `4011d3b`, seed
+1 produced ATE 1.255 vs 0.709 m, endpoint error 2.258 vs 1.259 m, and 45 vs 25
+loop closures. This establishes that `noise_seed` repeats sensor RNG streams but
+does not make the asynchronous end-to-end experiment deterministic. After the
+fix, a 60 s isolated-domain live run completed `ok` with 520 continuous metric
+rows/520 SLAM poses (ATE 0.0736 m, endpoint error 0.175 m), zero tracebacks,
+zero child deaths, and no all-NaN warnings. The two modified packages build,
+the evaluation launch description parses, and all 173 focused project tests pass.
+
+## Phase 37 — Post-audit simulation matrix, rebuild-path exercise, and TF timing diagnosis
+
+**Date**: 2026-07-23
+**Files**: `STATE.md`, `Progress.md` (simulation artifacts under `eval/runs/`)
+
+**Objective**: Exercise the repaired continuous evaluator back-to-back, verify
+that TSDF reset/replay survives real loop-closure corrections, and investigate
+the mapper's recurring `TF unavailable` warnings.
+
+**Observed impact**: The isolated-domain 2x120 s smoke batch
+`eval/runs/smoke_20260723_0150/` completed both cells with structural status
+`ok`, dense metrics, no pre-shutdown process death, and no harmful traceback.
+Baseline finished at ATE 0.202 m / endpoint error 0.270 m; TSDF finished at
+ATE 0.346 m / endpoint error 0.472 m. These are single asynchronous trajectories,
+not a mapper-quality ranking. The normal rebuild-enabled smoke cell fired zero
+rebuilds, confirming that the preset does not cover the mechanism reliably.
+
+A 180 s seed-103 mechanism run in
+`eval/runs/forced_rebuild_20260723_0156/` lowered only the live trigger thresholds.
+It fired four genuine pose-graph rebuilds; all four TSDF cache replays completed
+(104, 107, 114, and 181 cached scans), exploration continued, the continuous
+metric stream's maximum gap was 0.384 s, and the manifest recorded zero harmful
+tracebacks/process deaths. This verifies execution and continuity, not quality
+benefit: the threshold intervention and trajectory make it unsuitable as an A/B.
+
+Finally, a read-only timing probe alongside the normal 70 s run
+`eval/runs/tf_probe_20260723_0202/` received 302 clouds: 151 had TF immediately,
+150 more obtained the exact capture-time TF within 0.5 s, and one expired. The
+mapper currently drops on the immediate lookup failure; its 0.1 s wait occurs
+inside the same single-threaded executor that must receive TF, so it cannot cure
+the arrival-order race. This is a real TSDF input-loss defect. A TF message
+filter or bounded deferred-cloud queue is the appropriate follow-up.
+
+## Phase 38 — Exact-time asynchronous TF deferral for TSDF input
+
+**Date**: 2026-07-23
+**Files**: `planner/frontier_slam/frontier_slam/tsdf_mapper.py`,
+`planner/frontier_slam/test/test_tsdf_tf_queue.py`, `STATE.md`, `docs/RUN.md`
+
+**Objective**: Fix the Phase 37 arrival-order defect without using latest-TF
+fallbacks (which would permanently misplace points during rotation), unbounded
+memory, or a home-grown transform-availability poller.
+
+**What changed**: The Python Jazzy binding has no `tf2_ros.MessageFilter`, so
+the mapper now uses the maintained `Buffer.wait_for_transform_async()` API.
+An immediate exact-time lookup remains the fast path. A miss returns control to
+the single-threaded executor and enters a capture-ordered FIFO backed by async
+TF futures. The queue is bounded to 10 clouds and 0.5 s; expiry and overflow
+cancel their futures explicitly. One recovered cloud is integrated per 20 ms
+tick to avoid starving TF reception, and periodic counters make received,
+integrated, deferred, recovered, expired, failed, overflow, and queued totals
+observable. Both belief and ground-truth TSDF instances use the same path.
+
+**Observed impact**: In the matched 70 s post-fix run
+`eval/runs/tf_probe_20260723_0215/`, the belief mapper had received 290 clouds
+at the final 60 s report, deferred 141, recovered 140, expired one, and
+overflowed none. The ground-truth instance recovered 85/90 deferred clouds;
+its five expiries were startup-only. This replaces Phase 37's behavior where
+151/302 transforms were unavailable at callback time and those usable-later
+clouds were discarded.
+
+The 180 s stress run `eval/runs/forced_rebuild_20260723_0217/` reached 843
+clouds by 170 s: belief deferred/recovered/expired = 417/408/9 and ground truth
+= 291/283/8, with zero overflow and zero future failures. Expiry totals stopped
+changing after startup. A natural 547-scan rebuild began 1.7 s before the run's
+fixed shutdown, so a deterministic early correction was tested separately in
+`eval/runs/rebuild_replay_20260723_0221/`: all 258 retained scans replayed in
+1.32 s, cloud processing continued for another 30 s, maximum metric gap was
+0.121 s, and no traceback/process death occurred. The full focused project
+suite passes (179 tests); `colcon test --packages-select frontier_slam` passes
+all 123 collected package tests, and `frontier_slam` builds cleanly.
+
+## Phase 39 — Three-seed TSDF matrix and rebuild/error attribution
+
+**Date**: 2026-07-23
+**Files**: `STATE.md`, `docs/RUN.md`, `Progress.md` (simulation artifacts under
+`eval/runs/`)
+
+**Objective**: Run a three-seed TSDF/rebuild matrix after the TF deferral fix,
+then reproduce the reported positional-error increase with SLAM + TSDF +
+frontier + wall-oriented motion + realistic noise and determine whether TSDF
+replay causes it.
+
+**Observed impact**: All six 180 s cells in
+`eval/runs/tf_fix_3seed_20260723_0233/` completed with structural status `ok`,
+zero harmful traceback/process death, zero TF-queue overflow, and zero async-TF
+future failure. Rebuild-minus-baseline final ATE deltas for seeds 101/102/103
+were -0.158, -1.906, and +1.650 m respectively. The sign reversal and large
+differences in path/yaw/loop-closure count confirm that seeded sensor noise does
+not make asynchronous closed-loop trajectories paired; final arm means are not
+causal rebuild estimates. Event alignment is more informative: rebuild seed
+101 improved over the following 10 s, seed 102 began replay at shutdown and is
+inconclusive, and seed 103's error increase began with the triggering pose-graph
+update, before TSDF replay.
+
+The targeted 2x240 s wall-oriented seed-103 batch is
+`eval/runs/walloriented_rebuild_ab_20260723_0254/`. The no-rebuild arm finished
+at ATE 0.119 m / endpoint error 0.490 m with 22 closures. In the rebuild arm,
+instantaneous error was stable near 0.35 m immediately before node 84 closed to
+node 51. It jumped 0.346520 -> 0.861994 m in one 109 ms metric step, 36 ms after
+the closure log and 139 ms **before** the mapper announced rebuild start. The
+graph update moved 40/85 existing keyframes (maximum 0.99 m), and re-detection
+raised the closure count 69 -> 72. TSDF then replayed all 606 cached scans in
+2.04 s. Mean absolute error was 0.323 m in the preceding 10 s and 0.795 m in the
+following 10 s; during replay it was 0.875 m and remained 0.752 m over the 10 s
+after replay. Map coverage was 0.891 before the event and 0.915 at the first
+post-replay sample, so replay did not create the pose jump and did not visibly
+corrupt the map at that instant.
+
+**Conclusion**: TSDF rebuild is temporally correlated because it is triggered
+by the same large graph correction, but it does not write pose-graph state and
+is downstream of the measured positional jump. The likely failure mode is an
+ambiguous/inconsistent loop closure: `pose_graph.py` accepts every locally good
+ICP candidate within 5 m, may add several correlated factors at once (including
+unlogged re-detected edges), and has no transform-innovation or cross-closure
+consistency gate. No behavioral threshold was changed: a simple maximum
+correction limit could also reject the legitimate large-drift closures rebuild
+exists to handle. The reliable next step is to log each candidate's inlier
+ratio/error and ICP-vs-prediction translation/yaw innovation, then validate a
+consistency policy across more true and false closure events.
+
+## Phase 40 — Split odometry/scan noise model; drift attributed to over-trusted scan-matching
+
+**Date**: 2026-07-23
+**Files**: `slam/slam_backend/slam_backend/pose_graph.py`, `STATE.md`, `Progress.md`
+(simulation artifacts under `eval/runs/`)
+
+**Objective**: Determine what drives the large positional error in the
+wall-oriented / realistic-noise runs and fix it.
+
+**Investigation**: Scored `/slam/odometry` (the pose-graph estimate) against the
+raw `/slam/sensors/dead_reckoned_odom` input, both versus `/StoneFish/Odometry`
+in `world_ned` with no SE3 alignment. Raw dead-reckoning stayed at ~0.1–0.3 m
+final error across all runs, with vertical error ~0.01 m: depth (pressure) and
+attitude (IMU+compass) are absolute, and only X/Y integrates DVL body velocity
+(`dead_reckoning.py`: `delta_world = R @ v_body·dt`; no accelerometer
+double-integration). The DVL error is realistically modelled — 0.2% per-run
+scale, 0.001 m/s bias, 1% white — producing that 0.1–0.3 m drift. The pose graph
+was often worse than this input. Two mechanisms, both from one cause: a single
+noise model (σ=0.05 m/0.05 rad) shared by the DVL BetweenFactor and all sonar
+scan-match/loop BetweenFactors. Because that σ was tighter than the DVL is
+accurate and looser than sonar GICP is noisy, GTSAM over-trusted registration —
+(1) sequential scan-match factors alone dragged the estimate ~2.6× worse than
+raw odometry (visible with loop closure off), and (2) an over-trusted loop
+closure occasionally warped the graph in one step (Phase 39's 0.35→0.86 m; other
+seeds to 2.0–2.4 m). An index-free ground-truth-proximity test showed the Phase
+39 closure fired at a genuine revisit (0.45 m true approach), so the defect is
+metric over-weighting of an inaccurate relative transform, not perceptual
+aliasing. This is dominated by run-to-run stochasticity — the same config/seed
+ranged 0.08–0.65 m — so the degradation is a tail risk, not the typical case.
+
+**What changed**: Replaced the shared `icp_sigma_*` model with three: a tight
+`odom_sigma` (0.02/0.02) applied non-robustly to the dead-reckoning BetweenFactor
+and the origin prior (so a bad closure cannot down-weight the reliable DVL), and
+a looser Huber-robust `scan_sigma` (0.08/0.12) for sequential scan-match,
+loop-closure, and re-detected-closure factors. All four sigmas are ROS
+parameters and are logged at startup. The 0.02 m odometry σ accumulates to
+√80·0.02 ≈ 0.18 m over ~80 keyframes, matching the observed DVL drift.
+
+**Observed impact**: A wall-oriented / frontier / realistic-noise, 4-arm × 3-seed
+batch was run before (`eval/runs/walloriented_cutclose_20260723_1057`) and after
+(`eval/runs/walloriented_cutclose_20260723_1201`) the change (mapper=tsdf,
+map_rebuild=false, 240 s). Mean final error, before→after: loop-closure-off
+0.454→0.150 m, clean-sonar (odom_only) 0.677→0.104 m, near_cutoff 0.265→0.137 m,
+baseline (already healthy) 0.176→0.180 m. Worst per-run peak error 1.30→0.30 m;
+largest single closure-induced step 1.23→0.11 m; every one of the 12 runs now
+degrades gradually with no jump. With loop closure off the estimate now ties raw
+odometry (0.154 vs 0.157 m) instead of drifting 2.6× worse, and clean-sonar SLAM
+beats raw dead-reckoning on all three seeds despite firing 111–456 closures.
+`colcon build --packages-select slam_backend` is clean and the gtsam model
+construction was smoke-tested.
+
+**Caveat**: n=3 per arm and asynchronous Stonefish/ROS/planner execution
+dominate run-to-run variance, so the arm means are directional, not precise —
+the tail elimination (peak 1.30→0.30 m, zero closure jumps) is the robust result.
+The sigmas are physically motivated but not tuned; a consistency/innovation gate
+on loop closures (Phase 39) remains available as a complementary safeguard.
