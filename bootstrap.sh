@@ -179,37 +179,26 @@ install_gtsam() {
     "$VENV_PY" -c 'import gtsam; print("GTSAM Python bindings:", gtsam.__file__)'
 }
 
-vdbfusion_pyopenvdb_enabled() {
-    # True only when the installed vdbfusion was compiled with PYOPENVDB_SUPPORT,
-    # which is what exposes the TSDF voxel/weight grids. Constructing a volume is
-    # cheap and reads the compile-time flag off the C++ module.
-    "$VENV_PY" - <<'PY' >/dev/null 2>&1
-from vdbfusion import VDBVolume
-raise SystemExit(0 if VDBVolume(0.1, 0.3).pyopenvdb_support_enabled else 1)
-PY
-}
-
 install_vdbfusion() {
-    # Built from the pinned submodule by default, not from the wheel: the
-    # published vdbfusion wheels are compiled WITHOUT pyopenvdb, which disables
-    # the TSDF voxel/normal grids the planner (frontier solid-rejection) and
-    # RViz (voxel overlay) read. The source build links system OpenVDB and turns
-    # PYOPENVDB_SUPPORT on when the pyopenvdb module is importable at build time
-    # (vdbfusion's pybind/CMakeLists.txt probes `import pyopenvdb`). The wheel is
-    # only a last-resort fallback, and even then the marching-cubes surface cloud
-    # still works without pyopenvdb.
-    if vdbfusion_pyopenvdb_enabled; then
-        echo "Already installed (with pyopenvdb)."
+    # Same shape as install_gtsam: a wheel where one exists, the pinned source
+    # submodule otherwise. vdbfusion publishes x86_64 wheels only, and only up
+    # to CPython 3.10, so Humble on x86_64 gets the wheel and everything else
+    # builds — which needs OpenVDB and a C++ toolchain.
+    if "$VENV_PY" -c 'import vdbfusion' >/dev/null 2>&1; then
+        echo "Already installed."
         return
     fi
 
-    # OpenVDB headers/libs, the pyopenvdb Python module, and Boost.Python are
-    # what flip PYOPENVDB_SUPPORT on. python3-openvdb is not packaged on every
-    # Ubuntu release; when it is missing the build still succeeds, just without
-    # the voxel grids — so this is best-effort, not a hard requirement.
+    if "$UV" pip install --python "$VENV_PY" \
+            -c "$REPO_ROOT/requirements.txt" \
+            "vdbfusion==$VDBFUSION_WHEEL_VERSION"; then
+        return
+    fi
+
+    echo "No compatible vdbfusion $VDBFUSION_WHEEL_VERSION wheel; building from" \
+         "the external/vdbfusion submodule."
     sudo apt-get install -y build-essential cmake libeigen3-dev libtbb-dev \
-        libblosc-dev libboost-iostreams-dev libopenvdb-dev libboost-python-dev \
-        python3-openvdb || true
+        libblosc-dev libboost-iostreams-dev
     if [ "$VDBFUSION_DIR" = "$REPO_ROOT/external/vdbfusion" ] \
        && { [ -f "$REPO_ROOT/.git" ] || [ -d "$REPO_ROOT/.git" ]; }; then
         ( cd "$REPO_ROOT" && git submodule update --init external/vdbfusion )
@@ -219,27 +208,13 @@ install_vdbfusion() {
              "external/vdbfusion submodule and re-run." >&2
         exit 1
     fi
-    # --reinstall so an earlier wheel (no pyopenvdb) is replaced by this build.
-    # UV_CACHE_DIR override: a shared uv cache can hold entries written by sudo
-    # during an earlier install, and building an sdist takes a lock inside it.
-    if UV_CACHE_DIR="$VENV_DIR/.uv-cache" \
-            "$UV" pip install --python "$VENV_PY" --reinstall \
-            -c "$REPO_ROOT/requirements.txt" "$VDBFUSION_DIR"; then
-        if vdbfusion_pyopenvdb_enabled; then
-            echo "vdbfusion built from source with pyopenvdb."
-        else
-            echo "vdbfusion built from source WITHOUT pyopenvdb (the module was" \
-                 "not importable at build time — is python3-openvdb available?)." \
-                 "The surface cloud works; voxel grids and frontier-culling do not." >&2
-        fi
-        "$VENV_PY" -c 'import vdbfusion; print("vdbfusion:", vdbfusion.__file__)'
-        return
-    fi
-
-    echo "vdbfusion source build failed; falling back to the prebuilt wheel" \
-         "(surface cloud only, no pyopenvdb voxel grids)." >&2
-    "$UV" pip install --python "$VENV_PY" \
-        -c "$REPO_ROOT/requirements.txt" "vdbfusion==$VDBFUSION_WHEEL_VERSION"
+    # Same cache override install_gtsam uses for its source build: a shared uv
+    # cache can hold entries written by sudo during an earlier install, and
+    # building an sdist needs to take a lock inside it.
+    UV_CACHE_DIR="$VENV_DIR/.uv-cache" \
+        "$UV" pip install --python "$VENV_PY" \
+        -c "$REPO_ROOT/requirements.txt" "$VDBFUSION_DIR"
+    "$VENV_PY" -c 'import vdbfusion; print("vdbfusion:", vdbfusion.__file__)'
 }
 
 setup_distrobox_and_continue() {
@@ -331,11 +306,10 @@ colcon build.
   --stonefish-dir <path>   Use an existing Stonefish checkout instead of the
                             submodule (default: $STONEFISH_DIR).
   --skip-vdbfusion         Do not install vdbfusion. mapper:=tsdf needs it, and
-                            without it that mapper exits on import. Built from
-                            the submodule by default (heavy — needs OpenVDB and
-                            a C++ toolchain) so PYOPENVDB_SUPPORT is on, which
-                            the voxel grids and frontier-culling require; the
-                            prebuilt wheel lacks it and is only a fallback.
+                            without it that mapper exits on import. Installed
+                            from a wheel where one matches; elsewhere (aarch64,
+                            CPython 3.11+) built from the submodule, which is
+                            heavy — it needs OpenVDB and a C++ toolchain.
   --vdbfusion-dir <path>   Use an existing vdbfusion checkout instead of the
                             submodule (default: $VDBFUSION_DIR).
   --with-open3d            Build + pip install the Open3D submodule (FPFH
