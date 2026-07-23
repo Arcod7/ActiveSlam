@@ -187,6 +187,10 @@ class TSDFMapper(Node):
         self._solid_cloud_pub = self.create_publisher(
             PointCloud2, '/tsdf/occupied_voxels', 1)
 
+        # Latest marching-cubes vertices, so the voxel view can be derived from
+        # them when pyopenvdb (the grid path) is unavailable.
+        self._last_surface_verts = None
+
         self.create_timer(1.0 / self.PUBLISH_HZ,   self._publish_surface)
         self.create_timer(1.0 / self.VOXEL_VIZ_HZ, self._publish_voxels)
 
@@ -420,6 +424,7 @@ class TSDFMapper(Node):
             return
 
         verts = np.asarray(verts, dtype=np.float32)
+        self._last_surface_verts = verts
 
         header = Header()
         header.stamp    = self.get_clock().now().to_msg()
@@ -445,6 +450,7 @@ class TSDFMapper(Node):
 
     def _publish_voxels(self) -> None:
         if not self._volume.pyopenvdb_support_enabled:
+            self._publish_voxels_from_surface()
             return
 
         # Only iterate voxels we'll actually show (early filtering inside):
@@ -507,6 +513,52 @@ class TSDFMapper(Node):
 
         self._voxels_pub.publish(MarkerArray(markers=[m]))
         self.get_logger().info(f'Voxels: {len(pts)} published', throttle_duration_sec=5.0)
+
+    def _publish_voxels_from_surface(self) -> None:
+        """Occupancy-voxel view built from the marching-cubes surface, for
+        pyopenvdb-less builds (the prebuilt wheel). Snaps surface vertices to
+        the TSDF grid and shows one cube per occupied voxel — the blocky
+        'robot's-mind' counterpart to the smooth ground-truth surface. Also
+        feeds /tsdf/occupied_voxels so frontier solid-rejection works here too."""
+        verts = self._last_surface_verts
+        now    = self.get_clock().now().to_msg()
+        header = Header(stamp=now, frame_id=self._world_frame)
+        if verts is None or len(verts) == 0:
+            return
+
+        # Unique occupied cells, then their centres in world coordinates.
+        cells   = np.unique(np.floor(verts / self._voxel_size).astype(np.int64), axis=0)
+        centers = (cells.astype(np.float32) + 0.5) * self._voxel_size
+
+        self._solid_cloud_pub.publish(_make_pointcloud2(header, centers))
+
+        if len(centers) > self._max_viz:
+            centers = centers[np.random.choice(len(centers), self._max_viz, replace=False)]
+
+        # No per-voxel weight without the grid, so shade by height for depth —
+        # the colormap is repurposed here as a plain low-to-high gradient.
+        z = centers[:, 2]
+        t = (z - z.min()) / max(float(np.ptp(z)), 1e-6)
+        colors = _confidence_colormap(t)
+
+        m = Marker()
+        m.header   = header
+        m.ns       = 'tsdf_voxels'
+        m.id       = 0
+        m.type     = Marker.CUBE_LIST
+        m.action   = Marker.ADD
+        m.lifetime = Duration(sec=4)
+        m.scale.x  = self._voxel_size
+        m.scale.y  = self._voxel_size
+        m.scale.z  = self._voxel_size
+        m.points   = [Point(x=float(p[0]), y=float(p[1]), z=float(p[2])) for p in centers]
+        m.colors   = [ColorRGBA(r=float(c[0]), g=float(c[1]),
+                                b=float(c[2]), a=float(c[3])) for c in colors]
+
+        self._voxels_pub.publish(MarkerArray(markers=[m]))
+        self.get_logger().info(
+            f'Voxels (surface-derived): {len(centers)} published',
+            throttle_duration_sec=5.0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
