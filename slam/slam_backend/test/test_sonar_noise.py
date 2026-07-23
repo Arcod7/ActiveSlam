@@ -1,12 +1,13 @@
 """Synthetic checks for the sonar noise model's geometry and correlation terms."""
 from pathlib import Path
+import warnings
 
 import numpy as np
 import pytest
 
 from slam_backend.sensor_models.noise_profiles import SonarNoise, load_noise_profile
 from slam_backend.sensor_models.sonar_noise import (
-    apply_sonar_noise, correlated_field, incidence_cosine, multipath_range,
+    _fit_pinhole, apply_sonar_noise, correlated_field, incidence_cosine, multipath_range,
     pixel_angular_spacing, reverberation_range, strongest_reflection_range,
     surface_normals, DEPTH_MIN_M, MAX_RANGE_M)
 
@@ -244,6 +245,18 @@ def test_angular_spacing_follows_pinhole_law():
     edge = dh[row, 5]
     assert centre > edge                      # pinhole packs more angle per pixel at centre
     assert edge / centre == pytest.approx(np.cos(np.radians(45.0)) ** 2, rel=0.1)
+
+
+def test_pinhole_fit_accepts_empty_border_slices_without_warning():
+    grid = pinhole_grid()
+    unit = grid / np.linalg.norm(grid, axis=2, keepdims=True)
+    valid = np.ones(SHAPE, dtype=bool)
+    valid[:, 0] = False
+    valid[0, :] = False
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        intrinsics = _fit_pinhole(unit, valid)
+    assert intrinsics is not None
 
 
 def test_beam_frac_jitter_grows_from_centre_to_edge_is_disabled_at_zero():

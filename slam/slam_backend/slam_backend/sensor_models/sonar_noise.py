@@ -194,8 +194,15 @@ def _fit_pinhole(u_grid, valid):
     with np.errstate(invalid='ignore', divide='ignore'):
         a = np.where(valid, u_grid[..., 0] / u_grid[..., 2], np.nan)
         b = np.where(valid, u_grid[..., 1] / u_grid[..., 2], np.nan)
-    a_col = np.nanmedian(a, axis=0)
-    b_row = np.nanmedian(b, axis=1)
+    # np.nanmedian warns for every fully invalid border row/column. Those are
+    # normal in an organized depth image (no return at the FoV edge), so only
+    # reduce slices that contain at least one finite ray.
+    a_col = np.full(w, np.nan)
+    b_row = np.full(h, np.nan)
+    finite_cols = np.isfinite(a).any(axis=0)
+    finite_rows = np.isfinite(b).any(axis=1)
+    a_col[finite_cols] = np.nanmedian(a[:, finite_cols], axis=0)
+    b_row[finite_rows] = np.nanmedian(b[finite_rows, :], axis=1)
     jj, ii = np.arange(w), np.arange(h)
     fj, fi = np.isfinite(a_col), np.isfinite(b_row)
     if fj.sum() < 2 or fi.sum() < 2:
