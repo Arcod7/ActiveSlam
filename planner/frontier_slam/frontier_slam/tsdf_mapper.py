@@ -29,10 +29,13 @@ Published topics:
                              solid-confidence >= voxel_min_solid_confidence
                                where solid-confidence = (trunc - d) / (2*trunc)
                                (0.5 at the surface d=0, 1.0 at full saturation d=-trunc)
-                           colour: green wall voxels whose saturation encodes
-                           the observation count (weight) — log-scaled and
-                           capped at voxel_obs_cap, so pale = barely seen,
-                           vivid = seen often.
+                           colour, two independent channels:
+                             hue        = wall confidence (orange = unsure ->
+                                          green = confident), spread across the
+                                          shown solid band
+                             saturation = observation count (weight), log-scaled
+                                          and capped at voxel_obs_cap: pale =
+                                          barely seen, vivid = seen often
   /tsdf/occupied_voxels  (sensor_msgs/PointCloud2) confidently solid TSDF
                            voxel centres for collision-aware goal validation
 """
@@ -489,13 +492,17 @@ class TSDFMapper(Node):
         if n > self._max_viz:
             sel    = np.random.choice(n, self._max_viz, replace=False)
             pts    = pts[sel]
+            d_vals = d_vals[sel]
             w_vals = w_vals[sel]
 
-        # Green wall voxels; saturation encodes the observation count (weight),
-        # log-scaled and capped at voxel_obs_cap so a voxel seen 1000x and
-        # 10000x read alike. Cube size stays fixed at the grid resolution.
-        w_norm = np.log1p(np.clip(w_vals, 0.0, None)) / np.log1p(self._voxel_obs_cap)
-        colors = _weight_saturation_colormap(np.clip(w_norm, 0.0, 1.0))
+        # Hue = confidence it is a wall, spread across the shown solid band so
+        # the gradient is visible (orange = least-solid shown voxel, green =
+        # deep solid). Saturation = observation count (weight), log-scaled and
+        # capped at voxel_obs_cap so a voxel seen 1000x and 10000x read alike.
+        band      = self._voxel_max_d + self._trunc
+        wall_conf = np.clip((self._voxel_max_d - d_vals) / max(band, 1e-6), 0.0, 1.0)
+        obs       = np.log1p(np.clip(w_vals, 0.0, None)) / np.log1p(self._voxel_obs_cap)
+        colors    = _voxel_colormap(wall_conf, np.clip(obs, 0.0, 1.0))
 
         m = Marker()
         m.header.stamp    = now
@@ -820,15 +827,22 @@ def _confidence_colormap(conf_norm: np.ndarray) -> np.ndarray:
     return c
 
 
-def _weight_saturation_colormap(w_norm: np.ndarray) -> np.ndarray:
-    """RGBA for solid wall voxels: fixed green hue, colour saturation encoding
-    the (already log-scaled, capped) observation count in [0, 1] — pale grey-green
-    when barely seen, vivid green when seen often. Opaque, for the CUBE_LIST
-    render-order reason spelled out in _confidence_colormap."""
-    s = 0.15 + 0.85 * np.clip(w_norm, 0.0, 1.0).reshape(-1, 1)
-    green = np.array([[0.15, 0.85, 0.25]], dtype=np.float32)
-    rgb = np.float32(0.6) * (1.0 - s) + green * s
-    c = np.ones((len(s), 4), dtype=np.float32)
+def _voxel_colormap(wall_conf: np.ndarray, obs_norm: np.ndarray) -> np.ndarray:
+    """RGBA per voxel encoding two independent channels:
+
+      hue        wall confidence — orange (unsure) -> green (confident wall)
+      saturation observation count — pale (barely seen) -> vivid (seen often)
+
+    Low observation desaturates toward grey rather than shifting hue, so the two
+    meanings stay separable. Opaque, for the CUBE_LIST render-order reason
+    spelled out in _confidence_colormap."""
+    wall   = np.clip(wall_conf, 0.0, 1.0).reshape(-1, 1)
+    orange = np.array([[1.0, 0.55, 0.05]], dtype=np.float32)
+    green  = np.array([[0.15, 0.85, 0.25]], dtype=np.float32)
+    hue = orange * (1.0 - wall) + green * wall
+    s   = (0.2 + 0.8 * np.clip(obs_norm, 0.0, 1.0)).reshape(-1, 1)
+    rgb = np.float32(0.55) * (1.0 - s) + hue * s
+    c = np.ones((len(wall), 4), dtype=np.float32)
     c[:, :3] = rgb
     return c
 
