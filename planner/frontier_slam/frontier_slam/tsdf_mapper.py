@@ -29,10 +29,13 @@ Published topics:
                              solid-confidence >= voxel_min_solid_confidence
                                where solid-confidence = (trunc - d) / (2*trunc)
                                (0.5 at the surface d=0, 1.0 at full saturation d=-trunc)
-                           color ∝ weight (log-scale): orange = just past the
-                           observation floor, green = heavily observed. Colour
-                           saturation also scales with weight — pale when barely
-                           seen, full when heavily observed.
+                           colour, two channels:
+                             hue        = observation weight (log-scale): orange
+                                          = just past the floor, green = heavily
+                                          observed
+                             saturation = confidence it is a wall (TSDF depth):
+                                          pale = least-confident shown voxel,
+                                          vivid = deep solid
   /tsdf/occupied_voxels  (sensor_msgs/PointCloud2) confidently solid TSDF
                            voxel centres for collision-aware goal validation
 """
@@ -487,19 +490,22 @@ class TSDFMapper(Node):
         if n > self._max_viz:
             sel    = np.random.choice(n, self._max_viz, replace=False)
             pts    = pts[sel]
+            d_vals = d_vals[sel]
             w_vals = w_vals[sel]
 
-        # Weight → colour (log scale, above the observation floor). Same
-        # orange→green hue ramp as before; the observation weight now also
-        # drives colour saturation — pale when barely seen, full (unchanged
-        # from before) when heavily observed. Cube size stays fixed at the true
-        # grid resolution: varying it by weight let differently-sized
-        # neighbouring cubes overlap, which made the map look cluttered.
+        # Hue = observation weight (log scale): orange = just past the
+        # observation floor, green = heavily observed — a quick read of how much
+        # a voxel has been seen. Saturation = confidence it is a wall (TSDF
+        # depth, stretched across the shown solid band): pale = least-confident
+        # shown voxel, vivid = deep solid. Cube size stays fixed at the grid
+        # resolution: varying it by weight made neighbouring cubes overlap.
         w_max  = max(float(w_vals.max()), self._voxel_min_weight + 1.0)
         w_norm = np.clip(
             np.log1p(np.clip(w_vals - self._voxel_min_weight, 0.0, None))
             / np.log1p(w_max - self._voxel_min_weight), 0.0, 1.0)
-        colors = _confidence_colormap(w_norm, saturation=w_norm)
+        band      = self._voxel_max_d + self._trunc
+        wall_conf = np.clip((self._voxel_max_d - d_vals) / max(band, 1e-6), 0.0, 1.0)
+        colors = _confidence_colormap(w_norm, saturation=wall_conf)
 
         m = Marker()
         m.header.stamp    = now
