@@ -242,12 +242,14 @@ class TSDFMapper(Node):
                 self._tf_queue.popleft()
                 if future.cancelled():
                     continue
-                try:
-                    tf_msg = future.result()
-                except Exception as exc:
+                # wait_for_transform_async only signals availability: its future
+                # resolves to True on Humble and to the transform on newer
+                # distros, so look the transform up ourselves either way.
+                tf_msg = self._lookup_cloud_transform(msg)
+                if tf_msg is None:
                     self._tf_failed += 1
                     self.get_logger().warn(
-                        f'Exact-time TF wait failed ({type(exc).__name__}); dropping scan',
+                        'TF signalled ready but lookup failed; dropping scan',
                         throttle_duration_sec=5.0)
                     continue
                 self._tf_recovered += 1

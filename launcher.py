@@ -17,6 +17,7 @@ is the only thing keyboard control needed a separate window for.
 
 import atexit
 import curses
+import glob
 import json
 import os
 import signal
@@ -84,6 +85,101 @@ def ros_env(ws_root):
 
 def ros_ready():
     return bool(_which("ros2"))
+
+
+# The container bootstrap.sh creates for a ROS-less host (keep in sync with it).
+DISTROBOX_NAME = "activeslam-jazzy"
+
+
+def _distrobox_has(name):
+    try:
+        r = subprocess.run(["distrobox", "list"], capture_output=True,
+                           text=True, timeout=8)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0 and any(
+        field.strip() == name
+        for line in r.stdout.splitlines()
+        for field in line.split("|"))
+
+
+def ensure_sourced_environment():
+    """Re-exec so the launcher runs from a plain shell, sourcing what it needs.
+
+    Two cases. When ROS is installed on this filesystem, re-source the
+    workspace and its venv: colcon's install/setup.bash chains in the ROS
+    underlay it was built against, and the venv activate puts gtsam/rclpy on the
+    path the spawned nodes inherit. When ROS is not here but was installed into
+    the Distrobox bootstrap.sh builds, hop into that container and re-run there,
+    where the first case then applies. A no-op once ros2 is on PATH with the
+    workspace venv active; sentinels keep each hop to a single re-exec.
+    """
+    if os.environ.get("ACTIVESLAM_LAUNCHER_SOURCED") == "1":
+        return
+    ws_root = core.find_workspace_root(__file__)
+    if not ws_root:
+        return
+    venv_dir = os.path.join(ws_root, ".venv")
+    venv_active = os.environ.get("VIRTUAL_ENV") == venv_dir
+    if _which("ros2") and (venv_active or not os.path.isdir(venv_dir)):
+        return
+
+    if glob.glob("/opt/ros/*/setup.bash"):
+        ws_setup = os.path.join(ws_root, "install", "setup.bash")
+        if not os.path.isfile(ws_setup):
+            return
+        parts = [f'source "{ws_setup}"']
+        venv_activate = os.path.join(venv_dir, "bin", "activate")
+        if os.path.isfile(venv_activate):
+            parts.append(f'source "{venv_activate}"')
+        parts.append(f'exec python3 "{os.path.abspath(__file__)}" "$@"')
+        os.environ["ACTIVESLAM_LAUNCHER_SOURCED"] = "1"
+        try:
+            os.execvp("bash",
+                      ["bash", "-c", " && ".join(parts), "bash", *sys.argv[1:]])
+        except OSError:
+            pass   # fall through and run unsourced — ros_ready() reports it
+        return
+
+    # ROS is not on this filesystem. If we are on a bare host (not already in a
+    # container) and the bootstrap Distrobox exists, re-run inside it — where
+    # the branch above sources the workspace. The env sentinel avoids a second
+    # hop; SOURCED is deliberately left unset so sourcing still happens inside.
+    in_container = os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
+    if (not in_container
+            and os.environ.get("ACTIVESLAM_LAUNCHER_IN_DISTROBOX") != "1"
+            and _which("distrobox") and _distrobox_has(DISTROBOX_NAME)):
+        try:
+            os.execvp("distrobox", [
+                "distrobox", "enter", DISTROBOX_NAME, "--",
+                "env", "ACTIVESLAM_LAUNCHER_IN_DISTROBOX=1",
+                "python3", os.path.abspath(__file__), *sys.argv[1:]])
+        except OSError:
+            pass   # fall through — ros_ready() reports the missing ros2
+
+
+def normalize_rmw_implementation():
+    """Drop RMW_IMPLEMENTATION when its implementation is not installed.
+
+    A shell that exports an RMW whose library is missing makes every node fail
+    to start or silently not discover peers; falling back to the distro default
+    is what running the launcher under `env -u RMW_IMPLEMENTATION` did by hand.
+    Returns a note for the session log, or None. Only unsets a genuinely
+    missing implementation — a working non-default RMW is left untouched.
+    """
+    impl = os.environ.get("RMW_IMPLEMENTATION")
+    if not impl:
+        return None
+    try:
+        r = subprocess.run(["ros2", "pkg", "prefix", impl],
+                           capture_output=True, text=True, timeout=8)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        del os.environ["RMW_IMPLEMENTATION"]
+        return (f"RMW_IMPLEMENTATION={impl} is not installed; unset it and fell "
+                f"back to the distribution default.")
+    return None
 
 
 def _which(prog):
@@ -975,6 +1071,9 @@ def release_lock():
 
 
 def main():
+    ensure_sourced_environment()
+    rmw_note = normalize_rmw_implementation()
+
     other = other_instance_pid()
     if other is not None:
         print(f"Another launcher is already running (pid {other}).\n"
@@ -1003,6 +1102,8 @@ def main():
                       os.environ.get("ROS_DOMAIN_ID", "0"),
                       os.environ.get("ROS_LOCALHOST_ONLY", "0"),
                       os.environ.get("ROS_DISTRO", "?")))
+    if rmw_note:
+        session.event(rmw_note)
 
     sup = core.Supervisor(ws_root or REPO_ROOT, LOG_DIR,
                           core.build_groups(bringup_share()),
@@ -1043,9 +1144,10 @@ def main():
 
         # Launch
         if not ros_ready():
-            print("ros2 was not found on PATH. Enter the ROS 2 environment "
-                  "first (e.g. 'distrobox enter ros2-jazzy', then source "
-                  "/opt/ros/jazzy/setup.zsh) and run this again.",
+            print(f"ros2 was not found on PATH, and the '{DISTROBOX_NAME}' "
+                  "Distrobox could not be entered automatically. Create it with "
+                  "./bootstrap.sh, or enter a ROS 2 environment yourself (source "
+                  "/opt/ros/<distro>/setup.bash) and run this again.",
                   file=sys.stderr)
             input("Press Enter to return to the menu.")
             continue
