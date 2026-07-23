@@ -29,13 +29,10 @@ Published topics:
                              solid-confidence >= voxel_min_solid_confidence
                                where solid-confidence = (trunc - d) / (2*trunc)
                                (0.5 at the surface d=0, 1.0 at full saturation d=-trunc)
-                           colour, two independent channels:
-                             hue        = wall confidence (orange = unsure ->
-                                          green = confident), spread across the
-                                          shown solid band
-                             saturation = observation count (weight), log-scaled
-                                          and capped at voxel_obs_cap: pale =
-                                          barely seen, vivid = seen often
+                           color ∝ weight (log-scale): orange = just past the
+                           observation floor, green = heavily observed. Colour
+                           saturation also scales with weight — pale when barely
+                           seen, full when heavily observed.
   /tsdf/occupied_voxels  (sensor_msgs/PointCloud2) confidently solid TSDF
                            voxel centres for collision-aware goal validation
 """
@@ -78,7 +75,6 @@ class TSDFMapper(Node):
         self.declare_parameter('normal_every',     10)
         self.declare_parameter('max_voxels_viz',   40_000)
         self.declare_parameter('show_free_voxels', False)
-        self.declare_parameter('voxel_obs_cap',    1000.0)  # obs count that saturates colour
         # Discard points beyond this range before integration.
         # Depth sensors return valid readings at their physical maximum range
         # when looking into open water ("no return").  Without this filter,
@@ -117,7 +113,6 @@ class TSDFMapper(Node):
         self._normal_every = int(self.get_parameter('normal_every').value)
         self._max_viz      = int(self.get_parameter('max_voxels_viz').value)
         self._show_free    = bool(self.get_parameter('show_free_voxels').value)
-        self._voxel_obs_cap = float(self.get_parameter('voxel_obs_cap').value)
         self._max_range    = float(self.get_parameter('max_range_m').value)
         self._carve_no_return = bool(self.get_parameter('carve_no_return').value)
         self._carve_range  = float(self.get_parameter('carve_range_m').value)
@@ -492,17 +487,19 @@ class TSDFMapper(Node):
         if n > self._max_viz:
             sel    = np.random.choice(n, self._max_viz, replace=False)
             pts    = pts[sel]
-            d_vals = d_vals[sel]
             w_vals = w_vals[sel]
 
-        # Hue = confidence it is a wall, spread across the shown solid band so
-        # the gradient is visible (orange = least-solid shown voxel, green =
-        # deep solid). Saturation = observation count (weight), log-scaled and
-        # capped at voxel_obs_cap so a voxel seen 1000x and 10000x read alike.
-        band      = self._voxel_max_d + self._trunc
-        wall_conf = np.clip((self._voxel_max_d - d_vals) / max(band, 1e-6), 0.0, 1.0)
-        obs       = np.log1p(np.clip(w_vals, 0.0, None)) / np.log1p(self._voxel_obs_cap)
-        colors    = _voxel_colormap(wall_conf, np.clip(obs, 0.0, 1.0))
+        # Weight → colour (log scale, above the observation floor). Same
+        # orange→green hue ramp as before; the observation weight now also
+        # drives colour saturation — pale when barely seen, full (unchanged
+        # from before) when heavily observed. Cube size stays fixed at the true
+        # grid resolution: varying it by weight let differently-sized
+        # neighbouring cubes overlap, which made the map look cluttered.
+        w_max  = max(float(w_vals.max()), self._voxel_min_weight + 1.0)
+        w_norm = np.clip(
+            np.log1p(np.clip(w_vals - self._voxel_min_weight, 0.0, None))
+            / np.log1p(w_max - self._voxel_min_weight), 0.0, 1.0)
+        colors = _confidence_colormap(w_norm, saturation=w_norm)
 
         m = Marker()
         m.header.stamp    = now
@@ -801,18 +798,26 @@ def _compute_normals_vdb(tsdf_grid, world_points: np.ndarray,
     return normals
 
 
-def _confidence_colormap(conf_norm: np.ndarray) -> np.ndarray:
+def _confidence_colormap(conf_norm: np.ndarray, saturation=None) -> np.ndarray:
     """RGBA colormap for observation-count confidence, normalised to [0, 1].
 
     0 = just cleared the min-observation-count floor (least-trusted voxel
     still shown this scan), 1 = the most-observed voxel in this scan
     (log-scaled). Low confidence -> orange, high confidence -> green.
+
+    saturation: optional [0, 1] array. When given, colour saturation is scaled
+    by it (pale toward grey when low, full when high) without changing the hue;
+    saturation=1 reproduces the original fully-saturated colour exactly. Omitted
+    keeps the original behaviour.
     """
     t = np.clip(conf_norm, 0.0, 1.0)
     c = np.zeros((len(t), 4), dtype=np.float32)
     c[:, 0] = 1.0 - 0.9 * t     # red:   1.0 -> 0.1
     c[:, 1] = 0.55 + 0.35 * t   # green: 0.55 -> 0.9
     c[:, 2] = 0.2 * t           # blue:  0.0 -> 0.2
+    if saturation is not None:
+        s = (0.2 + 0.8 * np.clip(saturation, 0.0, 1.0)).reshape(-1, 1)
+        c[:, :3] = np.float32(0.7) * (1.0 - s) + c[:, :3] * s
     # Opaque, not translucent: any alpha < 1 pushes the whole CUBE_LIST into
     # OGRE's transparent render queue, which draws in insertion order rather
     # than depth order — with thousands of cubes in one marker, overlapping
@@ -824,26 +829,6 @@ def _confidence_colormap(conf_norm: np.ndarray) -> np.ndarray:
     # to confidently-solid, well-observed voxels, so there's no meaningful
     # transparency information left to encode anyway.
     c[:, 3] = 1.0
-    return c
-
-
-def _voxel_colormap(wall_conf: np.ndarray, obs_norm: np.ndarray) -> np.ndarray:
-    """RGBA per voxel encoding two independent channels:
-
-      hue        wall confidence — orange (unsure) -> green (confident wall)
-      saturation observation count — pale (barely seen) -> vivid (seen often)
-
-    Low observation desaturates toward grey rather than shifting hue, so the two
-    meanings stay separable. Opaque, for the CUBE_LIST render-order reason
-    spelled out in _confidence_colormap."""
-    wall   = np.clip(wall_conf, 0.0, 1.0).reshape(-1, 1)
-    orange = np.array([[1.0, 0.55, 0.05]], dtype=np.float32)
-    green  = np.array([[0.15, 0.85, 0.25]], dtype=np.float32)
-    hue = orange * (1.0 - wall) + green * wall
-    s   = (0.2 + 0.8 * np.clip(obs_norm, 0.0, 1.0)).reshape(-1, 1)
-    rgb = np.float32(0.55) * (1.0 - s) + hue * s
-    c = np.ones((len(wall), 4), dtype=np.float32)
-    c[:, :3] = rgb
     return c
 
 
