@@ -63,8 +63,14 @@ class PoseGraphNode(Node):
         self.declare_parameter('min_inlier_ratio', 0.3)
         self.declare_parameter('min_inlier_count', 50)
         self.declare_parameter('max_error_per_inlier', 0.05)
-        self.declare_parameter('icp_sigma_rot', 0.05)
-        self.declare_parameter('icp_sigma_trans', 0.05)
+        # DVL dead-reckoning is far more accurate than sparse-sonar scan
+        # registration, so they get separate noise models. One shared (tight)
+        # sigma let noisy scan matches override good odometry -- dragging the
+        # estimate via sequential factors and warping it via loop closures.
+        self.declare_parameter('odom_sigma_rot', 0.02)
+        self.declare_parameter('odom_sigma_trans', 0.02)
+        self.declare_parameter('scan_sigma_rot', 0.08)
+        self.declare_parameter('scan_sigma_trans', 0.12)
         self.declare_parameter('scan_voxel_size', 0.1)
         self.declare_parameter('scan_max_correspondence_dist', 0.5)
         self.declare_parameter('cov_ellipsoid_stride', 5)
@@ -102,14 +108,14 @@ class PoseGraphNode(Node):
             profile = load_noise_profile(yaml_path)
         self._profile = profile
 
-        icp_sigma_rot = p('icp_sigma_rot').value
-        icp_sigma_trans = p('icp_sigma_trans').value
+        odom_sigmas = (p('odom_sigma_rot').value, p('odom_sigma_trans').value)
+        scan_sigmas = (p('scan_sigma_rot').value, p('scan_sigma_trans').value)
 
         self._scanner = ScanMatcher(
             max_correspondence_dist=p('scan_max_correspondence_dist').value,
             downsampling_resolution=p('scan_voxel_size').value)
 
-        self._setup_gtsam(icp_sigma_rot, icp_sigma_trans, profile)
+        self._setup_gtsam(odom_sigmas, scan_sigmas, profile)
 
         self._keyframes: list[Keyframe] = []
         self._latest_dead_reckoned_T = None
@@ -162,24 +168,32 @@ class PoseGraphNode(Node):
             f"PoseGraph started. noise_profile={profile.name}, "
             f"keyframe_dist={self.keyframe_dist_m}m, keyframe_angle={self.keyframe_angle_rad}rad, "
             f"loop_closure_enabled={self.loop_closure_enabled}, "
-            f"map_rebuild_enabled={self.map_rebuild_enabled}")
+            f"map_rebuild_enabled={self.map_rebuild_enabled}, "
+            f"odom_sigma=({odom_sigmas[0]},{odom_sigmas[1]}), "
+            f"scan_sigma=({scan_sigmas[0]},{scan_sigmas[1]})")
 
     # ------------------------------------------------------------------
     # GTSAM setup
     # ------------------------------------------------------------------
-    def _setup_gtsam(self, icp_sigma_rot, icp_sigma_trans, profile: NoiseProfile):
+    def _setup_gtsam(self, odom_sigmas, scan_sigmas, profile: NoiseProfile):
         isam_params = gtsam.ISAM2Params()
         isam_params.setRelinearizeThreshold(0.01)
         isam_params.relinearizeSkip = 1
         self._isam = gtsam.ISAM2(isam_params)
 
-        # Single ICP-style noise model for ALL relative (Between) factors —
-        # dead-reckoning odometry AND scan-matching registration alike.
-        # GTSAM Pose3 tangent order: [rot_x, rot_y, rot_z, trans_x, trans_y, trans_z].
-        icp_sigmas = np.array([icp_sigma_rot] * 3 + [icp_sigma_trans] * 3)
-        self._icp_noise = gtsam.noiseModel.Diagonal.Sigmas(icp_sigmas)
-        self._robust_icp_noise = gtsam.noiseModel.Robust.Create(
-            gtsam.noiseModel.mEstimator.Huber.Create(1.345), self._icp_noise)
+        # Two relative-factor noise models. DVL dead-reckoning is accurate
+        # (~cm/keyframe) and NON-robust so a bad scan/loop factor cannot
+        # down-weight it; sonar scan-matching is decimeter-level and robustified
+        # so outlier registrations are suppressed. GTSAM Pose3 tangent order:
+        # [rot_x, rot_y, rot_z, trans_x, trans_y, trans_z].
+        odom_rot, odom_trans = odom_sigmas
+        self._odom_noise = gtsam.noiseModel.Diagonal.Sigmas(
+            np.array([odom_rot] * 3 + [odom_trans] * 3))
+        scan_rot, scan_trans = scan_sigmas
+        self._scan_noise = gtsam.noiseModel.Diagonal.Sigmas(
+            np.array([scan_rot] * 3 + [scan_trans] * 3))
+        self._robust_scan_noise = gtsam.noiseModel.Robust.Create(
+            gtsam.noiseModel.mEstimator.Huber.Create(1.345), self._scan_noise)
 
         # Attitude+depth prior, applied on every node from the SAME fused
         # dead-reckoning reading (roller pattern, graph.cpp:44-46): x/y left
@@ -263,24 +277,24 @@ class PoseGraphNode(Node):
 
         if n == 0:
             pose = gtsam.Pose3(T_odom)
-            graph.addPriorPose3(sym, pose, self._icp_noise)
+            graph.addPriorPose3(sym, pose, self._odom_noise)
             values.insert(sym, pose)
             T_world_est = T_odom
         else:
             prev = self._keyframes[-1]
 
-            # 1) Dead-reckoning odometry BetweenFactor
+            # 1) Dead-reckoning odometry BetweenFactor (tight, non-robust)
             T_delta = np.linalg.inv(prev.T_odom) @ T_odom
             graph.add(gtsam.BetweenFactorPose3(
-                prev.symbol, sym, gtsam.Pose3(T_delta), self._robust_icp_noise))
+                prev.symbol, sym, gtsam.Pose3(T_delta), self._odom_noise))
 
-            # 2) Sequential scan-matching BetweenFactor
+            # 2) Sequential scan-matching BetweenFactor (looser, robustified)
             result = self._scanner.align(cloud_body, prev.cloud, T_delta)
             if ScanMatcher.is_acceptable(result, self.min_inlier_ratio,
                                           self.min_inlier_count, self.max_error_per_inlier):
                 graph.add(gtsam.BetweenFactorPose3(
                     prev.symbol, sym, gtsam.Pose3(result['T_target_source']),
-                    self._robust_icp_noise))
+                    self._robust_scan_noise))
             else:
                 self._rejected_edges.append((prev.index, n))
 
@@ -304,7 +318,7 @@ class PoseGraphNode(Node):
         for lc_idx, lc_T, lc_err in lc_factors:
             graph.add(gtsam.BetweenFactorPose3(
                 self._keyframes[lc_idx].symbol, sym, gtsam.Pose3(lc_T),
-                self._robust_icp_noise))
+                self._robust_scan_noise))
 
         self._isam.update(graph, values)
         result_values = self._isam.calculateEstimate()
@@ -421,7 +435,7 @@ class PoseGraphNode(Node):
             for lc_idx, lc_T, lc_err in new_lcs:
                 lc_graph.add(gtsam.BetweenFactorPose3(
                     self._keyframes[lc_idx].symbol, kf.symbol, gtsam.Pose3(lc_T),
-                    self._robust_icp_noise))
+                    self._robust_scan_noise))
                 kf.loop_closures.append((lc_idx, lc_T, lc_err))
 
         if lc_graph.size() > 0:
