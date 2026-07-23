@@ -35,7 +35,8 @@ Published topics:
                            voxel centres for collision-aware goal validation
 """
 
-from collections import OrderedDict
+from collections import deque, OrderedDict
+import time
 
 import numpy as np
 import rclpy
@@ -92,6 +93,14 @@ class TSDFMapper(Node):
         self.declare_parameter('cache_max_scans', 6000)
         self.declare_parameter('rebuild_chunk_scans', 10)
         self.declare_parameter('rebuild_tick_s', 0.02)
+        # Clouds and their exact-time TF are published by different ROS nodes.
+        # The cloud often reaches this single-threaded executor first.  A
+        # blocking lookup in the cloud callback cannot receive the queued TF,
+        # so keep a short, bounded FIFO of ROS async-TF futures and drain it
+        # after returning to spin().
+        self.declare_parameter('tf_wait_timeout_s', 0.5)
+        self.declare_parameter('tf_queue_size', 10)
+        self.declare_parameter('tf_queue_tick_s', 0.02)
 
         self._world_frame  = self.get_parameter('world_frame').value
         self._cloud_frame  = self.get_parameter('cloud_frame').value
@@ -124,14 +133,29 @@ class TSDFMapper(Node):
         self.get_logger().info(
             f'TSDF  voxel={voxel_size}m  trunc={trunc}m  space_carving={space_carving}')
 
-        self._latest_frame = self._cloud_frame
-
         # ── TF ──────────────────────────────────────────────────────────
         self._tf_buffer   = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
+        self._tf_wait_timeout_s = max(
+            0.0, float(self.get_parameter('tf_wait_timeout_s').value))
+        self._tf_queue_size = max(1, int(self.get_parameter('tf_queue_size').value))
+        tf_queue_tick_s = max(
+            0.001, float(self.get_parameter('tf_queue_tick_s').value))
+        self._tf_queue = deque()
+        self._monotonic = time.monotonic
+        self._cloud_received = 0
+        self._cloud_integrated = 0
+        self._tf_deferred = 0
+        self._tf_recovered = 0
+        self._tf_expired = 0
+        self._tf_failed = 0
+        self._tf_overflow = 0
+
         # ── pub/sub ──────────────────────────────────────────────────────
         self.create_subscription(PointCloud2, '/cloud_in', self._cloud_cb, 5)
+        self.create_timer(tf_queue_tick_s, self._tf_queue_tick)
+        self.create_timer(10.0, self._log_cloud_tf_stats)
 
         self._enable_rebuild = bool(self.get_parameter('enable_rebuild').value)
         self._cache_voxel_size = float(self.get_parameter('cache_voxel_size').value)
@@ -169,16 +193,91 @@ class TSDFMapper(Node):
         self.get_logger().info('tsdf_mapper ready')
 
     # ────────────────────────────────────────────────────────────────────
-    # Cloud callback — integrate into TSDF immediately
+    # Cloud callback — integrate now when TF is ready, otherwise defer
     # ────────────────────────────────────────────────────────────────────
 
     def _cloud_cb(self, msg: PointCloud2) -> None:
-        if msg.header.frame_id:
-            self._latest_frame = msg.header.frame_id
+        self._cloud_received += 1
+        # Once one cloud is waiting, enqueue newer clouds behind it even if
+        # their TF is already ready. This keeps integration and rebuild-cache
+        # timestamps in capture order.
+        if not self._tf_queue:
+            tf_msg = self._lookup_cloud_transform(msg)
+            if tf_msg is not None:
+                if self._integrate_cloud(msg, tf_msg):
+                    self._cloud_integrated += 1
+                return
 
+        self._tf_deferred += 1
+        if len(self._tf_queue) >= self._tf_queue_size:
+            _msg, _queued_at, future = self._tf_queue.popleft()
+            future.cancel()
+            self._tf_overflow += 1
+            self.get_logger().warn(
+                'Cloud/TF queue full; dropping oldest scan',
+                throttle_duration_sec=5.0)
+        future = self._wait_for_cloud_transform(msg)
+        self._tf_queue.append((msg, self._monotonic(), future))
+
+    def _lookup_cloud_transform(self, msg: PointCloud2):
+        source_frame = msg.header.frame_id or self._cloud_frame
+        try:
+            # Deliberately non-blocking. A timeout here runs inside the same
+            # single-threaded executor that must receive the missing TF.
+            return self._tf_buffer.lookup_transform(
+                self._world_frame, source_frame, msg.header.stamp)
+        except tf2_ros.TransformException:
+            return None
+
+    def _wait_for_cloud_transform(self, msg: PointCloud2):
+        source_frame = msg.header.frame_id or self._cloud_frame
+        return self._tf_buffer.wait_for_transform_async(
+            self._world_frame, source_frame, msg.header.stamp)
+
+    def _tf_queue_tick(self) -> None:
+        """Drain ready async TF futures in FIFO order, at most one scan per tick."""
+        while self._tf_queue:
+            msg, queued_at, future = self._tf_queue[0]
+            if future.done():
+                self._tf_queue.popleft()
+                if future.cancelled():
+                    continue
+                try:
+                    tf_msg = future.result()
+                except Exception as exc:
+                    self._tf_failed += 1
+                    self.get_logger().warn(
+                        f'Exact-time TF wait failed ({type(exc).__name__}); dropping scan',
+                        throttle_duration_sec=5.0)
+                    continue
+                self._tf_recovered += 1
+                if self._integrate_cloud(msg, tf_msg):
+                    self._cloud_integrated += 1
+                return
+
+            if self._monotonic() - queued_at < self._tf_wait_timeout_s:
+                return
+
+            self._tf_queue.popleft()
+            future.cancel()
+            self._tf_expired += 1
+            self.get_logger().warn(
+                'Exact-time TF did not arrive before deadline; dropping scan',
+                throttle_duration_sec=5.0)
+
+    def _log_cloud_tf_stats(self) -> None:
+        self.get_logger().info(
+            f'Cloud/TF stats: received={self._cloud_received} '
+            f'integrated={self._cloud_integrated} deferred={self._tf_deferred} '
+            f'recovered={self._tf_recovered} expired={self._tf_expired} '
+            f'failed={self._tf_failed} overflow={self._tf_overflow} '
+            f'queued={len(self._tf_queue)}')
+
+    def _integrate_cloud(self, msg: PointCloud2, tf_msg) -> bool:
+        """Filter and integrate one cloud using its exact capture-time TF."""
         pts_cam = _parse_pointcloud2(msg)   # (N,3) float64, sensor frame
         if pts_cam is None or len(pts_cam) == 0:
-            return
+            return False
 
         # Range filter — drop points at/beyond the sensor's physical max range.
         # Those are "no-return" readings (open water), not real surfaces.
@@ -193,25 +292,7 @@ class TSDFMapper(Node):
                     pts_cam = np.vstack([pts_cam, pseudo])
 
         if len(pts_cam) == 0:
-            return
-
-        # TF at the cloud's capture time.
-        # Do NOT fall back to the latest TF on ExtrapolationException: during
-        # rotation the latest TF differs from the capture-time TF, placing
-        # points in wrong world positions and creating permanent ghost voxels.
-        try:
-            tf_msg = self._tf_buffer.lookup_transform(
-                self._world_frame, self._latest_frame,
-                msg.header.stamp,
-                timeout=rclpy.duration.Duration(seconds=0.1),
-            )
-        except (tf2_ros.ExtrapolationException,
-                tf2_ros.LookupException,
-                tf2_ros.ConnectivityException) as exc:
-            self.get_logger().warn(
-                f'TF unavailable ({type(exc).__name__}), skipping scan',
-                throttle_duration_sec=5.0)
-            return
+            return False
 
         T = _tf_to_matrix(tf_msg.transform)   # T_world_cam (4×4, float64)
         R, t = T[:3, :3], T[:3, 3]
@@ -231,6 +312,7 @@ class TSDFMapper(Node):
         self.get_logger().info(
             f'Integrated {len(pts_world)} pts  cam=({t[0]:.2f},{t[1]:.2f},{t[2]:.2f})',
             throttle_duration_sec=2.0)
+        return True
 
     def _cache_scan(self, stamp, pts_cam: np.ndarray, T_world_cam: np.ndarray) -> None:
         """Downsample and store this scan (camera frame) + its capture pose,
