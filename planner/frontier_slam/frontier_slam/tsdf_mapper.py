@@ -29,8 +29,10 @@ Published topics:
                              solid-confidence >= voxel_min_solid_confidence
                                where solid-confidence = (trunc - d) / (2*trunc)
                                (0.5 at the surface d=0, 1.0 at full saturation d=-trunc)
-                           color ∝ weight (log-scale): orange = just past the
-                           observation floor, green = heavily observed.
+                           colour: green wall voxels whose saturation encodes
+                           the observation count (weight) — log-scaled and
+                           capped at voxel_obs_cap, so pale = barely seen,
+                           vivid = seen often.
   /tsdf/occupied_voxels  (sensor_msgs/PointCloud2) confidently solid TSDF
                            voxel centres for collision-aware goal validation
 """
@@ -73,6 +75,7 @@ class TSDFMapper(Node):
         self.declare_parameter('normal_every',     10)
         self.declare_parameter('max_voxels_viz',   40_000)
         self.declare_parameter('show_free_voxels', False)
+        self.declare_parameter('voxel_obs_cap',    1000.0)  # obs count that saturates colour
         # Discard points beyond this range before integration.
         # Depth sensors return valid readings at their physical maximum range
         # when looking into open water ("no return").  Without this filter,
@@ -111,6 +114,7 @@ class TSDFMapper(Node):
         self._normal_every = int(self.get_parameter('normal_every').value)
         self._max_viz      = int(self.get_parameter('max_voxels_viz').value)
         self._show_free    = bool(self.get_parameter('show_free_voxels').value)
+        self._voxel_obs_cap = float(self.get_parameter('voxel_obs_cap').value)
         self._max_range    = float(self.get_parameter('max_range_m').value)
         self._carve_no_return = bool(self.get_parameter('carve_no_return').value)
         self._carve_range  = float(self.get_parameter('carve_range_m').value)
@@ -487,14 +491,11 @@ class TSDFMapper(Node):
             pts    = pts[sel]
             w_vals = w_vals[sel]
 
-        # Weight → colour (log scale, above the observation floor). Cube size
-        # stays fixed at the true grid resolution: varying it by weight (as
-        # before) let differently-sized neighbouring cubes overlap, which is
-        # what made the map look cluttered.
-        w_max  = max(float(w_vals.max()), self._voxel_min_weight + 1.0)
-        w_norm = np.log1p(np.clip(w_vals - self._voxel_min_weight, 0.0, None)) \
-            / np.log1p(w_max - self._voxel_min_weight)
-        colors = _confidence_colormap(np.clip(w_norm, 0.0, 1.0))
+        # Green wall voxels; saturation encodes the observation count (weight),
+        # log-scaled and capped at voxel_obs_cap so a voxel seen 1000x and
+        # 10000x read alike. Cube size stays fixed at the grid resolution.
+        w_norm = np.log1p(np.clip(w_vals, 0.0, None)) / np.log1p(self._voxel_obs_cap)
+        colors = _weight_saturation_colormap(np.clip(w_norm, 0.0, 1.0))
 
         m = Marker()
         m.header.stamp    = now
@@ -816,6 +817,19 @@ def _confidence_colormap(conf_norm: np.ndarray) -> np.ndarray:
     # to confidently-solid, well-observed voxels, so there's no meaningful
     # transparency information left to encode anyway.
     c[:, 3] = 1.0
+    return c
+
+
+def _weight_saturation_colormap(w_norm: np.ndarray) -> np.ndarray:
+    """RGBA for solid wall voxels: fixed green hue, colour saturation encoding
+    the (already log-scaled, capped) observation count in [0, 1] — pale grey-green
+    when barely seen, vivid green when seen often. Opaque, for the CUBE_LIST
+    render-order reason spelled out in _confidence_colormap."""
+    s = 0.15 + 0.85 * np.clip(w_norm, 0.0, 1.0).reshape(-1, 1)
+    green = np.array([[0.15, 0.85, 0.25]], dtype=np.float32)
+    rgb = np.float32(0.6) * (1.0 - s) + green * s
+    c = np.ones((len(s), 4), dtype=np.float32)
+    c[:, :3] = rgb
     return c
 
 
