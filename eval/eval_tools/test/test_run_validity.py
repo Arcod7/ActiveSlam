@@ -79,6 +79,15 @@ def test_scanning_in_place_counts_as_motion(tmp_path):
     assert m['yaw_deg'] > run_matrix.MIN_YAW_DEG
 
 
+def test_yaw_wraparound_does_not_make_a_stationary_vehicle_look_moving(tmp_path):
+    """Small jitter across -pi/pi is not a nearly complete revolution."""
+    path = _write_tum(tmp_path / 'gt_traj.tum', np.zeros((4, 2)),
+                      [179.5, -179.8, 179.7, -179.6])
+    m = run_matrix.trajectory_motion(path)
+    assert m['path_m'] == 0.0
+    assert m['yaw_deg'] < 2.0
+
+
 # ----------------------------------------------------------------------
 # _check_validity status classification
 # ----------------------------------------------------------------------
@@ -126,6 +135,34 @@ def test_empty_metrics_still_reports_no_data(tmp_path):
     assert run_matrix._check_validity(d, log)['status'] == 'no_data'
 
 
+def test_pre_shutdown_child_process_death_is_a_crash(tmp_path):
+    d, log = _run_dir(tmp_path, _moving_tum)
+    with open(log, 'w') as f:
+        f.write('[ERROR] [pose_graph-1]: process has died [pid 42, exit code 1]\n')
+    result = run_matrix._check_validity(d, log)
+    assert result['process_deaths'] == 1
+    assert result['status'] == 'crashed_soft'
+
+
+def test_shutdown_phase_process_text_is_not_a_crash(tmp_path):
+    d, log = _run_dir(tmp_path, _moving_tum)
+    with open(log, 'w') as f:
+        f.write('[WARNING] [launch]: user interrupted with ctrl-c (SIGINT)\n')
+        f.write('[ERROR] [pose_graph-1]: process has died [pid 42, exit code -2]\n')
+    assert run_matrix._check_validity(d, log)['status'] == 'ok'
+
+
+def test_nonzero_launch_exit_is_a_crash(tmp_path):
+    d, log = _run_dir(tmp_path, _moving_tum)
+    assert run_matrix._check_validity(d, log, exit_code=1)['status'] == 'crashed_soft'
+
+
+def test_expected_sigint_exit_is_clean(tmp_path):
+    d, log = _run_dir(tmp_path, _moving_tum)
+    result = run_matrix._check_validity(d, log, exit_code=-run_matrix.signal.SIGINT)
+    assert result['status'] == 'ok'
+
+
 # ----------------------------------------------------------------------
 # orphan detection
 # ----------------------------------------------------------------------
@@ -143,6 +180,32 @@ def test_orphan_scan_ignores_the_orchestrator_itself():
     # make every batch refuse to start.
     assert all('run_matrix.py' not in entry
                for entry in run_matrix.find_orphan_nodes())
+
+
+def test_orphan_matching_uses_executable_not_arbitrary_arguments():
+    assert run_matrix._command_executables('/usr/bin/python3 /ws/install/pose_graph --ros-args') \
+        >= {'python3', 'pose_graph'}
+    assert 'pose_graph' not in run_matrix._command_executables('rg pose_graph .')
+
+
+def test_orphan_scan_ignores_nodes_in_another_ros_domain(monkeypatch):
+    ps = ('  PID COMMAND\n'
+          '  42 /usr/bin/python3 /ws/install/pose_graph --ros-args\n'
+          '  43 /opt/ros/jazzy/lib/component_container --ros-args\n')
+    monkeypatch.setattr(run_matrix.subprocess, 'check_output',
+                        lambda *args, **kwargs: ps)
+    monkeypatch.setattr(run_matrix, '_pid_ros_domain',
+                        lambda pid: {'42': '7', '43': '8'}[pid])
+    monkeypatch.setenv('ROS_DOMAIN_ID', '7')
+    found = run_matrix.find_orphan_nodes()
+    assert len(found) == 1
+    assert found[0].startswith('42 ')
+
+
+def test_near_cutoff_is_a_valid_matrix_argument():
+    cfg = _minimal_cfg()
+    cfg['common_args']['near_cutoff'] = 1.6
+    run_matrix._validate_matrix(cfg)
 
 
 # ----------------------------------------------------------------------

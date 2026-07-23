@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Real-time trajectory evaluation: compares ground truth against the SLAM
-estimate (and, for reference, the raw dead-reckoning baseline). Publishes
-running scalars for RViz/PlotJuggler and writes TUM trajectory files plus a
-metrics.csv for offline analysis (`evo_ape`, `evo_rpe`, plot_results.py).
+estimate (and, for reference, the raw dead-reckoning baseline). The scored
+estimate is ``/slam/odometry``, the continuously corrected pose published at
+the dead-reckoning rate; scoring sparse ``/slam/pose`` keyframes would weight
+turns more heavily than straight travel and bias ATE/RPE between runs.
+
+Publishes running scalars for RViz/PlotJuggler and writes TUM trajectory files
+plus a metrics.csv for offline analysis (`evo_ape`, `evo_rpe`,
+plot_results.py). RPE uses a fixed temporal delta (``rpe_delta`` seconds), not
+a fixed number of samples.
 
 Terminology: "abs_error"/"ate" are computed WITHOUT SE3 (Umeyama) alignment —
 in simulation, ground truth and the SLAM estimate already share the world_ned
@@ -19,7 +25,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import PoseWithCovarianceStamped, Point
+from geometry_msgs.msg import Point
 from std_msgs.msg import Float64, Int32, ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
 from scipy.spatial.transform import Rotation
@@ -35,14 +41,6 @@ def _stamp_to_float(stamp) -> float:
 
 
 def _odom_to_sample(msg: Odometry) -> PoseSample:
-    p = msg.pose.pose.position
-    q = msg.pose.pose.orientation
-    return PoseSample(_stamp_to_float(msg.header.stamp),
-                       np.array([p.x, p.y, p.z]),
-                       np.array([q.x, q.y, q.z, q.w]))
-
-
-def _posewcov_to_sample(msg: PoseWithCovarianceStamped) -> PoseSample:
     p = msg.pose.pose.position
     q = msg.pose.pose.orientation
     return PoseSample(_stamp_to_float(msg.header.stamp),
@@ -87,7 +85,7 @@ class BenchmarkNode(Node):
         super().__init__('benchmark', **kwargs)
 
         self.declare_parameter('output_dir', '')
-        self.declare_parameter('rpe_delta', 1)
+        self.declare_parameter('rpe_delta', 1.0)
         self.declare_parameter('gt_topic', '/StoneFish/Odometry')
 
         out_dir = self.get_parameter('output_dir').value
@@ -95,7 +93,9 @@ class BenchmarkNode(Node):
             out_dir = new_run_dir(pytime.strftime('%Y%m%d_%H%M%S'))
         os.makedirs(out_dir, exist_ok=True)
         self._out_dir = out_dir
-        self._rpe_delta = self.get_parameter('rpe_delta').value
+        self._rpe_delta_s = float(self.get_parameter('rpe_delta').value)
+        if self._rpe_delta_s <= 0.0:
+            raise ValueError('rpe_delta must be positive seconds')
 
         self._gt_buffer = TimestampBuffer()
         self._gt_tum = TUMWriter(os.path.join(out_dir, 'gt_traj.tum'))
@@ -106,7 +106,7 @@ class BenchmarkNode(Node):
         self._metrics_file.write(
             't,abs_error,ate,rpe_trans,rpe_rot_deg,dopt,lc_count,rebuild_count,revisit_count\n')
 
-        self._matched_pairs = []   # [(gt_sample, est_sample), ...] for RPE
+        self._matched_pairs = []   # time-ordered [(gt_sample, est_sample), ...] for RPE
         self._sq_errors = []       # running ATE accumulator
         self._latest_dopt = None   # cached from pose_graph.py's /slam/dopt
         self._latest_kf_count = 0
@@ -114,10 +114,10 @@ class BenchmarkNode(Node):
         self._latest_rebuild_count = 0
         self._latest_revisit_count = 0
         self._latest_slam_odom: PoseSample | None = None
+        self._last_scored_t: float | None = None
 
         gt_topic = self.get_parameter('gt_topic').value
         self.create_subscription(Odometry, gt_topic, self._gt_cb, 50)
-        self.create_subscription(PoseWithCovarianceStamped, '/slam/pose', self._slam_cb, 10)
         self.create_subscription(Odometry, '/slam/sensors/dead_reckoned_odom', self._dr_cb, 10)
         self.create_subscription(Odometry, '/slam/odometry', self._slam_odom_cb, 10)
         self.create_subscription(Float64, '/slam/dopt', self._dopt_cb, 10)
@@ -159,7 +159,19 @@ class BenchmarkNode(Node):
         self._gt_tum.write_pose(sample.t, sample.pos, sample.quat)
 
     def _slam_odom_cb(self, msg: Odometry):
-        self._latest_slam_odom = _odom_to_sample(msg)
+        sample = _odom_to_sample(msg)
+        self._latest_slam_odom = sample
+
+        # A simulator reset can briefly replay an old timestamp. Do not append
+        # duplicate/backward samples to the trajectory or cumulative metrics.
+        if self._last_scored_t is not None and sample.t <= self._last_scored_t:
+            return
+        self._last_scored_t = sample.t
+        self._slam_tum.write_pose(sample.t, sample.pos, sample.quat)
+
+        gt = self._gt_buffer.nearest(sample.t)
+        if gt is not None:
+            self._score_slam_sample(gt, sample)
 
     def _dr_cb(self, msg: Odometry):
         sample = _odom_to_sample(msg)
@@ -169,14 +181,8 @@ class BenchmarkNode(Node):
             err = float(np.linalg.norm(sample.pos - gt.pos))
             self.pub_dr_error.publish(Float64(data=err))
 
-    def _slam_cb(self, msg: PoseWithCovarianceStamped):
-        sample = _posewcov_to_sample(msg)
-        self._slam_tum.write_pose(sample.t, sample.pos, sample.quat)
-
-        gt = self._gt_buffer.nearest(sample.t)
-        if gt is None:
-            return
-
+    def _score_slam_sample(self, gt: PoseSample, sample: PoseSample):
+        """Score one continuous corrected-odometry sample against timestamped GT."""
         abs_error = float(np.linalg.norm(sample.pos - gt.pos))
         self._sq_errors.append(abs_error ** 2)
         ate = float(np.sqrt(np.mean(self._sq_errors)))
@@ -282,10 +288,24 @@ class BenchmarkNode(Node):
 
     def _update_rpe(self, gt_sample: PoseSample, est_sample: PoseSample):
         self._matched_pairs.append((gt_sample, est_sample))
-        if len(self._matched_pairs) <= self._rpe_delta:
+        if len(self._matched_pairs) < 2:
             return None, None
 
-        gt_prev, est_prev = self._matched_pairs[-1 - self._rpe_delta]
+        target_t = est_sample.t - self._rpe_delta_s
+        prior = self._matched_pairs[:-1]
+        prior_times = [pair[1].t for pair in prior]
+        i = bisect.bisect_left(prior_times, target_t)
+        candidates = [j for j in (i - 1, i) if 0 <= j < len(prior)]
+        if not candidates:
+            return None, None
+        best = min(candidates, key=lambda j: abs(prior_times[j] - target_t))
+        # Continuous odometry is normally ~10 Hz. A large hole should yield no
+        # RPE sample, not silently change the requested temporal baseline.
+        tolerance_s = max(0.25, 0.25 * self._rpe_delta_s)
+        if abs(prior_times[best] - target_t) > tolerance_s:
+            return None, None
+
+        gt_prev, est_prev = prior[best]
         gt_curr, est_curr = self._matched_pairs[-1]
 
         R_gt_prev = Rotation.from_quat(gt_prev.quat)

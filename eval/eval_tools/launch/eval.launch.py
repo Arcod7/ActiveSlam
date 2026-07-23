@@ -19,6 +19,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 from eval_tools.run_paths import new_run_dir
 
@@ -36,7 +37,8 @@ def _launch_eval_nodes(context, *args, **kwargs):
         output='screen',
         parameters=[{
             'output_dir': output_dir,
-            'rpe_delta': LaunchConfiguration('rpe_delta'),
+            'rpe_delta': ParameterValue(
+                LaunchConfiguration('rpe_delta'), value_type=float),
         }],
     )
 
@@ -60,8 +62,8 @@ def generate_launch_description():
         description='Directory to write TUM/CSV output to (default: timestamped dir under eval/runs)',
     )
     rpe_delta_arg = DeclareLaunchArgument(
-        'rpe_delta', default_value='1',
-        description='Number of matched pose pairs between RPE samples',
+        'rpe_delta', default_value='1.0',
+        description='Fixed temporal separation between RPE samples, in seconds',
     )
     mapper_arg = DeclareLaunchArgument(
         'mapper', default_value='octomap', choices=['octomap', 'tsdf'],
