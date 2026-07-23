@@ -408,9 +408,6 @@ class TSDFMapper(Node):
     # ────────────────────────────────────────────────────────────────────
 
     def _publish_surface(self) -> None:
-        if not self._volume.pyopenvdb_support_enabled:
-            return
-
         try:
             verts, _tris = self._volume.extract_triangle_mesh(
                 fill_holes=False, min_weight=float(self._min_weight))
@@ -430,13 +427,15 @@ class TSDFMapper(Node):
 
         self._cloud_pub.publish(_make_pointcloud2(header, verts))
 
-        sampled = verts[::self._normal_every]
-        normals  = _compute_normals_vdb(self._volume.tsdf, sampled, self._voxel_size)
-        self._normals_pub.publish(_normals_markers(sampled, normals, header))
+        # Normals need the TSDF grid (pyopenvdb-only); the surface cloud does not.
+        if self._volume.pyopenvdb_support_enabled:
+            sampled = verts[::self._normal_every]
+            normals  = _compute_normals_vdb(self._volume.tsdf, sampled, self._voxel_size)
+            self._normals_pub.publish(_normals_markers(sampled, normals, header))
 
-        valid = ~np.isnan(normals).any(axis=1)
-        self._normals_cloud_pub.publish(
-            _make_normals_cloud(header, sampled[valid], normals[valid]))
+            valid = ~np.isnan(normals).any(axis=1)
+            self._normals_cloud_pub.publish(
+                _make_normals_cloud(header, sampled[valid], normals[valid]))
 
         self.get_logger().info(f'Surface: {len(verts)} pts', throttle_duration_sec=5.0)
 
