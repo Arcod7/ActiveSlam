@@ -9,14 +9,12 @@ Panels:
         - /Sonar3D1/Topic1
         - /Octomap1/Topic1
         - /Octomap1/Namespaces1
-        - /Odometry1
-        - /Odometry1/Shape1
         - /Frontiers1/Namespaces1
         - /Path1
         - /OccupancyGrid1
         - /OccupancyGrid2
       Splitter Ratio: 0.5346534848213196
-    Tree Height: 1359
+    Tree Height: 316
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -72,6 +70,7 @@ Visualization Manager:
         Value: /sensor_msgs/image_depth
       Value: false
       Visibility:
+        Clean cloud (range): true
         Covariance: true
         DeadReckoningPath: true
         DepthCamera: true
@@ -81,12 +80,14 @@ Visualization Manager:
         Grid: true
         GroundTruth: true
         GroundTruthMap: true
+        LiveDriftArrow: true
         OccupancyGrid: true
         Octomap: true
         OctomapPoints: true
         Path: true
         PointStamped: true
         Pose: true
+        SLAM input (noised range): true
         SLAMPath: true
         SLAMPoseCovariance: true
         Sonar3D: true
@@ -158,7 +159,7 @@ Visualization Manager:
         Value: /cloud_in/range_image
       Value: true
     - Class: rviz_default_plugins/Image
-      Enabled: false
+      Enabled: true
       Max Value: 1
       Median window: 5
       Min Value: 0
@@ -170,7 +171,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /cloud_in_raw/range_image
-      Value: false
+      Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: false
       Name: Octomap
@@ -195,7 +196,7 @@ Visualization Manager:
       Color: 16; 65; 158
       Color Transformer: FlatColor
       Decay Time: 0
-      Enabled: true
+      Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
@@ -215,7 +216,7 @@ Visualization Manager:
         Value: /octomap_point_cloud_centers
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -250,17 +251,17 @@ Visualization Manager:
       Use rainbow: true
       Value: false
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: false
+      Enabled: true
       Name: TSDFVoxels
       Namespaces:
-        {}
+        tsdf_voxels: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /tsdf/voxels
-      Value: false
+      Value: true
     - Angle Tolerance: 0.10000000149011612
       Class: rviz_default_plugins/Odometry
       Covariance:
@@ -360,7 +361,9 @@ Visualization Manager:
       Enabled: true
       Name: GraphEdges
       Namespaces:
-        {}
+        loop_closures: true
+        odometry: true
+        rejected: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -372,7 +375,7 @@ Visualization Manager:
       Enabled: true
       Name: Covariance
       Namespaces:
-        {}
+        covariance: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -384,7 +387,8 @@ Visualization Manager:
       Enabled: true
       Name: ErrorHUD
       Namespaces:
-        {}
+        eval_drift: true
+        eval_hud: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -396,7 +400,7 @@ Visualization Manager:
       Enabled: true
       Name: LiveDriftArrow
       Namespaces:
-        {}
+        eval_drift_live: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -404,7 +408,10 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /eval/markers_live
       Value: true
-    - Class: rviz_default_plugins/PoseWithCovariance
+    - Alpha: 1
+      Axes Length: 1
+      Axes Radius: 0.10000000149011612
+      Class: rviz_default_plugins/PoseWithCovariance
       Color: 30; 120; 255
       Covariance:
         Orientation:
@@ -575,7 +582,7 @@ Visualization Manager:
       Color: 40; 220; 40
       Color Transformer: FlatColor
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
@@ -595,7 +602,7 @@ Visualization Manager:
         Value: /gt/tsdf/surface_cloud
       Use Fixed Frame: true
       Use rainbow: true
-      Value: false
+      Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: false
       Name: TSDFVoxels_GroundTruth
@@ -654,28 +661,30 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 46.049102783203125
+      Distance: 33.16123580932617
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 4.582081317901611
-        Y: 0.8542405366897583
-        Z: 10.230504035949707
+        X: 0.4955647885799408
+        Y: 8.419203758239746
+        Z: 17.06888198852539
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: true
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.4597961902618408
+      Pitch: 1.0247958898544312
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 2.4035089015960693
+      Yaw: 4.293510913848877
     Saved: ~
 Window Geometry:
   Camera:
+    collapsed: false
+  Clean cloud (range):
     collapsed: false
   DepthCamera:
     collapsed: false
@@ -684,7 +693,11 @@ Window Geometry:
   Height: 2014
   Hide Left Dock: false
   Hide Right Dock: true
-  QMainWindow State: 000000ff00000000fd0000000200000000000002dc000006d4fc0200000006fb0000000c00430061006d0065007200610000000000ffffffff0000002800fffffffb000000160044006500700074006800430061006d0065007200610100000070000001070000002800fffffffb000000100044006900730070006c0061007900730100000183000005c10000018600fffffffb0000001200530065006c0065006300740069006f006e00000004c2000000c8000000b200fffffffb0000001e0054006f006f006c002000500072006f0070006500720074006900650073000000050a000000b2000000b200fffffffb0000000a0056006900650077007300000005570000018e0000013800ffffff000000030000098c0000005efc0100000001fb0000000800540069006d006501000000000000098c0000048700ffffff000006a4000006d400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Motion Safety:
+    collapsed: false
+  QMainWindow State: 000000ff00000000fd0000000200000000000002dc000006d4fc0200000009fb0000000c00430061006d0065007200610000000000ffffffff0000002800fffffffb000000100044006900730070006c0061007900730100000070000001ae0000018600fffffffb000000160044006500700074006800430061006d006500720061010000022a0000010f0000002800fffffffb0000001200530065006c0065006300740069006f006e00000004c2000000c8000000b200fffffffb0000001e0054006f006f006c002000500072006f0070006500720074006900650073000000050a000000b2000000b200fffffffb0000000a0056006900650077007300000005570000018e0000013800fffffffb000000260043006c00650061006e00200063006c006f007500640020002800720061006e0067006500290100000345000001330000002800fffffffb000000320053004c0041004d00200069006e00700075007400200028006e006f0069007300650064002000720061006e0067006500290100000484000001250000002800fffffffb0000001a004d006f00740069006f006e002000530061006600650074007901000005b50000018f0000018f00ffffff000000030000098c0000005efc0100000001fb0000000800540069006d006501000000000000098c0000054f00ffffff000006a4000006d400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  SLAM input (noised range):
+    collapsed: false
   Selection:
     collapsed: false
   Time:
@@ -695,4 +708,4 @@ Window Geometry:
     collapsed: false
   Width: 2444
   X: 16
-  Y: 30
+  Y: 64
