@@ -14,6 +14,7 @@ Usage:
   ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic near_cutoff:=1.6  # + clear near-field spray
   ros2 launch bringup demo.launch.py slam:=slam mode:=frontier revisit:=true  # break off exploration to close loops
   ros2 launch bringup demo.launch.py slam:=slam mode:=frontier scenario:=drift_return  # scripted leave-and-return
+  ros2 launch bringup demo.launch.py scene:=target obj_mesh:=shipwreck.obj obj_x:=8 obj_yaw:=30
   ros2 launch bringup demo.launch.py rviz:=false              # headless (e.g. CI, remote box)
 
 `mode`, `motion`, `mapper`, and `slam` are independent axes — the sim+mapping core is
@@ -260,6 +261,63 @@ def generate_launch_description():
         default_value="180.0",
         description="scan_style:=sweep total sweep width in degrees",
     )
+    # The core Stonefish launch resolves these against the installed `world`
+    # package (or STONEFISH_WORLD_DIR).  Track 2 owns their eventual TUI fields:
+    # scene, obj_mesh, obj_x/y/z, obj_scale, and obj_roll/pitch/yaw.
+    scene_arg = DeclareLaunchArgument(
+        "scene",
+        default_value="waterlinked",
+        choices=["waterlinked", "target"],
+        description="Stonefish scene: baseline waterlinked or lightweight templated target",
+    )
+    obj_mesh_arg = DeclareLaunchArgument(
+        "obj_mesh", default_value="pipe",
+        description="target object: pipe or an .obj/.stl filename from world data/obj",
+    )
+    obj_x_arg = DeclareLaunchArgument(
+        "obj_x", default_value="8.0",
+        description="target object X position in world_ned (m)",
+    )
+    obj_y_arg = DeclareLaunchArgument(
+        "obj_y", default_value="-2.0",
+        description="target object Y position in world_ned (m)",
+    )
+    obj_z_arg = DeclareLaunchArgument(
+        "obj_z", default_value="8.0",
+        description="target object Z position in world_ned (m)",
+    )
+    obj_scale_arg = DeclareLaunchArgument(
+        "obj_scale", default_value="1.0",
+        description="target object uniform scale (> 0)",
+    )
+    obj_roll_arg = DeclareLaunchArgument(
+        "obj_roll", default_value="0.0",
+        description="target object roll (degrees)",
+    )
+    obj_pitch_arg = DeclareLaunchArgument(
+        "obj_pitch", default_value="0.0",
+        description="target object pitch (degrees)",
+    )
+    obj_yaw_arg = DeclareLaunchArgument(
+        "obj_yaw", default_value="0.0",
+        description="target object yaw (degrees)",
+    )
+    robot_x_arg = DeclareLaunchArgument("robot_x", default_value="0.0",
+                                        description="robot X position in world_ned (m)")
+    robot_y_arg = DeclareLaunchArgument("robot_y", default_value="0.0",
+                                        description="robot Y position in world_ned (m)")
+    robot_z_arg = DeclareLaunchArgument("robot_z", default_value="8.0",
+                                        description="robot Z position in world_ned (m)")
+    robot_roll_arg = DeclareLaunchArgument("robot_roll", default_value="0.0",
+                                           description="robot roll (degrees)")
+    robot_pitch_arg = DeclareLaunchArgument("robot_pitch", default_value="0.0",
+                                            description="robot pitch (degrees)")
+    robot_yaw_arg = DeclareLaunchArgument("robot_yaw", default_value="0.0",
+                                          description="robot yaw (degrees)")
+    depth_arg = DeclareLaunchArgument(
+        "depth", default_value="8.0",
+        description="fixed autonomous depth target in NED metres (positive = below surface)",
+    )
 
     # tf.launch.py (included further below via octomap/tsdf -> pointcloud -> tf)
     # declares use_gt_tf with its own default of 'true'; DeclareLaunchArgument only
@@ -425,6 +483,7 @@ def generate_launch_description():
             "scenario_out_dy": LaunchConfiguration("scenario_out_dy"),
             "scan_style": LaunchConfiguration("scan_style"),
             "scan_sweep_deg": LaunchConfiguration("scan_sweep_deg"),
+            "depth": LaunchConfiguration("depth"),
             "safety_start_enabled": LaunchConfiguration("safety_start_enabled"),
             "motion": PythonExpression(
                 [
@@ -469,6 +528,8 @@ def generate_launch_description():
             "loop_closure": LaunchConfiguration("loop_closure"),
             "noise_seed": LaunchConfiguration("noise_seed"),
             "map_rebuild": LaunchConfiguration("map_rebuild"),
+            "initial_x": LaunchConfiguration("robot_x"),
+            "initial_y": LaunchConfiguration("robot_y"),
         }.items(),
         condition=LaunchConfigurationEquals("slam", "slam"),
     )
@@ -666,6 +727,22 @@ def generate_launch_description():
             scenario_out_dy_arg,
             scan_style_arg,
             scan_sweep_deg_arg,
+            scene_arg,
+            obj_mesh_arg,
+            obj_x_arg,
+            obj_y_arg,
+            obj_z_arg,
+            obj_scale_arg,
+            obj_roll_arg,
+            obj_pitch_arg,
+            obj_yaw_arg,
+            robot_x_arg,
+            robot_y_arg,
+            robot_z_arg,
+            robot_roll_arg,
+            robot_pitch_arg,
+            robot_yaw_arg,
+            depth_arg,
             set_use_gt_tf,
             set_sonar_noise,
             # revisit_needs_slam_warning/scenario_needs_frontier_warning read top-level

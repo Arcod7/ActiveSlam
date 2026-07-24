@@ -105,7 +105,18 @@ def build_groups(bringup_share=""):
     """The group table. `bringup_share` is only needed for the RViz config path."""
 
     def core(v):
-        return [["ros2", "launch", "stonefish_groundtruth_mapping", "core.launch.py"]]
+        return [["ros2", "launch", "stonefish_groundtruth_mapping", "core.launch.py",
+                 f"scene:={v['scene']}",
+                 f"obj_mesh:={v['obj_mesh']}",
+                 f"obj_x:={v['obj_x']}", f"obj_y:={v['obj_y']}",
+                 f"obj_z:={v['obj_z']}", f"obj_scale:={v['obj_scale']}",
+                 f"obj_roll:={v['obj_roll']}", f"obj_pitch:={v['obj_pitch']}",
+                 f"obj_yaw:={v['obj_yaw']}",
+                 f"robot_x:={v['robot_x']}", f"robot_y:={v['robot_y']}",
+                 f"robot_z:={v['robot_z']}",
+                 f"robot_roll:={v['robot_roll']}",
+                 f"robot_pitch:={v['robot_pitch']}",
+                 f"robot_yaw:={v['robot_yaw']}"]]
 
     def tf(v):
         use_gt = "false" if v["slam"] == "slam" else "true"
@@ -148,7 +159,9 @@ def build_groups(bringup_share=""):
                  f"noise_profile:={v['noise_profile']}",
                  f"loop_closure:={'true' if v['loop_closure'] else 'false'}",
                  f"noise_seed:={v['noise_seed']}",
-                 f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}"]]
+                 f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}",
+                 f"initial_x:={v['robot_x']}",
+                 f"initial_y:={v['robot_y']}"]]
 
     def evaluation(v):
         cmd = ["ros2", "launch", "eval_tools", "eval.launch.py",
@@ -167,6 +180,7 @@ def build_groups(bringup_share=""):
                  f"scenario_out_dy:={v['scenario_out_dy']}",
                  f"scan_style:={v['scan_style']}",
                  f"scan_sweep_deg:={v['scan_sweep_deg']}",
+                 f"depth:={v['robot_depth_target']}",
                  f"safety_start_enabled:={'true' if v['safety_start_enabled'] else 'false'}",
                  f"motion:={_motion_arg(v['motion'])}",
                  f"wall_orientation_offset_deg:={v['wall_orientation_offset_deg']}",
@@ -201,8 +215,8 @@ def build_groups(bringup_share=""):
         Group("core", "Simulator (Stonefish)",
               "Stonefish underwater simulator: BlueROV2 + scene meshes, and the "
               "depth camera standing in for a wide-FoV 3D sonar. Expensive to "
-              "start, so it is never restarted by an option change.",
-              core),
+              "start, so only scene/object selection and object scale restart it.",
+              core, depends=["scene", "obj_mesh", "obj_scale"]),
         Group("tf", "TF chain",
               "world_ned -> bluerov2/base_link -> bluerov2/Dcam. Under "
               "slam:=none this is broadcast from ground truth (odom_tf_sync); "
@@ -226,7 +240,7 @@ def build_groups(bringup_share=""):
               "Simulated pressure/IMU/DVL sensors, dead-reckoning fusion and a "
               "GTSAM iSAM2 pose graph with loop closure.",
               slam, depends=["noise_profile", "loop_closure", "noise_seed",
-                             "map_rebuild"], visible=is_slam),
+                             "map_rebuild", "robot_x", "robot_y"], visible=is_slam),
         Group("eval", "Benchmark + eval",
               "ATE/RPE against ground truth, TUM trajectory export and map "
               "metrics, written to eval/runs/<timestamp>/.",
@@ -237,7 +251,8 @@ def build_groups(bringup_share=""):
               planner, depends=["mode", "motion", "scan_style", "scenario",
                                 "revisit", "slam", "mapper",
                                 "scenario_out_dx", "scenario_out_dy",
-                                "scan_sweep_deg", "safety_start_enabled",
+                                "scan_sweep_deg", "robot_depth_target",
+                                "safety_start_enabled",
                                 "wall_orientation_offset_deg",
                                 "wall_orientation_lookahead_m",
                                 "tsdf_frontier_standoff_m", "wall_standoff",
@@ -728,6 +743,18 @@ def rpy_to_quaternion(roll, pitch, yaw):
             cr * sp * cy + sr * cp * sy,
             cr * cp * sy - sr * sp * cy,
             cr * cp * cy + sr * sp * sy)
+
+
+def quaternion_to_rpy(x, y, z, w):
+    """Quaternion to ZYX intrinsic roll/pitch/yaw, in radians."""
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    sinp = 2.0 * (w * y - z * x)
+    pitch = math.copysign(math.pi / 2.0, sinp) if abs(sinp) >= 1.0 else math.asin(sinp)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return roll, pitch, math.atan2(siny_cosp, cosy_cosp)
 
 
 def venv_env(ws_root):

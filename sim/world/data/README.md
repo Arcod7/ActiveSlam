@@ -31,6 +31,21 @@ along with `texture/br2.png`.
 only one `bootstrap.sh` asks for. The other three are unreferenced: a checkout
 without them is complete, and the simulator never opens them.
 
+## Lightweight launch-time target
+
+`scenario/target.scn.in` is an alternative to the default `waterlinked.scn`.
+`scene:=target` renders it under `/tmp` with `obj_mesh`, `obj_x`, `obj_y`,
+`obj_z`, `obj_scale`, and `obj_roll`, `obj_pitch`, `obj_yaw`. `obj_mesh:=pipe`
+is the lightweight default. Any `.obj` or `.stl` in `data/obj` can instead be
+selected from the launcher TUI (or passed by filename). Meshes are not given
+special placement, scale, or orientation: `obj_*` is exactly what Stonefish
+uses. The initial object pose is `(8, -2, 8)` in `world_ned`; rotations are in
+degrees.
+
+`scene:=waterlinked` remains the default and opens the existing scenario file
+directly; none of the object arguments modify it.  This preserves the baseline
+scene exactly while keeping the large `shipwreck.obj` out of the sonar view.
+
 **Publishing `off_shore_station.obj` is blocked on provenance.** It is the
 environment the demo runs in, so tracking it would make the repo entirely
 self-contained — but redistributing third-party geometry under an unknown

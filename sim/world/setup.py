@@ -10,10 +10,15 @@ package_name = 'world'
 data_files = [
     ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
     ('share/' + package_name, ['package.xml']),
-    ('share/' + package_name + '/scenario', glob.glob('scenario/*.scn')),
+    # ``target.scn.in`` is rendered into /tmp by core.launch.py when the
+    # lightweight target scene is selected.  Install the template alongside
+    # normal scenarios so this also works from an installed workspace.
+    ('share/' + package_name + '/scenario',
+     glob.glob('scenario/*.scn') + glob.glob('scenario/*.scn.in')),
     ('share/' + package_name + '/data/robot', glob.glob('data/robot/*.scn')),
     ('share/' + package_name + '/data/texture', glob.glob('data/texture/*.png')),
-    ('share/' + package_name + '/data/obj', glob.glob('data/obj/*.obj') + glob.glob('data/obj/*.mtl')),
+    ('share/' + package_name + '/data/obj',
+     glob.glob('data/obj/*.obj') + glob.glob('data/obj/*.stl') + glob.glob('data/obj/*.mtl')),
     ('share/' + package_name, ['run.sh']),
 ]
 # Drop any entry whose glob matched nothing — setuptools rejects a

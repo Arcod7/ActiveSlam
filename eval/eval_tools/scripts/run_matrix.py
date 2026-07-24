@@ -6,7 +6,7 @@ frozen motion and process failures, but deliberately does not impose an ATE or
 map-quality threshold.
 
 Not a ROS node / console_script -- a plain script, run directly with python3
-inside the ros2-jazzy distrobox (needs `source install/setup.bash` first, so
+inside the activeslam-jazzy distrobox (needs `source install/setup.bash` first, so
 `eval_tools.plot_results` is importable):
 
   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_full.yaml
@@ -52,7 +52,9 @@ VALID_KEYS = {
     # The motion gate is fail-closed (safety_gate.py start_enabled=False) and
     # zeroes every command until armed — sim batches must opt in explicitly.
     'safety_start_enabled', 'scan_style', 'scan_sweep_deg', 'carve_no_return',
-    'near_cutoff',
+    'near_cutoff', 'scene', 'obj_mesh', 'obj_x', 'obj_y', 'obj_z', 'obj_scale',
+    'obj_roll', 'obj_pitch', 'obj_yaw',
+    'robot_x', 'robot_y', 'robot_z', 'robot_roll', 'robot_pitch', 'robot_yaw', 'depth',
 }
 
 

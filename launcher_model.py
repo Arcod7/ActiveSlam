@@ -20,6 +20,19 @@ LIVE = {
     "wall_path_heading_weight":  ("wall_looking", "path_heading_weight"),
 }
 
+# These object-pose fields are applied through Stonefish's /set_entity_pose
+# service rather than a ROS parameter.  They stay static bodies, preserving
+# Stonefish's optimised collision/sensor path; scale remains launch-time only.
+LIVE_SCENE_POSE = {
+    "obj_x", "obj_y", "obj_z", "obj_roll", "obj_pitch", "obj_yaw",
+}
+
+# Robot pose is read back from Stonefish odometry while it moves and can be
+# applied live through the existing respawn service.
+LIVE_ROBOT_POSE = {
+    "robot_x", "robot_y", "robot_z", "robot_roll", "robot_pitch", "robot_yaw",
+}
+
 
 class Param:
     def __init__(self, id, label, kind, default, section, description,
@@ -41,7 +54,7 @@ class Param:
 
     @property
     def live(self):
-        return self.id in LIVE
+        return self.id in LIVE or self.id in LIVE_SCENE_POSE or self.id in LIVE_ROBOT_POSE
 
     def clamp(self, value):
         if self.lo is not None:
@@ -53,11 +66,13 @@ class Param:
 
 SECTION_TITLES = {
     "primary": "Primary",
+    "scene": "Scene + object",
+    "robot": "Robot pose",
     "frontier": "Frontier exploration",
     "slam": "SLAM / pose source",
     "advanced": "Other",
 }
-SECTION_ORDER = ["primary", "frontier", "slam", "advanced"]
+SECTION_ORDER = ["primary", "scene", "robot", "frontier", "slam", "advanced"]
 
 _frontier = lambda v: v["mode"] == "frontier"
 _slam = lambda v: v["slam"] == "slam"
@@ -91,6 +106,78 @@ PARAMS = [
           "Start RViz. The view is chosen automatically: demo_slam.rviz when "
           "slam is on (drift arrow, error HUD, covariance ellipsoids), "
           "demo_tsdf.rviz for the TSDF surface, otherwise the base view."),
+
+    Param("scene", "Scene", "enum", "waterlinked", "scene",
+          "Stonefish world to launch. waterlinked is the unchanged baseline; "
+          "target contains one selectable static object that can be moved live.",
+          ["waterlinked", "target"],
+          {"waterlinked": "Baseline offshore-station scene.",
+           "target": "One static mesh or built-in pipe for sonar demonstrations."}),
+    Param("obj_mesh", "Object mesh", "enum", "pipe", "scene",
+          "Object to place in the target scene. The launcher scans data/obj "
+          "each time it starts, so newly added .obj and .stl files appear here. pipe is "
+          "a lightweight built-in primitive.",
+          ["pipe"], {"pipe": "Built-in 4 m pipe; fast to load and sonar-visible."},
+          visible=lambda v: v["scene"] == "target"),
+    Param("obj_x", "Object X (m)", "float", 8.0, "scene",
+          "Static object north/X position in world_ned. Changes move the "
+          "object live while Stonefish keeps running.",
+          step=0.5, lo=-100.0, hi=100.0,
+          visible=lambda v: v["scene"] == "target"),
+    Param("obj_y", "Object Y (m)", "float", -2.0, "scene",
+          "Static object east/Y position in world_ned. Live while running.",
+          step=0.5, lo=-100.0, hi=100.0,
+          visible=lambda v: v["scene"] == "target"),
+    Param("obj_z", "Object Z (m)", "float", 8.0, "scene",
+          "Static object down/Z position in world_ned. Live while running.",
+          step=0.5, lo=-100.0, hi=100.0,
+          visible=lambda v: v["scene"] == "target"),
+    Param("obj_scale", "Object scale", "float", 1.0, "scene",
+          "Uniform multiplier for the selected object. Applied when the target "
+          "scene starts; changing it restarts only Stonefish.",
+          step=0.03, lo=0.001, hi=10.0,
+          visible=lambda v: v["scene"] == "target"),
+    Param("obj_roll", "Object roll (deg)", "float", 0.0, "scene",
+          "Static object roll in degrees. Live while running.",
+          step=5.0, lo=-180.0, hi=180.0,
+          visible=lambda v: v["scene"] == "target"),
+    Param("obj_pitch", "Object pitch (deg)", "float", 0.0, "scene",
+          "Static object pitch in degrees. Live while running.",
+          step=5.0, lo=-180.0, hi=180.0,
+          visible=lambda v: v["scene"] == "target"),
+    Param("obj_yaw", "Object yaw (deg)", "float", 0.0, "scene",
+          "Static object yaw in degrees. Live while running.",
+          step=5.0, lo=-180.0, hi=180.0,
+          visible=lambda v: v["scene"] == "target"),
+
+    Param("robot_x", "Robot X (m)", "float", 0.0, "robot",
+          "Robot north/X position in world_ned. Live edits teleport the robot; "
+          "teleop updates this value from Stonefish ground-truth odometry.",
+          step=0.5, lo=-1000.0, hi=1000.0),
+    Param("robot_y", "Robot Y (m)", "float", 0.0, "robot",
+          "Robot east/Y position in world_ned. Live and read back during teleop.",
+          step=0.5, lo=-1000.0, hi=1000.0),
+    Param("robot_z", "Robot Z (m)", "float", 8.0, "robot",
+          "Robot down/Z position in world_ned. Live and read back during teleop.",
+          step=0.5, lo=-1000.0, hi=1000.0),
+    Param("robot_roll", "Robot roll (deg)", "float", 0.0, "robot",
+          "Robot roll. Live and read back during teleop.",
+          step=5.0, lo=-180.0, hi=180.0),
+    Param("robot_pitch", "Robot pitch (deg)", "float", 0.0, "robot",
+          "Robot pitch. Live and read back during teleop.",
+          step=5.0, lo=-180.0, hi=180.0),
+    Param("robot_yaw", "Robot yaw (deg)", "float", 0.0, "robot",
+          "Robot yaw. Live and read back during teleop.",
+          step=5.0, lo=-180.0, hi=180.0),
+    Param("robot_depth_target", "Depth target (m)", "float", 8.0, "robot",
+          "Fixed NED Z/depth that the autonomous path controller holds while "
+          "exploring (positive is below the surface). Changing it restarts only "
+          "the planner. Teleop vertical motion remains manual.",
+          step=0.5, lo=0.0, hi=1000.0),
+    Param("robot_save_pose_on_exit", "Save robot pose on exit", "bool", False, "robot",
+          "When enabled, preserve the robot's final live/teleop pose in config.yaml "
+          "when leaving this control screen. When off, teleop motion is display-only "
+          "and the configured launch pose is kept."),
 
     Param("motion", "Path executor", "enum", "default", "frontier",
           "How the planned path is followed. default drives straight down the "
@@ -250,6 +337,18 @@ PARAMS = [
 
 PARAM_MAP = {p.id: p for p in PARAMS}
 DEFAULTS = {p.id: p.default for p in PARAMS}
+
+
+def configure_object_meshes(meshes):
+    """Populate the TUI's object line from data/obj at launcher startup."""
+    names = sorted({name for name in meshes if isinstance(name, str)
+                    and name.lower().endswith((".obj", ".stl"))})
+    param = PARAM_MAP["obj_mesh"]
+    param.choices = ["pipe", *names]
+    param.choice_help = {
+        "pipe": "Built-in 4 m pipe; fast to load and sonar-visible.",
+        **{name: "Static mesh from sim/world/data/obj." for name in names},
+    }
 
 PRESETS = [
     ("Teleop + OctoMap (default)", {}),

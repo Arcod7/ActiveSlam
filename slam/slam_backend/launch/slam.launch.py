@@ -36,6 +36,14 @@ def generate_launch_description():
         'map_rebuild', default_value='false',
         description='Rebuild the belief TSDF map from corrected keyframe poses after a big loop closure',
     )
+    initial_x_arg = DeclareLaunchArgument(
+        'initial_x', default_value='0.0',
+        description='Initial dead-reckoning X position in world_ned (m)',
+    )
+    initial_y_arg = DeclareLaunchArgument(
+        'initial_y', default_value='0.0',
+        description='Initial dead-reckoning Y position in world_ned (m)',
+    )
 
     pkg_share = FindPackageShare('slam_backend')
     noise_file = PathJoinSubstitution([
@@ -51,6 +59,8 @@ def generate_launch_description():
         launch_arguments={
             'noise_profile': LaunchConfiguration('noise_profile'),
             'noise_seed': LaunchConfiguration('noise_seed'),
+            'initial_x': LaunchConfiguration('initial_x'),
+            'initial_y': LaunchConfiguration('initial_y'),
         }.items(),
     )
 
@@ -68,6 +78,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         noise_profile_arg, loop_closure_arg, noise_seed_arg, map_rebuild_arg,
+        initial_x_arg, initial_y_arg,
         sensors,
         pose_graph_node,
     ])

@@ -13,6 +13,14 @@ def generate_launch_description():
         'noise_seed', default_value='-1',
         description='Override the noise profile seed (-1 = use the profile default)',
     )
+    initial_x_arg = DeclareLaunchArgument(
+        'initial_x', default_value='0.0',
+        description='Initial dead-reckoning X position in world_ned (m)',
+    )
+    initial_y_arg = DeclareLaunchArgument(
+        'initial_y', default_value='0.0',
+        description='Initial dead-reckoning Y position in world_ned (m)',
+    )
 
     pkg_share = FindPackageShare('slam_backend')
     noise_file = PathJoinSubstitution([
@@ -66,11 +74,13 @@ def generate_launch_description():
         name='dead_reckoning',
         parameters=[{
             'noise_profile_path': noise_file,
+            'initial_x': LaunchConfiguration('initial_x'),
+            'initial_y': LaunchConfiguration('initial_y'),
         }],
     )
 
     return LaunchDescription([
-        noise_profile_arg, noise_seed_arg,
+        noise_profile_arg, noise_seed_arg, initial_x_arg, initial_y_arg,
         pressure_node,
         imu_node, compass_node,
         dvl_node,

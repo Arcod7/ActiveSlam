@@ -14,3 +14,7 @@ sim/world/data/obj/br2.obj
 
 # uv virtualenv, when created inside the repo instead of the workspace root
 .venv/
+
+# launcher.py writes its selections here at every run (see save_selection());
+# tracking it would commit one operator's local tuning (object placement etc).
+/config.yaml

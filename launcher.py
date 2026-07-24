@@ -19,6 +19,7 @@ import atexit
 import curses
 import glob
 import json
+import math
 import os
 import signal
 import subprocess
@@ -32,8 +33,10 @@ import launcher_model as model
 
 MIN_TERM_HEIGHT = 24
 MIN_TERM_WIDTH = 80
-SELECTION_FILE = os.path.expanduser("~/.activeslam_launcher.json")
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(REPO_ROOT, "config.yaml")
+# Kept only as a one-time migration source for users of the previous launcher.
+LEGACY_SELECTION_FILE = os.path.expanduser("~/.activeslam_launcher.json")
 LOG_DIR = os.path.join(REPO_ROOT, "logs", "launcher")
 
 C_HEAD, C_ERR, C_INFO, C_OK, C_WARN = 1, 2, 3, 4, 5
@@ -42,18 +45,58 @@ C_HEAD, C_ERR, C_INFO, C_OK, C_WARN = 1, 2, 3, 4, 5
 # --------------------------------------------------------------------------
 # persistence
 
-def load_selection():
+def _load_mapping(path):
+    """Load the launcher config without adding a PyYAML runtime dependency.
+
+    Each generated value is JSON syntax, which is also valid YAML.  Reading
+    JSON first accepts a compact hand-written config too; the small fallback
+    handles the one-key-per-line YAML file produced by save_selection().
+    """
     try:
-        with open(SELECTION_FILE) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
         return None
+    try:
+        value = json.loads(text)
+        return value if isinstance(value, dict) else None
+    except json.JSONDecodeError:
+        pass
+
+    values = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, raw = line.split(":", 1)
+        key, raw = key.strip(), raw.strip()
+        try:
+            values[key] = json.loads(raw)
+        except json.JSONDecodeError:
+            # This makes a simple unquoted string value usable too.
+            values[key] = raw
+    return values or None
+
+
+def load_selection():
+    return _load_mapping(CONFIG_FILE) or _load_mapping(LEGACY_SELECTION_FILE)
 
 
 def save_selection(values):
     try:
-        with open(SELECTION_FILE, "w") as f:
-            json.dump(values, f, indent=2)
+        # JSON scalar syntax makes this a standards-compliant YAML mapping
+        # while keeping the launcher dependency-free.
+        lines = [
+            "# ActiveSlam launcher configuration.",
+            "# Edit while the launcher is stopped; it writes every option here.",
+            "config_version: 1",
+        ]
+        lines.extend(f"{p.id}: {json.dumps(values[p.id])}"
+                     for p in model.PARAMS)
+        temporary = CONFIG_FILE + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(temporary, CONFIG_FILE)
     except OSError:
         pass
 
@@ -62,7 +105,19 @@ def restore(values):
     saved = load_selection()
     if saved:
         for k, v in saved.items():
-            if k in model.PARAM_MAP:
+            p = model.PARAM_MAP.get(k)
+            if p is None:
+                continue
+            if p.kind == "enum" and v in p.choices:
+                values[k] = v
+            elif p.kind == "bool" and isinstance(v, bool):
+                values[k] = v
+            elif p.kind == "int" and isinstance(v, int) and not isinstance(v, bool):
+                values[k] = int(p.clamp(v))
+            elif (p.kind == "float" and isinstance(v, (int, float))
+                  and not isinstance(v, bool) and math.isfinite(v)):
+                values[k] = p.clamp(float(v))
+            elif p.kind == "text" and isinstance(v, str):
                 values[k] = v
 
 
@@ -80,7 +135,24 @@ def ros_env(ws_root):
     """
     env = os.environ.copy()
     env.setdefault("QT_QPA_PLATFORM", "xcb")   # RViz needs xcb on this GPU stack
+    # A newly copied data/obj mesh becomes selectable after restarting the
+    # launcher; it does not need to wait for a package install.
+    source_world = os.path.join(REPO_ROOT, "sim", "world")
+    if os.path.isdir(source_world):
+        env.setdefault("STONEFISH_WORLD_DIR", source_world)
     return env
+
+
+def available_object_meshes():
+    """Names of mesh assets which the TUI may offer in its object line."""
+    obj_dir = os.path.join(REPO_ROOT, "sim", "world", "data", "obj")
+    try:
+        with os.scandir(obj_dir) as entries:
+            return sorted(entry.name for entry in entries
+                          if entry.is_file()
+                          and entry.name.lower().endswith((".obj", ".stl")))
+    except OSError:
+        return []
 
 
 def ros_ready():
@@ -219,6 +291,7 @@ class RosLink:
         self.error = None
         self.gate_state = None
         self.enabled = None
+        self.robot_pose = None
 
     def start(self):
         if self.node:
@@ -226,6 +299,7 @@ class RosLink:
         try:
             import rclpy
             from geometry_msgs.msg import Twist
+            from nav_msgs.msg import Odometry
             from std_msgs.msg import Bool, String
         except Exception as e:
             self.error = f"rclpy unavailable ({e}). Source the workspace first."
@@ -245,6 +319,8 @@ class RosLink:
             self.enable_pub = self.node.create_publisher(Bool, "/motion/enable", 10)
             self.node.create_subscription(
                 String, "/motion/safety_status", self._status_cb, 10)
+            self.node.create_subscription(
+                Odometry, "/StoneFish/Odometry", self._odom_cb, 10)
         except Exception as e:
             self.error = f"could not create launcher node: {e}"
             self.node = None
@@ -253,6 +329,18 @@ class RosLink:
 
     def _status_cb(self, msg):
         self.gate_state = msg.data
+
+    def _odom_cb(self, msg):
+        """Keep the TUI's robot fields aligned with simulation/teleop motion."""
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        rpy = core.quaternion_to_rpy(q.x, q.y, q.z, q.w)
+        self.robot_pose = {
+            "robot_x": p.x, "robot_y": p.y, "robot_z": p.z,
+            "robot_roll": math.degrees(rpy[0]),
+            "robot_pitch": math.degrees(rpy[1]),
+            "robot_yaw": math.degrees(rpy[2]),
+        }
 
     def spin(self):
         if self.node:
@@ -346,6 +434,45 @@ class RosLink:
             return bool(result.success), (result.message or "respawned")
         except Exception as e:
             return False, f"respawn failed: {e}"
+
+    def set_static_entity_pose(self, name, xyz, rpy_degrees, timeout=5.0):
+        """Move a static Stonefish entity without reconstructing the scene."""
+        if not self.start():
+            return False, self.error or "no ROS connection"
+        try:
+            from stonefish_ros2.srv import SetEntityPose
+        except Exception as e:
+            return False, f"stonefish_ros2 srv unavailable: {e}"
+        client = None
+        try:
+            client = self.node.create_client(SetEntityPose, "/set_entity_pose")
+            if not client.wait_for_service(timeout_sec=timeout):
+                return False, "/set_entity_pose did not appear (is the target scene up?)"
+            req = SetEntityPose.Request()
+            req.name = name
+            req.pose.position.x, req.pose.position.y, req.pose.position.z = xyz
+            rpy = tuple(math.radians(angle) for angle in rpy_degrees)
+            q = core.rpy_to_quaternion(*rpy)
+            (req.pose.orientation.x, req.pose.orientation.y,
+             req.pose.orientation.z, req.pose.orientation.w) = q
+            future = client.call_async(req)
+            deadline = time.time() + timeout
+            while time.time() < deadline and not future.done():
+                self.rclpy.spin_once(self.node, timeout_sec=0.05)
+            if not future.done():
+                return False, "moving target timed out"
+            result = future.result()
+            if result is None:
+                return False, "moving target returned no result"
+            return bool(result.success), (result.message or "target moved")
+        except Exception as e:
+            return False, f"moving target failed: {e}"
+        finally:
+            if client is not None:
+                try:
+                    self.node.destroy_client(client)
+                except Exception:
+                    pass
 
     def open_teleop(self):
         """Become a command source. Only valid once the planner is suspended."""
@@ -619,11 +746,65 @@ def control_screen(stdscr, sup, values, link, session):
     # safety gate treats two publishers on /motion/body_command as
     # MULTIPLE_COMMAND_SOURCES and zeroes all motion.
     planner_suspended = False
+    robot_pose_fields = ("robot_x", "robot_y", "robot_z",
+                         "robot_roll", "robot_pitch", "robot_yaw")
+    # This is the deliberately configured launch pose. Odometry updates the
+    # displayed fields continuously, but must not overwrite it unless the
+    # operator explicitly edits a robot field or enables save-on-exit.
+    saved_robot_pose = {key: values[key] for key in robot_pose_fields}
 
     def set_status(msg, kind=C_OK):
         nonlocal status, status_kind
         status = msg
         status_kind = kind
+
+    def save_config():
+        """Persist settings without accidentally saving teleop motion."""
+        persisted = dict(values)
+        if not values["robot_save_pose_on_exit"]:
+            persisted.update(saved_robot_pose)
+        save_selection(persisted)
+
+    def apply_live_change(param, old):
+        """Push a changed live value, restoring it if the simulator rejects it."""
+        nonlocal saved_robot_pose
+        if values[param.id] == old:
+            return
+        if not param.live or not sup.running_ids():
+            if param.id in model.LIVE_ROBOT_POSE:
+                saved_robot_pose = {key: values[key] for key in robot_pose_fields}
+            save_config()
+            return
+        if param.id in model.LIVE:
+            node, pname = model.LIVE[param.id]
+            ok, msg = set_live_param(node, pname, values[param.id])
+        elif param.id in model.LIVE_ROBOT_POSE:
+            if "core" not in sup.running_ids():
+                saved_robot_pose = {key: values[key] for key in robot_pose_fields}
+                save_config()
+                return
+            xyz = (values["robot_x"], values["robot_y"], values["robot_z"])
+            rpy = tuple(math.radians(values[key]) for key in
+                        ("robot_roll", "robot_pitch", "robot_yaw"))
+            ok, msg = link.respawn("bluerov2", xyz, rpy)
+        elif (sup.applied.get("core", {}).get("scene") != "target"
+              or "core" not in sup.running_ids()):
+            # A pose has no live target to apply to yet, but is still the
+            # desired launch-time value and should be retained.
+            save_config()
+            return
+        else:
+            xyz = (values["obj_x"], values["obj_y"], values["obj_z"])
+            rpy = (values["obj_roll"], values["obj_pitch"], values["obj_yaw"])
+            ok, msg = link.set_static_entity_pose("SonarTarget", xyz, rpy)
+        if ok:
+            if param.id in model.LIVE_ROBOT_POSE:
+                saved_robot_pose = {key: values[key] for key in robot_pose_fields}
+            save_config()
+            set_status("live: " + msg, C_OK)
+        else:
+            values[param.id] = old
+            set_status("live failed: " + msg, C_WARN)
 
     while True:
         if not fits(stdscr):
@@ -654,6 +835,9 @@ def control_screen(stdscr, sup, values, link, session):
             # before the first arm/teleop keypress rather than dropping it.
             link.start()
             link.spin()   # pick up /motion/safety_status
+            if link.robot_pose and "core" in running:
+                values.update({key: round(value, 4)
+                               for key, value in link.robot_pose.items()})
         title = "ActiveSlam Control Center"
         put(stdscr, 0, 2, title, curses.A_BOLD)
         state = "RUNNING" if running else "STOPPED"
@@ -819,21 +1003,21 @@ def control_screen(stdscr, sup, values, link, session):
                 values[cur.id] = int(cur.clamp(values[cur.id] + delta * cur.step))
             elif cur.kind == "float":
                 values[cur.id] = round(cur.clamp(values[cur.id] + delta * cur.step), 4)
-            if values[cur.id] != old and cur.live and sup.running_ids():
-                node, pname = model.LIVE[cur.id]
-                ok, msg = set_live_param(node, pname, values[cur.id])
-                set_status(("live: " if ok else "live failed: ") + msg,
-                           C_OK if ok else C_WARN)
+            if values[cur.id] != old:
+                apply_live_change(cur, old)
         elif key in (ord("e"), ord("E")) and cur.kind in ("int", "float", "text"):
             raw = prompt(stdscr, f"{cur.label} =")
             if raw:
                 try:
+                    old = values[cur.id]
                     if cur.kind == "int":
                         values[cur.id] = int(cur.clamp(int(raw)))
                     elif cur.kind == "float":
                         values[cur.id] = cur.clamp(float(raw))
                     else:
                         values[cur.id] = raw
+                    if values[cur.id] != old:
+                        apply_live_change(cur, old)
                 except ValueError:
                     set_status(f"not a valid {cur.kind}: {raw}", C_ERR)
         elif key in (ord("p"), ord("P")):
@@ -841,6 +1025,9 @@ def control_screen(stdscr, sup, values, link, session):
             values.clear()
             values.update(model.DEFAULTS)
             values.update(model.PRESETS[preset_idx][1])
+            if not values["robot_save_pose_on_exit"]:
+                values.update(saved_robot_pose)
+            save_config()
             idx = 0
             set_status(f"Preset: {model.PRESETS[preset_idx][0]}", C_INFO)
         elif key in (ord("a"), ord("A")):
@@ -851,7 +1038,11 @@ def control_screen(stdscr, sup, values, link, session):
                 set_status("Start the stack before resetting", C_WARN)
             elif confirm_reset(stdscr):
                 was_armed = bool(link.enabled)
-                name, xyz, rpy = core.robot_spawn_pose()
+                name = "bluerov2"
+                xyz = tuple(saved_robot_pose[key] for key in
+                            ("robot_x", "robot_y", "robot_z"))
+                rpy = tuple(math.radians(saved_robot_pose[key]) for key in
+                            ("robot_roll", "robot_pitch", "robot_yaw"))
                 # Stop the state-holding groups first so no mapper integrates
                 # scans while the vehicle is being teleported.
                 draw_busy(stdscr, "Reset: stopping mapper/SLAM/planner...")
@@ -912,11 +1103,17 @@ def control_screen(stdscr, sup, values, link, session):
             if sup.running_ids() and last_slam is not None and last_slam != values["slam"]:
                 if not confirm_slam_switch(stdscr):
                     continue
-            save_selection(values)
+            # A live odometry readback must not silently become the next core
+            # launch pose when save-on-exit is off (for example if changing
+            # object scale restarts Stonefish mid-run).
+            launch_values = dict(values)
+            if not values["robot_save_pose_on_exit"]:
+                launch_values.update(saved_robot_pose)
+            save_config()
             draw_busy(stdscr, "Applying...")
             was_armed = bool(link.enabled)
-            session.event(f"apply: {values}")
-            stopped, started, restarted = sup.apply(values, on_event=session.event)
+            session.event(f"apply: {launch_values}")
+            stopped, started, restarted = sup.apply(launch_values, on_event=session.event)
             changed = sorted(set(started + restarted))
             # planner and teleop_support each bring their own motion safety
             # gate, and a fresh gate starts disabled — re-arm so applying an
@@ -929,6 +1126,9 @@ def control_screen(stdscr, sup, values, link, session):
                                     else " — no changes")
                        + (" — motion re-armed" if was_armed and regated else ""), C_OK)
         elif key in (ord("q"), ord("Q"), 27):
+            if values["robot_save_pose_on_exit"]:
+                saved_robot_pose = {key: values[key] for key in robot_pose_fields}
+            save_config()
             return
 
 
@@ -1087,8 +1287,12 @@ def main():
     ws_root = core.find_workspace_root(__file__)
     built = ws_root is not None and os.path.isdir(os.path.join(ws_root, "install", "bringup"))
 
+    model.configure_object_meshes(available_object_meshes())
     values = dict(model.DEFAULTS)
     restore(values)
+    # Create/update the repository-owned config even on the first run, and
+    # migrate old home-directory selections to it transparently.
+    save_selection(values)
 
     session = core.SessionLog(LOG_DIR)
     session.start()
