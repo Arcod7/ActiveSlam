@@ -231,6 +231,18 @@ def generate_launch_description():
         "SLAM frontier run; suspends exploration to revisit mapped areas when "
         "D-optimality exceeds a threshold (set false to disable).",
     )
+    dopt_trigger_arg = DeclareLaunchArgument(
+        "dopt_trigger",
+        default_value="0.02",
+        description="revisit:=true: D-optimality [det(cov_pos)^(1/3)] threshold that "
+        "suspends exploration and drives back to close a loop.",
+    )
+    dopt_resume_arg = DeclareLaunchArgument(
+        "dopt_resume",
+        default_value="0.01",
+        description="revisit:=true: D-optimality threshold below which exploration "
+        "resumes after a revisit.",
+    )
     scenario_arg = DeclareLaunchArgument(
         "scenario",
         default_value="none",
@@ -317,6 +329,16 @@ def generate_launch_description():
     depth_arg = DeclareLaunchArgument(
         "depth", default_value="8.0",
         description="fixed autonomous depth target in NED metres (positive = below surface)",
+    )
+    speed_factor_arg = DeclareLaunchArgument(
+        "speed_factor", default_value="1.0",
+        description="Multiplies commanded surge/sway/heave in both teleop and "
+        "frontier motion (whichever executor is active). Live-tunable.",
+    )
+    turn_factor_arg = DeclareLaunchArgument(
+        "turn_factor", default_value="1.0",
+        description="Multiplies commanded yaw in both teleop and frontier motion "
+        "(whichever executor is active). Live-tunable.",
     )
 
     # tf.launch.py (included further below via octomap/tsdf -> pointcloud -> tf)
@@ -478,12 +500,16 @@ def generate_launch_description():
                     "' == 'slam' else 'false'",
                 ]
             ),
+            "dopt_trigger": LaunchConfiguration("dopt_trigger"),
+            "dopt_resume": LaunchConfiguration("dopt_resume"),
             "scenario": LaunchConfiguration("scenario"),
             "scenario_out_dx": LaunchConfiguration("scenario_out_dx"),
             "scenario_out_dy": LaunchConfiguration("scenario_out_dy"),
             "scan_style": LaunchConfiguration("scan_style"),
             "scan_sweep_deg": LaunchConfiguration("scan_sweep_deg"),
             "depth": LaunchConfiguration("depth"),
+            "speed_factor": LaunchConfiguration("speed_factor"),
+            "turn_factor": LaunchConfiguration("turn_factor"),
             "safety_start_enabled": LaunchConfiguration("safety_start_enabled"),
             "motion": PythonExpression(
                 [
@@ -722,6 +748,8 @@ def generate_launch_description():
             carve_no_return_arg,
             output_dir_arg,
             revisit_arg,
+            dopt_trigger_arg,
+            dopt_resume_arg,
             scenario_arg,
             scenario_out_dx_arg,
             scenario_out_dy_arg,
@@ -743,6 +771,8 @@ def generate_launch_description():
             robot_pitch_arg,
             robot_yaw_arg,
             depth_arg,
+            speed_factor_arg,
+            turn_factor_arg,
             set_use_gt_tf,
             set_sonar_noise,
             # revisit_needs_slam_warning/scenario_needs_frontier_warning read top-level

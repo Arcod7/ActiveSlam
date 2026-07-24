@@ -125,6 +125,16 @@ def generate_launch_description():
         default_value='false',
         description='Start revisit_planner (needs a SLAM pose source, e.g. bringup slam:=slam).',
     )
+    dopt_trigger_arg = DeclareLaunchArgument(
+        'dopt_trigger', default_value='0.02',
+        description=(
+            'D-optimality [det(cov_pos)^(1/3)] threshold that suspends exploration '
+            'and drives back to close a loop.'),
+    )
+    dopt_resume_arg = DeclareLaunchArgument(
+        'dopt_resume', default_value='0.01',
+        description='D-optimality threshold below which exploration resumes after a revisit.',
+    )
     scenario_arg = DeclareLaunchArgument(
         'scenario',
         default_value='none',
@@ -158,6 +168,16 @@ def generate_launch_description():
         'motion', default_value='forward',
         choices=['forward', 'walloriented', 'walllooking'],
         description='Selected motion executor for the planner path.',
+    )
+    speed_factor_arg = DeclareLaunchArgument(
+        'speed_factor', default_value='1.0',
+        description='Multiplies commanded surge/sway/heave for whichever motion '
+                    'executor is active. Same knob as teleop; live-tunable.',
+    )
+    turn_factor_arg = DeclareLaunchArgument(
+        'turn_factor', default_value='1.0',
+        description='Multiplies commanded yaw for whichever motion executor is '
+                    'active. Same knob as teleop; live-tunable.',
     )
     wall_orientation_offset_arg = DeclareLaunchArgument(
         'wall_orientation_offset_deg', default_value='30.0',
@@ -222,12 +242,16 @@ def generate_launch_description():
         mavlink_url_arg,
         ardusub_params_arg,
         revisit_arg,
+        dopt_trigger_arg,
+        dopt_resume_arg,
         scenario_arg,
         scenario_out_dx_arg,
         scenario_out_dy_arg,
         scan_style_arg,
         scan_sweep_deg_arg,
         motion_arg,
+        speed_factor_arg,
+        turn_factor_arg,
         wall_orientation_offset_arg,
         wall_orientation_lookahead_arg,
         tsdf_frontier_standoff_arg,
@@ -308,6 +332,8 @@ def generate_launch_description():
                 'odom_topic': odom_topic,
                 'scan_style': LaunchConfiguration('scan_style'),
                 'scan_sweep_deg': _float_parameter('scan_sweep_deg'),
+                'speed_factor': _float_parameter('speed_factor'),
+                'turn_factor': _float_parameter('turn_factor'),
             }],
             condition=LaunchConfigurationEquals('motion', 'forward'),
         ),
@@ -322,6 +348,8 @@ def generate_launch_description():
                 'look_offset_deg': _float_parameter('wall_orientation_offset_deg'),
                 'lookahead_m': _float_parameter('wall_orientation_lookahead_m'),
                 'map_points_topic': LaunchConfiguration('wall_points_topic'),
+                'speed_factor': _float_parameter('speed_factor'),
+                'turn_factor': _float_parameter('turn_factor'),
             }],
             condition=LaunchConfigurationEquals('motion', 'walloriented'),
         ),
@@ -341,6 +369,8 @@ def generate_launch_description():
                 'path_look_offset_deg': _float_parameter('wall_path_look_offset_deg'),
                 'wall_normal_offset_deg': _float_parameter('wall_normal_offset_deg'),
                 'path_heading_weight': _float_parameter('wall_path_heading_weight'),
+                'speed_factor': _float_parameter('speed_factor'),
+                'turn_factor': _float_parameter('turn_factor'),
             }],
             condition=LaunchConfigurationEquals('motion', 'walllooking'),
         ),
@@ -349,7 +379,11 @@ def generate_launch_description():
             executable='revisit_planner',
             name='revisit_planner',
             output='screen',
-            parameters=[{'odom_topic': odom_topic}],
+            parameters=[{
+                'odom_topic': odom_topic,
+                'dopt_trigger': _float_parameter('dopt_trigger'),
+                'dopt_resume': _float_parameter('dopt_resume'),
+            }],
             condition=IfCondition(LaunchConfiguration('revisit')),
         ),
         Node(

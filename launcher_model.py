@@ -10,6 +10,8 @@ declared arguments without a terminal. Pure standard library.
 # change can be pushed with `ros2 param set` instead of restarting the group.
 # (node basename, node parameter name)
 LIVE = {
+    "dopt_trigger":               ("revisit_planner", "dopt_trigger"),
+    "dopt_resume":                ("revisit_planner", "dopt_resume"),
     "wall_standoff":             ("wall_looking", "standoff_m"),
     "wall_switch_goal_distance": ("wall_looking", "switch_goal_distance_m"),
     "wall_switch_scan_angle":    ("wall_looking", "switch_scan_angle_rad"),
@@ -33,6 +35,18 @@ LIVE_ROBOT_POSE = {
     "robot_x", "robot_y", "robot_z", "robot_roll", "robot_pitch", "robot_yaw",
 }
 
+# speed_factor/turn_factor apply in both teleop (this process, no ROS param
+# involved) and frontier mode — but in frontier mode the live-tunable node
+# depends on which motion executor is actually running, so this can't be a
+# fixed (node, param) pair like LIVE. control_screen resolves the node name
+# from this map before pushing the value with ros2 param set.
+LIVE_SPEED_TURN = {"speed_factor", "turn_factor"}
+MOTION_EXECUTOR_NODE = {
+    "default":      "waypoint_controller",
+    "walloriented": "wall_oriented_controller",
+    "walllooking":  "wall_looking",
+}
+
 
 class Param:
     def __init__(self, id, label, kind, default, section, description,
@@ -54,7 +68,8 @@ class Param:
 
     @property
     def live(self):
-        return self.id in LIVE or self.id in LIVE_SCENE_POSE or self.id in LIVE_ROBOT_POSE
+        return (self.id in LIVE or self.id in LIVE_SCENE_POSE
+                or self.id in LIVE_ROBOT_POSE or self.id in LIVE_SPEED_TURN)
 
     def clamp(self, value):
         if self.lo is not None:
@@ -174,6 +189,17 @@ PARAMS = [
           "exploring (positive is below the surface). Changing it restarts only "
           "the planner. Teleop vertical motion remains manual.",
           step=0.5, lo=0.0, hi=1000.0),
+    Param("speed_factor", "Speed factor", "float", 1.0, "robot",
+          "Multiplies forward/strafe/vertical motion, in teleop (W/S/Q/E/Space/X) "
+          "and in frontier mode (whichever motion executor is driving). Commands "
+          "saturate at the safety gate's +-1.0 limit, so above roughly 1.1 this "
+          "stops making the vehicle faster. Live, no restart.",
+          step=0.25, lo=0.1, hi=5.0),
+    Param("turn_factor", "Turn factor", "float", 1.0, "robot",
+          "Multiplies yaw, in teleop (A/D) and in frontier mode (whichever motion "
+          "executor is driving), independent of the speed factor. Also saturates "
+          "at the safety gate's +-1.0 limit (roughly 6.7x). Live, no restart.",
+          step=0.25, lo=0.1, hi=5.0),
     Param("robot_save_pose_on_exit", "Save robot pose on exit", "bool", False, "robot",
           "When enabled, preserve the robot's final live/teleop pose in config.yaml "
           "when leaving this control screen. When off, teleop motion is display-only "
@@ -245,6 +271,19 @@ PARAMS = [
           "covariance (D-optimality) crosses a threshold, to force a loop "
           "closure. This is the active part of active SLAM.",
           visible=lambda v: _slam(v) and _frontier(v)),
+    Param("dopt_trigger", "D-opt trigger threshold", "float", 0.02, "slam",
+          "D-optimality [det(cov_pos)^(1/3)] level that suspends exploration and "
+          "drives back to close a loop. Lower triggers revisit sooner (more "
+          "cautious); higher lets more drift accumulate before correcting. "
+          "Live-tunable while running.",
+          advanced=True, step=0.005, lo=0.0, hi=1.0,
+          visible=lambda v: _slam(v) and _frontier(v) and v["revisit"]),
+    Param("dopt_resume", "D-opt resume threshold", "float", 0.01, "slam",
+          "D-optimality level below which exploration resumes after a revisit. "
+          "Must stay below the trigger threshold or revisit will not exit. "
+          "Live-tunable while running.",
+          advanced=True, step=0.005, lo=0.0, hi=1.0,
+          visible=lambda v: _slam(v) and _frontier(v) and v["revisit"]),
     Param("map_rebuild", "Rebuild map on closure", "bool", False, "slam",
           "After a large loop closure, reset the TSDF and re-integrate every "
           "keyframe at its corrected pose, so the map geometry is fixed too "

@@ -282,6 +282,11 @@ class RosLink:
     """
 
     STEP = 0.9
+    # Mirrors safety_gate.py's max_abs_command default (1.0): the gate rejects
+    # (and latches INVALID_COMMAND on) any component outside this range, so a
+    # speed_factor/turn_factor above ~1.1x/~6.7x must saturate here rather than
+    # publish an out-of-range command.
+    MAX_ABS_COMMAND = 1.0
 
     def __init__(self):
         self.node = None
@@ -292,6 +297,11 @@ class RosLink:
         self.gate_state = None
         self.enabled = None
         self.robot_pose = None
+        # Synced from values["speed_factor"/"turn_factor"] every control_screen
+        # tick; multiply STEP so runs can be piloted faster without touching
+        # /motion/body_command's magnitude elsewhere.
+        self.speed_factor = 1.0
+        self.turn_factor = 1.0
 
     def start(self):
         if self.node:
@@ -502,14 +512,16 @@ class RosLink:
         """Mirrors launch_tools/keyboard_control.py so the keys match."""
         if not self.pub:
             return
+        cap = self.MAX_ABS_COMMAND
+        step = max(-cap, min(cap, self.STEP * self.speed_factor))
+        turn = max(-cap, min(cap, (self.STEP / 6) * self.turn_factor))
         f = s = y = v = 0.0
-        step = self.STEP
         if key == "w":   f = step
         elif key == "s": f = -step
         elif key == "q": s = -step
         elif key == "e": s = step
-        elif key == "a": y = -step / 6
-        elif key == "d": y = step / 6
+        elif key == "a": y = -turn
+        elif key == "d": y = turn
         elif key == " ": v = step
         elif key == "x": v = -step
         msg = self.Twist()
@@ -787,6 +799,15 @@ def control_screen(stdscr, sup, values, link, session):
             rpy = tuple(math.radians(values[key]) for key in
                         ("robot_roll", "robot_pitch", "robot_yaw"))
             ok, msg = link.respawn("bluerov2", xyz, rpy)
+        elif param.id in model.LIVE_SPEED_TURN:
+            # Teleop reads link.speed_factor/turn_factor straight from `values`
+            # every tick — nothing to push. Only a running frontier motion
+            # executor needs an explicit ros2 param set.
+            if values["mode"] != "frontier" or "planner" not in sup.running_ids():
+                save_config()
+                return
+            node = model.MOTION_EXECUTOR_NODE[values["motion"]]
+            ok, msg = set_live_param(node, param.id, values[param.id])
         elif (sup.applied.get("core", {}).get("scene") != "target"
               or "core" not in sup.running_ids()):
             # A pose has no live target to apply to yet, but is still the
@@ -818,6 +839,9 @@ def control_screen(stdscr, sup, values, link, session):
             items = visible_params(values, True)
         idx = max(0, min(idx, len(items) - 1))
         cur = items[idx]
+
+        link.speed_factor = values["speed_factor"]
+        link.turn_factor = values["turn_factor"]
 
         stdscr.erase()
         h, w = stdscr.getmaxyx()

@@ -119,6 +119,8 @@ class WallLooking(Node):
         self.declare_parameter('path_topic', '/frontier_slam/path')
         self.declare_parameter('status_topic', '/motion/status')
         self.declare_parameter('command_topic', '/motion/body_command')
+        self.declare_parameter('speed_factor', 1.0)
+        self.declare_parameter('turn_factor', 1.0)
 
         self._standoff   = float(self.get_parameter('standoff_m').value)
         self._tan_speed  = float(self.get_parameter('tangent_speed').value)
@@ -553,12 +555,22 @@ class WallLooking(Node):
         depth_err = self._pose[2] - self._depth_setpoint    # +ve = too deep
         return float(np.clip(-self.KP_HEAVE * depth_err, -1.0, 1.0))
 
+    # Matches safety_gate.py's max_abs_command default (1.0): the gate rejects
+    # (and latches INVALID_COMMAND on) any out-of-range component, so a
+    # speed_factor/turn_factor above 1x must saturate here, not there.
+    MAX_ABS_COMMAND = 1.0
+
     def _send_thrust(self, surge: float, yaw: float, heave: float, sway: float) -> None:
+        """Single publish choke point — applies the operator speed/turn factors
+        (live-tunable from the launcher TUI) uniformly to every caller."""
+        speed_factor = float(self.get_parameter('speed_factor').value)
+        turn_factor = float(self.get_parameter('turn_factor').value)
+        cap = self.MAX_ABS_COMMAND
         msg = Twist()
-        msg.linear.x = float(surge)
-        msg.linear.y = float(sway)
-        msg.linear.z = float(heave)
-        msg.angular.z = float(yaw)
+        msg.linear.x = float(np.clip(surge * speed_factor, -cap, cap))
+        msg.linear.y = float(np.clip(sway * speed_factor, -cap, cap))
+        msg.linear.z = float(np.clip(heave * speed_factor, -cap, cap))
+        msg.angular.z = float(np.clip(yaw * turn_factor, -cap, cap))
         self._command_pub.publish(msg)
 
     def _write_csv(self, surge, sway, yaw_cmd, heave, event,
