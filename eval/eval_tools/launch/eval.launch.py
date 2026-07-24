@@ -53,7 +53,24 @@ def _launch_eval_nodes(context, *args, **kwargs):
         }],
     )
 
-    return [benchmark_node, map_metrics_node]
+    # The gt map mirrors the belief backend (gt_map.launch.py), so a gt octomap
+    # to snapshot exists only when mapper:=octomap; under tsdf the belief
+    # octomap still runs as the frontier planning map and is worth keeping.
+    mapper = LaunchConfiguration('mapper').perform(context)
+    gt_octomap_service = '/gt/octomap_binary' if mapper == 'octomap' else ''
+    map_saver_node = Node(
+        package='eval_tools',
+        executable='map_saver',
+        name='map_saver',
+        output='screen',
+        parameters=[{
+            'output_dir': output_dir,
+            'mapper': LaunchConfiguration('mapper'),
+            'gt_octomap_service': gt_octomap_service,
+        }],
+    )
+
+    return [benchmark_node, map_metrics_node, map_saver_node]
 
 
 def generate_launch_description():
