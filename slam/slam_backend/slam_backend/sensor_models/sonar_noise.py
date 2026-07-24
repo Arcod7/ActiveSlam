@@ -22,8 +22,7 @@ Organized-image stage (needs the 2D beam layout; skipped for unorganized clouds)
      weak, since the device reports whichever echo is strongest
 
 Per-point stage, for each finite point with depth_min < range < NO_RETURN_RANGE_M
-(points at/beyond the sensor's max range are "no-return" readings, left untouched
-so downstream max-range filters keep discarding them):
+(points at/beyond the sensor's max range are no-return readings, emitted as NaN):
   1. range noise along the viewing ray:   r += N(0, sigma0 + k*r)
   2. multipath outliers (late arrivals):  r += U(outlier_min, outlier_max)
   3. speed-of-sound scale error:          r *= 1 + eps, one draw per run
@@ -63,7 +62,7 @@ from sensor_msgs.msg import PointCloud2
 from slam_backend.sensor_models.noise_profiles import load_noise_profile, resolve_seed, NoiseProfile
 
 DEPTH_MIN_M = 0.2
-NO_RETURN_RANGE_M = 14.9   # points at/beyond this are left completely untouched
+NO_RETURN_RANGE_M = 14.9   # points at/beyond this receive no noise model
 MAX_RANGE_M = 15.0
 MULTIPATH_STEPS = 24       # screen-space march resolution
 MULTIPATH_TMIN_M = 0.15    # first march step, clear of the origin surface
@@ -71,6 +70,12 @@ MULTIPATH_TMIN_M = 0.15    # first march step, clear of the origin surface
 # Per-sensor offset added to a shared seed so co-launched sims (identical
 # profile.seed) don't draw identical RNG streams (imu=+1, dvl=+2, pressure=+3).
 SEED_OFFSET = 4
+
+
+def within_sonar_range(xyz: np.ndarray, max_range_m: float = MAX_RANGE_M) -> np.ndarray:
+    """Mask finite point-cloud samples within the sonar's radial beam range."""
+    xyz = np.asarray(xyz)
+    return np.isfinite(xyz).all(axis=-1) & (np.linalg.norm(xyz, axis=-1) < max_range_m)
 
 
 def correlated_field(rng, shape, corr_length_px, rho_time=0.0, prev_white=None):
@@ -339,13 +344,25 @@ class SonarNoiseNode(Node):
             f"(passthrough={self._passthrough})")
 
     def _cloud_cb(self, msg: PointCloud2) -> None:
-        if self._passthrough or msg.point_step < 12 or msg.width * msg.height == 0:
+        if msg.point_step < 12 or msg.width * msg.height == 0:
             self._pub.publish(msg)
             return
 
         floats_per_point = msg.point_step // 4
         data = np.frombuffer(msg.data, dtype=np.float32).reshape(-1, floats_per_point).copy()
         xyz = data[:, :3].astype(np.float64)
+
+        # The depth-camera proxy's linear Z clip can yield off-axis points
+        # farther than 15 m. A real Sonar 3D-15 has a 15 m *radial* acoustic
+        # range, so turn these no-return beams into NaNs before publishing
+        # /cloud_in — even when the noise model is in passthrough mode.
+        in_range = within_sonar_range(xyz)
+        xyz[~in_range] = np.nan
+        if self._passthrough:
+            data[:, :3] = xyz.astype(np.float32)
+            msg.data = data.tobytes()
+            self._pub.publish(msg)
+            return
 
         r = np.linalg.norm(xyz, axis=1)
         valid = np.isfinite(r) & (r > DEPTH_MIN_M) & (r < NO_RETURN_RANGE_M)

@@ -78,11 +78,9 @@ class TSDFMapper(Node):
         self.declare_parameter('normal_every',     10)
         self.declare_parameter('max_voxels_viz',   40_000)
         self.declare_parameter('show_free_voxels', False)
-        # Discard points beyond this range before integration.
-        # Depth sensors return valid readings at their physical maximum range
-        # when looking into open water ("no return").  Without this filter,
-        # every direction the camera sweeps produces occupied voxels at max
-        # range, creating ghost geometry during rotation.
+        # Discard points beyond the simulated Sonar 3D-15 beam range before
+        # integration. The depth-camera proxy may produce farther off-axis
+        # points, but the physical Water Linked sensor has a 15 m radial range.
         self.declare_parameter('max_range_m', 15.0)
         # Free-space carving for no-return pixels: synthesize a pseudo-point
         # past the sensor max so space_carving frees the traversed voxels.
@@ -290,8 +288,8 @@ class TSDFMapper(Node):
         if pts_cam is None or len(pts_cam) == 0:
             return False
 
-        # Range filter — drop points at/beyond the sensor's physical max range.
-        # Those are "no-return" readings (open water), not real surfaces.
+        # Filter by radial beam range. This keeps TSDF aligned with /cloud_in
+        # and the real Sonar 3D-15's 15 m acoustic range.
         pts_cam = pts_cam[np.linalg.norm(pts_cam, axis=1) < self._max_range]
 
         # Appended after the range filter — these sit past max_range by design.
@@ -504,7 +502,7 @@ class TSDFMapper(Node):
             np.log1p(np.clip(w_vals - self._voxel_min_weight, 0.0, None))
             / np.log1p(w_max - self._voxel_min_weight), 0.0, 1.0)
         band      = self._voxel_max_d + self._trunc
-        wall_conf = np.clip((self._voxel_max_d - d_vals) / max(band, 1e-6), 0.0, 1.0)
+        wall_conf = np.clip((self._voxel_max_d - d_vals) / max(band, 1e-6), 0.6, 1.0)
         colors = _confidence_colormap(w_norm, saturation=wall_conf)
 
         m = Marker()

@@ -9,10 +9,20 @@ from slam_backend.sensor_models.noise_profiles import SonarNoise, load_noise_pro
 from slam_backend.sensor_models.sonar_noise import (
     _fit_pinhole, apply_sonar_noise, correlated_field, incidence_cosine, multipath_range,
     pixel_angular_spacing, reverberation_range, strongest_reflection_range,
-    surface_normals, DEPTH_MIN_M, MAX_RANGE_M)
+    surface_normals, within_sonar_range, DEPTH_MIN_M, MAX_RANGE_M)
 
 CONFIG_DIR = Path(__file__).parents[1] / 'config'
 SHAPE = (64, 128)
+
+
+def test_sonar_range_is_radial_across_its_whole_field_of_view():
+    points = np.array([
+        [14.9, 0.0, 0.0],
+        [14.0, 0.0, 14.0],  # 19.8 m slant range: outside a 15 m acoustic beam
+        [0.0, 0.0, 15.0],
+        [np.nan, 0.0, 3.0],
+    ])
+    assert within_sonar_range(points).tolist() == [True, False, False, False]
 
 
 def pinhole_grid(shape=SHAPE, hfov_deg=90.0, distance=4.0):

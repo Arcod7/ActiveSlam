@@ -10,12 +10,11 @@ itself to restart the cloud/noise layer without dropping the simulator.
 
 NaN replacement (REP 118) is handled inside stonefish_ros2 at publish time.
 
-sonar_noise always relays /cloud_in_raw to /cloud_in. sonar_noise:=true (set by
-demo.launch.py under slam:=slam) decides only whether it applies a datasheet-
-grounded model standing in for a real WaterLinked Sonar 3D-15, or passes the
-cloud through untouched (see slam_backend's sonar_noise.py). The relay also
-owns /cloud_in's QoS, which is what lets every consumer connect on Humble —
-see pointcloud_only.launch.py.
+sonar_noise always relays /cloud_in_raw to /cloud_in. In both modes it
+range-gates /cloud_in to the Sonar 3D-15's 15 m radial beam range;
+sonar_noise:=true (set by demo.launch.py under slam:=slam) additionally applies
+the datasheet-grounded model. The relay also owns /cloud_in's QoS, which is
+what lets every consumer connect on Humble — see pointcloud_only.launch.py.
 
 Test:
   ros2 topic echo /cloud_in --no-arr

@@ -14,9 +14,10 @@ noise_profile change, or slam:=slam toggling sonar_noise on) without
 restarting the simulator. pointcloud.launch.py = tf.launch.py + this file.
 
 The topology is the same either way; sonar_noise:=true (set by demo.launch.py
-under slam:=slam) decides only whether the relay applies a datasheet-grounded
-model standing in for a real WaterLinked Sonar 3D-15, or passes the cloud
-through untouched (see slam_backend's sonar_noise.py).
+under slam:=slam) decides whether the relay applies a datasheet-grounded model
+standing in for a real WaterLinked Sonar 3D-15. In both modes it range-gates
+/cloud_in to the sonar's 15 m radial beam range; /cloud_in_raw stays available
+as the unfiltered depth-camera diagnostic stream (see sonar_noise.py).
 
 It relays even with the model off because it is also what publishes /cloud_in
 on a QoS the consumers can match. depth_image_proc offers its cloud as
