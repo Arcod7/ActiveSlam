@@ -1,0 +1,64 @@
+# Follow-up to matrix_active_slam_ablation.yaml (2026-07-24): that batch found
+# revisit_count=0 and rebuild_count=0 in every run -- loop closure alone kept
+# D-optimality around ~0.006, below the dopt_trigger:0.01 default, so the
+# revisit planner never fired and lc/lc_revisit/full were indistinguishable
+# (seed noise, not mechanism). This batch lowers the trigger below that
+# observed ceiling to actually exercise revisit.
+#
+# Same scene/motion/noise as the ablation batch. Only revisit is varied:
+#   lc          loop closure alone (repeats the earlier baseline for direct comparison)
+#   lc_revisit  + uncertainty-triggered revisit, dopt_trigger:0.004 (below the ~0.006 ceiling)
+#
+# 2 configs x 3 seeds = 6 runs x 25 min ~= 2.6 h.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py \
+#       eval/eval_tools/config/matrix_revisit_dopt004.yaml
+batch_name: revisit_dopt004
+duration_s: 1500
+settle_s: 15
+seeds: [101, 102, 103]
+
+common_args:
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  mapper: tsdf
+  rviz: 'false'
+  scene: target
+  obj_mesh: off_shore_station.obj
+  obj_x: 15.55
+  obj_y: -7.62
+  obj_z: 2.88
+  obj_scale: 0.1501
+  obj_roll: -90.0
+  obj_pitch: 0.0
+  obj_yaw: 0.0
+  robot_x: 1.9491
+  robot_y: -5.1802
+  robot_z: 2.9818
+  robot_roll: -0.068
+  robot_pitch: 0.3095
+  robot_yaw: 16.5156
+  depth: 3.0
+  motion: walloriented
+  scan_style: sweep
+  scan_sweep_deg: 180.0
+  speed_factor: 3.0
+  turn_factor: 1.0
+  noise_profile: realistic
+  near_cutoff: 1.5
+  wall_orientation_offset_deg: 60.0
+  wall_orientation_lookahead_m: 3.0
+  tsdf_frontier_standoff_m: 1.0
+  loop_closure: 'true'
+  map_rebuild: 'false'
+  # Below the ~0.006 ceiling observed with loop_closure alone; resume at half
+  # trigger, same ratio as the framework default (0.02/0.01).
+  dopt_trigger: 0.004
+  dopt_resume: 0.002
+
+runs:
+  - name: lc
+    args: {revisit: 'false'}
+  - name: lc_revisit
+    args: {revisit: 'true'}

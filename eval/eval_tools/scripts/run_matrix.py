@@ -55,6 +55,11 @@ VALID_KEYS = {
     'near_cutoff', 'scene', 'obj_mesh', 'obj_x', 'obj_y', 'obj_z', 'obj_scale',
     'obj_roll', 'obj_pitch', 'obj_yaw',
     'robot_x', 'robot_y', 'robot_z', 'robot_roll', 'robot_pitch', 'robot_yaw', 'depth',
+    # Motion tuning and the revisit trigger, so a batch can pin the same demo
+    # config an interactive session was tuned to.
+    'speed_factor', 'turn_factor', 'dopt_trigger', 'dopt_resume',
+    'wall_orientation_offset_deg', 'wall_orientation_lookahead_m',
+    'tsdf_frontier_standoff_m',
 }
 
 
