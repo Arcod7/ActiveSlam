@@ -41,6 +41,9 @@ can set that variable through the launch file's environment. Earlier
 revisions of this file and the roadmap called FPFH blocked on aarch64; that
 was true before the submodule build landed and is no longer accurate.
 
+**Being attempted in the 2026-07-23 → 26 push** (`docs/plans/tracks/track_6_fpfh_saliency.md`).
+Move this entry to "done" or back to future work once that track resolves.
+
 ## Per-candidate uncertainty propagation
 
 Revisit triggering reacts to the live D-optimality scalar. Projecting
@@ -54,6 +57,10 @@ Frontier extraction runs on the 2-D projected OctoMap; under `mapper:=tsdf`
 a second, planning-only OctoMap instance provides that map. Detecting
 frontiers directly on TSDF voxels would retire the dual-map workaround and
 extend exploration to fully 3-D structure.
+
+**Being attempted in the 2026-07-23 → 26 push** (`docs/plans/tracks/track_5_exploration.md`),
+together with info-gain exploration of low-information TSDF regions once
+frontiers are exhausted. Move to "done" or back here once that track resolves.
 
 ## Frontier route ordering
 

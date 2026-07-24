@@ -1535,7 +1535,7 @@ verified.
 `slam_ws`/`stonefish_original` — `colcon build` from the new workspace, then exercise the
 actual sense→map loop rather than just checking the code compiles.
 
-**Verified** (inside the `ros2-jazzy` distrobox container):
+**Verified** (inside the `activeslam-jazzy` distrobox container):
 - `colcon build --symlink-install` from `~/delivery/ros_ws`: 4/4 packages, clean (only
   benign C++17/C++14 ABI-change compiler notes from `stonefish_ros2`, no errors).
 - `stonefish_simulator` loads all meshes from the new `sim/world/data/obj/` path

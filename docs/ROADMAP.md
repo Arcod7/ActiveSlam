@@ -48,19 +48,33 @@ what the remaining schedule looks like:
   the sim's thruster calibration was corrected by ~11x. Any velocity or timing
   figure recorded before 2026-07-21 is not comparable with later runs.
 
-**Remaining before the 2026-08-01 code freeze**, in priority order:
+**Remaining before the 2026-08-01 code freeze** is organised as a **4-day
+parallel push (2026-07-23 → 26)** across seven file-disjoint tracks — full
+spec in `docs/plans/plan.md`, one file per track in `docs/plans/tracks/`. In
+priority order:
 
-1. Re-run the benchmark matrix on the corrected baseline — the numbers the
-   dissertation quotes must all come from after the calibration fix.
-2. Presentation demo scene. The shipwreck-world attempt is parked: the 289 MB /
-   2.3M-face mesh stalls Stonefish once it enters the sonar's view, so it needs
-   a decimated asset or a different target object. A reference-trajectory
-   mission (follow a known loop, break off to close a loop when uncertain) is
-   the intended replacement — see `docs/plans/plan.md` Batch 8.
-3. Wall-guided executors stay out of the evaluated matrix.
-   `motion:=walloriented` is supported; `motion:=walllooking` is work in
-   progress and carries the loop-closure-inversion finding
-   (`docs/FUTURE_WORK.md`).
+1. **Spine (priority #1):** re-run the benchmark matrix on the corrected
+   baseline — every number the dissertation quotes must come from after the
+   2026-07-21 calibration fix. Includes the loop-closure A/B (`matrix_lc_ab`)
+   and a fresh-machine reproducibility install.
+2. **Reference-trajectory mission** (Track 1) — follow a known loop / go to a
+   point, break off to close a loop when uncertain, resume the path. Replaces
+   the parked shipwreck demo as the presentation centrepiece.
+3. **Demo scene** (Track 4) — TUI scene selection with per-object xyz / scale /
+   roll-pitch-yaw at launch (not the 289 MB wreck, which stalls Stonefish in
+   the sonar's view; not a live editor).
+4. **Control-centre TUI + RViz** (Tracks 2, 3) — live metrics + robot-state
+   dashboard, camera-follow, param exposure.
+5. **Three algorithmic features in parallel** (Tracks 5, 6): 3-D frontier on
+   the TSDF → info-gain exploration of low-information regions; and FPFH submap
+   saliency for revisit target selection (now unblocked on aarch64).
+6. **Validation** (Track 7) — rosbag vs noise-model, a localisation-uncertainty
+   measure beyond D-optimality, an architecture-modularity review.
+
+Out of this window: `motion:=walllooking` stays work-in-progress
+(loop-closure-inversion finding, `docs/FUTURE_WORK.md`) and out of the evaluated
+matrix; `motion:=walloriented` is supported. The `wall_looking` motion-only
+reshape and the sonar/camera fusion build are deferred past the freeze.
 
 ---
 
@@ -133,10 +147,11 @@ Goal: choose actions using uncertainty, not just information gain.
       the live value instead (Phase 20).
 - [x] **Utility trade-off + decision rule**: `revisit:=true` breaks off exploration when
       D-optimality crosses a threshold, drives to a previously-seen target, and resumes.
-- [ ] **Submap saliency v0** (FPFH → k-means → idf rarity): not built. Target scoring uses
-      keyframe density. Descoped for time — *not* platform-blocked: the `external/open3d`
-      submodule builds on aarch64 and `compute_fpfh_feature` runs once
-      `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2097152` is set.
+- [~] **Submap saliency v0** (FPFH → k-means → idf rarity): **now in scope** for the
+      4-day push (Track 6). Was thought platform-blocked; it is not — the
+      `external/open3d` submodule builds on aarch64 and `compute_fpfh_feature` runs
+      once `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2097152` is set. Target
+      scoring still uses keyframe density until Track 6 lands.
 
 Done when: the robot autonomously breaks off exploration to close a loop and the logged
 uncertainty drops afterward. — **Met** (Phase 20): forced-trigger run completes the full
