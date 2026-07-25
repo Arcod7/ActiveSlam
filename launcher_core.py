@@ -24,7 +24,7 @@ import time
 
 # Order matters: groups are started top-down and stopped bottom-up.
 GROUP_ORDER = ["core", "tf", "cloud", "mapper", "gt_map", "slam", "eval",
-               "planner", "teleop_support", "rviz"]
+               "planner", "teleop_support", "rviz", "rqt"]
 
 # Groups that accumulate state across a run (maps, pose graph, eval output,
 # planner blacklists). A reset restarts exactly these; the simulator, TF, point
@@ -116,7 +116,8 @@ def build_groups(bringup_share=""):
                  f"robot_z:={v['robot_z']}",
                  f"robot_roll:={v['robot_roll']}",
                  f"robot_pitch:={v['robot_pitch']}",
-                 f"robot_yaw:={v['robot_yaw']}"]]
+                 f"robot_yaw:={v['robot_yaw']}",
+                 f"thrust_boost:={'true' if v['thrust_boost'] else 'false'}"]]
 
     def tf(v):
         use_gt = "false" if v["slam"] == "slam" else "true"
@@ -134,21 +135,16 @@ def build_groups(bringup_share=""):
                  f"near_cutoff:={cut}"]]
 
     def mapper(v):
-        cmds = [["ros2", "launch", "stonefish_groundtruth_mapping",
+        # Under mode:=frontier mapper:=tsdf the mapper derives /projected_map
+        # from its own grid (banded around the cruise depth), so frontier
+        # detection + A* share the belief map — no separate octomap_server.
+        publish_projected = v["mode"] == "frontier" and v["mapper"] == "tsdf"
+        return [["ros2", "launch", "stonefish_groundtruth_mapping",
                  "mapper_only.launch.py",
                  f"mapper:={v['mapper']}",
-                 f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}"]]
-        # demo.launch.py also runs octomap_server as the frontier planning map
-        # when mapper:=tsdf, since frontier detection needs /projected_map.
-        if v["mode"] == "frontier" and v["mapper"] == "tsdf":
-            cmds.append(["ros2", "run", "octomap_server", "octomap_server_node",
-                         "--ros-args",
-                         "-r", "cloud_in:=/cloud_in",
-                         "-p", "frame_id:=world_ned",
-                         "-p", "resolution:=0.2",
-                         "-p", "sensor_model/max_range:=15.0",
-                         "-p", "latch:=true"])
-        return cmds
+                 f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}",
+                 f"publish_projected_map:={'true' if publish_projected else 'false'}",
+                 f"target_depth_m:={v['robot_depth_target']}"]]
 
     def gt_map(v):
         return [["ros2", "launch", "stonefish_groundtruth_mapping",
@@ -209,6 +205,9 @@ def build_groups(bringup_share=""):
     def rviz(v):
         return [["rviz2", "-d", _rviz_config(v, bringup_share)]]
 
+    def rqt(v):
+        return [["rqt"]]
+
     is_slam = lambda v: v["slam"] == "slam"
 
     return [
@@ -216,7 +215,7 @@ def build_groups(bringup_share=""):
               "Stonefish underwater simulator: BlueROV2 + scene meshes, and the "
               "depth camera standing in for a wide-FoV 3D sonar. Expensive to "
               "start, so only scene/object selection and object scale restart it.",
-              core, depends=["scene", "obj_mesh", "obj_scale"]),
+              core, depends=["scene", "obj_mesh", "obj_scale", "thrust_boost"]),
         Group("tf", "TF chain",
               "world_ned -> bluerov2/base_link -> bluerov2/Dcam. Under "
               "slam:=none this is broadcast from ground truth (odom_tf_sync); "
@@ -273,6 +272,12 @@ def build_groups(bringup_share=""):
               visible=lambda v: bool(v["rviz"]),
               env_extra=({"LD_PRELOAD": _preload} if (_preload := octomap_preload_path())
                          else {}),
+              graceful=False),
+        Group("rqt", "rqt",
+              "Introspection GUI: node graph, topic monitor, plots and "
+              "parameter reconfigure. Restores whatever perspective was left "
+              "open last time.",
+              rqt, visible=lambda v: bool(v["rqt"]),
               graceful=False),
     ]
 
@@ -755,6 +760,109 @@ def quaternion_to_rpy(x, y, z, w):
     siny_cosp = 2.0 * (w * z + x * y)
     cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
     return roll, pitch, math.atan2(siny_cosp, cosy_cosp)
+
+
+# --------------------------------------------------------------------------
+# drive keys (teleop + target point)
+#
+# The launcher drives on the physical QWEASD cluster, so the mapping is per
+# keyboard layout: an AZERTY keyboard produces different letters at those
+# positions. Canonical actions keep the rest of the code layout-independent.
+
+DRIVE_KEYS = {
+    "qwerty": {"w": "fwd", "s": "back", "q": "strafe_l", "e": "strafe_r",
+               "a": "yaw_l", "d": "yaw_r", " ": "up", "x": "down", "f": "halt"},
+    # Same physical cluster as qwerty. W stays as a second forward binding:
+    # it exists on AZERTY too (bottom row) and conflicts with nothing.
+    "azerty": {"z": "fwd", "w": "fwd", "s": "back", "a": "strafe_l",
+               "e": "strafe_r", "q": "yaw_l", "d": "yaw_r", " ": "up",
+               "x": "down", "f": "halt"},
+}
+
+
+def drive_action(ch, layout="qwerty"):
+    """Canonical drive action for a typed character, or None if not a drive key."""
+    if not ch:
+        return None
+    return DRIVE_KEYS.get(layout, DRIVE_KEYS["qwerty"]).get(ch.lower())
+
+
+def action_to_command(action, step, turn):
+    """(f, s, y, v) body demand for a canonical action.
+
+    Same convention as launch_tools/keyboard_control.py: v > 0 moves the
+    vehicle up (it is published negated — NED body Z points down).
+    """
+    f = s = y = v = 0.0
+    if action == "fwd":
+        f = step
+    elif action == "back":
+        f = -step
+    elif action == "strafe_l":
+        s = -step
+    elif action == "strafe_r":
+        s = step
+    elif action == "yaw_l":
+        y = -turn
+    elif action == "yaw_r":
+        y = turn
+    elif action == "up":
+        v = step
+    elif action == "down":
+        v = -step
+    return f, s, y, v
+
+
+# Target-point following (Y toggles it on the control screen). The point is
+# driven to by the same A* planner that frontier exploration uses — routed
+# through frontier_extractor/waypoint_controller via /frontier_slam/suspend
+# + /frontier_slam/goal (see revisit_planner.py for the same handoff
+# pattern) — rather than a bespoke pursuit controller in the launcher.
+POINT_STEP_M = 0.5         # point travel per keypress, before speed_factor
+POINT_MIN_Z = 0.2          # m — NED z is down; keep the target under the surface
+# Matches revisit_planner.GOAL_REPUBLISH_S / frontier_extractor's own
+# republish cadence — the goal topic isn't latched, so a fresh subscriber
+# (or one that missed the initial publish) needs a periodic resend.
+POINT_GOAL_REPUBLISH_S = 2.0
+
+# Point mode reuses the same physical QWEASD cluster, but a target point has
+# no heading, so a yaw-relative fwd/strafe mapping (like DRIVE_KEYS) made the
+# point drift sideways as the vehicle turned. These map straight onto world
+# axes instead: W/S -> X, A/D -> Y, Q/E -> Z.
+POINT_AXIS_KEYS = {
+    "qwerty": {"w": "x_pos", "s": "x_neg", "a": "y_neg", "d": "y_pos",
+               "q": "z_down", "e": "z_up", "f": "halt"},
+    "azerty": {"z": "x_pos", "w": "x_pos", "s": "x_neg", "q": "y_neg",
+               "d": "y_pos", "a": "z_down", "e": "z_up", "f": "halt"},
+}
+
+
+def point_axis_action(ch, layout="qwerty"):
+    """Canonical point-move action for a typed character, or None."""
+    if not ch:
+        return None
+    return POINT_AXIS_KEYS.get(layout, POINT_AXIS_KEYS["qwerty"]).get(ch.lower())
+
+
+def move_point(point, action, step):
+    """New target after one point-move keypress, along world axes.
+
+    z_up decreases z since NED z is down (positive z is deeper).
+    """
+    x, y, z = point
+    if action == "x_pos":
+        x += step
+    elif action == "x_neg":
+        x -= step
+    elif action == "y_pos":
+        y += step
+    elif action == "y_neg":
+        y -= step
+    elif action == "z_up":
+        z = max(POINT_MIN_Z, z - step)
+    elif action == "z_down":
+        z += step
+    return [x, y, z]
 
 
 def venv_env(ws_root):

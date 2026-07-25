@@ -56,6 +56,19 @@ Visualization Manager:
       Plane Cell Count: 10
       Reference Frame: <Fixed Frame>
       Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: TargetPoint
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /activeslam/target_point
+      Value: true
     - Class: rviz_default_plugins/Camera
       Enabled: false
       Far Plane Distance: 100
@@ -95,6 +108,7 @@ Visualization Manager:
         TSDFSurface_GroundTruth: true
         TSDFVoxels: true
         TSDFVoxels_GroundTruth: true
+        TargetPoint: true
         Value: true
       Zoom Factor: 1
     - Alpha: 1
@@ -668,18 +682,18 @@ Visualization Manager:
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 8.250283241271973
-        Y: 0.07975790649652481
-        Z: 9.076773643493652
+        X: 11.397700309753418
+        Y: -4.3763346672058105
+        Z: 6.439944267272949
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: true
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.6947962045669556
+      Pitch: 0.7397961616516113
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 2.888509750366211
+      Yaw: 2.983510971069336
     Saved: ~
 Window Geometry:
   Camera:
@@ -707,5 +721,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 2444
-  X: 16
-  Y: 64
+  X: 1008
+  Y: 96

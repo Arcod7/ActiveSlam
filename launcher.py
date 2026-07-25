@@ -11,7 +11,9 @@ The stack is split into independently restartable groups (see launcher_core),
 so changing the mapper or the pose source only bounces the layers that depend
 on it — the simulator, which is the slow part, keeps running.
 
-Teleop is built in (press t): this process already owns a raw terminal, which
+Teleop is built in and always live: the drive keys (QWEASD cluster, AZERTY
+supported) move the vehicle directly, and Y toggles a target point the
+vehicle follows on its own. This process already owns a raw terminal, which
 is the only thing keyboard control needed a separate window for.
 """
 
@@ -292,11 +294,24 @@ class RosLink:
         self.node = None
         self.pub = None
         self.enable_pub = None
+        self.marker_pub = None
+        self.point_suspend_pub = None
+        self.point_goal_pub = None
         self.rclpy = None
         self.error = None
         self.gate_state = None
         self.enabled = None
         self.robot_pose = None
+        self.slam_pose = None
+        # revisit_planner's own state ('exploring' when idle, something else
+        # mid-revisit), or None if it isn't running/hasn't published yet.
+        # Point mode yields its goal to an active revisit rather than
+        # fighting it — see control_screen's revisit_active().
+        self.revisit_state = None
+        # Which odometry the drive/point controller works in: "slam" when the
+        # pose graph owns the TF frame the operator sees, "gt" otherwise.
+        # Synced from values["slam"] every control_screen tick.
+        self.control_source = "gt"
         # Synced from values["speed_factor"/"turn_factor"] every control_screen
         # tick; multiply STEP so runs can be piloted faster without touching
         # /motion/body_command's magnitude elsewhere.
@@ -308,15 +323,17 @@ class RosLink:
             return True
         try:
             import rclpy
-            from geometry_msgs.msg import Twist
+            from geometry_msgs.msg import PointStamped, Twist
             from nav_msgs.msg import Odometry
             from std_msgs.msg import Bool, String
+            from visualization_msgs.msg import Marker
         except Exception as e:
             self.error = f"rclpy unavailable ({e}). Source the workspace first."
             return False
         try:
             self.rclpy = rclpy
-            self.Twist, self.Bool = Twist, Bool
+            self.Twist, self.Bool, self.Marker = Twist, Bool, Marker
+            self.PointStamped = PointStamped
             if not rclpy.ok():
                 # The launcher owns SIGINT handling; rclpy must not take it over.
                 from rclpy.signals import SignalHandlerOptions
@@ -327,10 +344,32 @@ class RosLink:
             # as MULTIPLE_COMMAND_SOURCES and zero all motion. It is created
             # only while teleop is active (see open_teleop).
             self.enable_pub = self.node.create_publisher(Bool, "/motion/enable", 10)
+            # The target-point marker is safe to keep around: the gate only
+            # counts publishers on the command topic.
+            self.marker_pub = self.node.create_publisher(
+                Marker, "/activeslam/target_point", 1)
+            # Target-point mode routes through the same A* planner frontier
+            # exploration uses (frontier_extractor + waypoint_controller),
+            # via the suspend/goal handoff revisit_planner.py also uses —
+            # not a body-command publisher, so these never trip the gate's
+            # command-source count either.
+            self.point_suspend_pub = self.node.create_publisher(
+                Bool, "/frontier_slam/suspend", 1)
+            self.point_goal_pub = self.node.create_publisher(
+                PointStamped, "/frontier_slam/goal", 1)
             self.node.create_subscription(
                 String, "/motion/safety_status", self._status_cb, 10)
             self.node.create_subscription(
                 Odometry, "/StoneFish/Odometry", self._odom_cb, 10)
+            # Only published while slam:=slam; subscribing unconditionally is
+            # harmless — the topic simply stays silent otherwise.
+            self.node.create_subscription(
+                Odometry, "/slam/odometry", self._slam_odom_cb, 10)
+            # revisit_planner republishes /frontier_slam/suspend at 1 Hz
+            # regardless of whether it wants control — subscribing here is
+            # only for the revisit_state yield check, not for suspend itself.
+            self.node.create_subscription(
+                String, "/frontier_slam/revisit_state", self._revisit_state_cb, 10)
         except Exception as e:
             self.error = f"could not create launcher node: {e}"
             self.node = None
@@ -340,17 +379,35 @@ class RosLink:
     def _status_cb(self, msg):
         self.gate_state = msg.data
 
-    def _odom_cb(self, msg):
-        """Keep the TUI's robot fields aligned with simulation/teleop motion."""
+    def _revisit_state_cb(self, msg):
+        self.revisit_state = msg.data
+
+    @staticmethod
+    def _pose_from_msg(msg):
         p = msg.pose.pose.position
         q = msg.pose.pose.orientation
         rpy = core.quaternion_to_rpy(q.x, q.y, q.z, q.w)
-        self.robot_pose = {
+        return {
             "robot_x": p.x, "robot_y": p.y, "robot_z": p.z,
             "robot_roll": math.degrees(rpy[0]),
             "robot_pitch": math.degrees(rpy[1]),
             "robot_yaw": math.degrees(rpy[2]),
         }
+
+    def _odom_cb(self, msg):
+        """Keep the TUI's robot fields aligned with simulation/teleop motion."""
+        self.robot_pose = self._pose_from_msg(msg)
+
+    def _slam_odom_cb(self, msg):
+        self.slam_pose = self._pose_from_msg(msg)
+
+    def control_pose(self):
+        """Pose the drive/point controller works in: the SLAM estimate when
+        that owns the TF frame the operator sees, ground truth otherwise —
+        with a fallback to whichever source has published at all."""
+        if self.control_source == "slam":
+            return self.slam_pose or self.robot_pose
+        return self.robot_pose or self.slam_pose
 
     def spin(self):
         if self.node:
@@ -508,41 +565,98 @@ class RosLink:
                 pass
             self.pub = None
 
-    def send(self, key):
-        """Mirrors launch_tools/keyboard_control.py so the keys match."""
+    def send_action(self, action):
+        """Publish the body demand for a canonical drive action.
+
+        The action->demand mapping mirrors launch_tools/keyboard_control.py so
+        the standalone keyboard node and the launcher drive identically."""
         if not self.pub:
             return
         cap = self.MAX_ABS_COMMAND
         step = max(-cap, min(cap, self.STEP * self.speed_factor))
         turn = max(-cap, min(cap, (self.STEP / 6) * self.turn_factor))
-        f = s = y = v = 0.0
-        if key == "w":   f = step
-        elif key == "s": f = -step
-        elif key == "q": s = -step
-        elif key == "e": s = step
-        elif key == "a": y = -turn
-        elif key == "d": y = turn
-        elif key == " ": v = step
-        elif key == "x": v = -step
+        self.send_body(*core.action_to_command(action, step, turn))
+
+    def send_body(self, f, s, y, v):
+        """Publish an explicit body demand, saturated at the gate's limit."""
+        if not self.pub:
+            return
+        cap = self.MAX_ABS_COMMAND
+        clamp = lambda u: max(-cap, min(cap, u))
         msg = self.Twist()
-        msg.linear.x = f
-        msg.linear.y = s
-        msg.linear.z = -v     # NED: negative body Z demand moves upward
-        msg.angular.z = y
+        msg.linear.x = clamp(f)
+        msg.linear.y = clamp(s)
+        msg.linear.z = -clamp(v)   # NED: negative body Z demand moves upward
+        msg.angular.z = clamp(y)
         self.pub.publish(msg)
 
     def halt(self):
         if self.pub:
             self.pub.publish(self.Twist())
 
+    def publish_target_marker(self, point):
+        """Draw the follow-point target in RViz (world_ned sphere)."""
+        if self.marker_pub is None:
+            return
+        m = self.Marker()
+        m.header.frame_id = "world_ned"
+        m.header.stamp = self.node.get_clock().now().to_msg()
+        m.ns = "activeslam"
+        m.id = 0
+        m.type = self.Marker.SPHERE
+        m.action = self.Marker.ADD
+        (m.pose.position.x, m.pose.position.y, m.pose.position.z) = point
+        m.pose.orientation.w = 1.0
+        m.scale.x = m.scale.y = m.scale.z = 0.4
+        m.color.r, m.color.g, m.color.b, m.color.a = 0.1, 1.0, 0.3, 0.9
+        self.marker_pub.publish(m)
+
+    def publish_point_goal(self, point):
+        """Hand the target point to frontier_extractor as an external goal.
+
+        Only takes effect while suspended (see set_planner_suspended) — the
+        same /frontier_slam/goal handoff revisit_planner.py uses. Its A*
+        replan loop then drives waypoint_controller at the point, same as
+        any frontier goal.
+        """
+        if self.point_goal_pub is None:
+            return
+        g = self.PointStamped()
+        g.header.frame_id = "world_ned"
+        g.header.stamp = self.node.get_clock().now().to_msg()
+        (g.point.x, g.point.y, g.point.z) = point
+        self.point_goal_pub.publish(g)
+
+    def set_planner_suspended(self, suspended):
+        """Pause/resume frontier_extractor's own frontier-goal picking."""
+        if self.point_suspend_pub is None:
+            return
+        self.point_suspend_pub.publish(self.Bool(data=suspended))
+
+    def clear_target_marker(self):
+        if self.marker_pub is None:
+            return
+        try:
+            m = self.Marker()
+            m.header.frame_id = "world_ned"
+            m.ns = "activeslam"
+            m.id = 0
+            m.action = self.Marker.DELETE
+            self.marker_pub.publish(m)
+        except Exception:
+            pass
+
     def close(self):
         if self.node:
             try:
                 self.halt()
+                self.clear_target_marker()
+                self.set_planner_suspended(False)
                 self.node.destroy_node()
             except Exception:
                 pass
-        self.node = self.pub = None
+        self.node = self.pub = self.marker_pub = None
+        self.point_suspend_pub = self.point_goal_pub = None
 
 
 def set_live_param(node_basename, param, value):
@@ -752,12 +866,20 @@ def control_screen(stdscr, sup, values, link, session):
     scroll = 0
     status = None
     status_kind = C_OK
-    teleop_mode = False
-    last_teleop_key = 0.0
-    # Teleop suspends the planner rather than publishing alongside it: the
-    # safety gate treats two publishers on /motion/body_command as
-    # MULTIPLE_COMMAND_SOURCES and zeroes all motion.
+    # Driving is not a mode any more: in teleop mode the launcher becomes a
+    # command source as soon as the stack is up, and in frontier mode the
+    # first drive keypress suspends the planner and takes over (Esc hands
+    # control back). The suspension exists because the safety gate treats two
+    # publishers on /motion/body_command as MULTIPLE_COMMAND_SOURCES and
+    # zeroes all motion.
+    driving = False
     planner_suspended = False
+    point_mode = False
+    point = None              # [x, y, z] follow target, control-odom frame
+    point_dist = None         # last controller distance, for the footer
+    last_point_pub_at = 0.0   # last /frontier_slam/goal republish
+    last_drive_at = 0.0
+    last_action = "halt"
     robot_pose_fields = ("robot_x", "robot_y", "robot_z",
                          "robot_roll", "robot_pitch", "robot_yaw")
     # This is the deliberately configured launch pose. Odometry updates the
@@ -827,6 +949,74 @@ def control_screen(stdscr, sup, values, link, session):
             values[param.id] = old
             set_status("live failed: " + msg, C_WARN)
 
+    def ensure_driving():
+        """Become the command source, suspending autonomy first in frontier
+        mode. Returns True while driving."""
+        nonlocal driving, planner_suspended
+        if driving:
+            return True
+        running = sup.running_ids()
+        if not running:
+            set_status("Start the stack before driving", C_WARN)
+            return False
+        if not link.start():
+            set_status(link.error or "teleop unavailable", C_ERR)
+            return False
+        # Suspending the planner keeps teleop the only command source.
+        # frontier_slam.launch.py also owns the safety gate and thruster
+        # mixer, so teleop_support has to take over or nothing moves.
+        if "planner" in running:
+            draw_busy(stdscr, "Suspending autonomy for teleop...")
+            was_armed = bool(link.enabled)
+            sup.stop("planner")
+            sup.start("teleop_support", values)
+            planner_suspended = True
+            if was_armed:
+                draw_busy(stdscr, "Re-arming motion for teleop...")
+                link.set_enabled(True, timeout=8.0)
+        draw_busy(stdscr, "Opening teleop...")
+        link.open_teleop()
+        driving = True
+        set_status("Driving" + (" — autonomy suspended" if planner_suspended
+                                else ""), C_OK)
+        return True
+
+    def revisit_active():
+        """True while revisit_planner owns /frontier_slam/goal for a real,
+        uncertainty-triggered revisit — point mode yields its own goal
+        publication rather than fighting it (same precedence trajectory_
+        mission.py gives revisit_planner). None/'exploring' both mean no
+        active revisit (None covers revisit_planner not running at all)."""
+        return link.revisit_state not in (None, "exploring")
+
+    def stop_point_mode():
+        nonlocal point_mode, point, point_dist
+        if point_mode:
+            link.clear_target_marker()
+            link.set_planner_suspended(False)
+        point_mode = False
+        point = None
+        point_dist = None
+
+    def release_driving(resume=True):
+        """Stop being a command source; optionally hand control back to the
+        planner after a frontier takeover."""
+        nonlocal driving, planner_suspended
+        stop_point_mode()
+        link.close_teleop()
+        driving = False
+        if planner_suspended:
+            if resume:
+                draw_busy(stdscr, "Resuming autonomy...")
+                was_armed = bool(link.enabled)
+                sup.stop("teleop_support")
+                sup.start("planner", values)
+                if was_armed:
+                    draw_busy(stdscr, "Re-arming motion...")
+                    link.set_enabled(True, timeout=8.0)
+                set_status("Autonomy resumed", C_INFO)
+            planner_suspended = False
+
     while True:
         if not fits(stdscr):
             too_small(stdscr)
@@ -859,9 +1049,48 @@ def control_screen(stdscr, sup, values, link, session):
             # before the first arm/teleop keypress rather than dropping it.
             link.start()
             link.spin()   # pick up /motion/safety_status
+            link.control_source = "slam" if values["slam"] == "slam" else "gt"
+            # Teleop mode drives by default: become the command source as soon
+            # as its gate/mixer layer exists, with no mode key to press first.
+            if (not driving and values["mode"] == "teleop"
+                    and "teleop_support" in running):
+                ensure_driving()
             if link.robot_pose and "core" in running:
                 values.update({key: round(value, 4)
                                for key, value in link.robot_pose.items()})
+            if point_mode and "planner" not in running:
+                # The planner stopped/crashed under us — nothing is left to
+                # drive to the point, so drop it rather than leave it stale.
+                stop_point_mode()
+                set_status("Target point off — planner stopped", C_WARN)
+        elif driving:
+            # The whole stack went away under us (stopped or crashed): stop
+            # being a command source. Anything still running gets no fresh
+            # command and fails closed on its own.
+            release_driving(resume=False)
+        elif point_mode:
+            stop_point_mode()
+
+        # Target-point following runs every tick (the loop wakes at 5 Hz while
+        # the stack is up). Suspend is republished every tick, not throttled:
+        # revisit_planner reasserts it at 1 Hz whenever it's idle (its own
+        # normal behaviour, not a bug — see revisit_active()), and a slower
+        # republish here used to lose that race, letting frontier_extractor
+        # un-suspend and pick its own goal between our sends. The goal point
+        # itself stays throttled (the topic isn't latched, but doesn't need
+        # spamming), and is withheld entirely while yielding to a real revisit.
+        point_dist = None
+        if point_mode and point is not None:
+            pose = link.control_pose()
+            if pose:
+                pos = (pose["robot_x"], pose["robot_y"], pose["robot_z"])
+                point_dist = math.dist(point, pos)
+            link.publish_target_marker(point)
+            link.set_planner_suspended(True)
+            if (not revisit_active()
+                    and time.time() - last_point_pub_at >= core.POINT_GOAL_REPUBLISH_S):
+                link.publish_point_goal(point)
+                last_point_pub_at = time.time()
         title = "ActiveSlam Control Center"
         put(stdscr, 0, 2, title, curses.A_BOLD)
         state = "RUNNING" if running else "STOPPED"
@@ -951,8 +1180,21 @@ def control_screen(stdscr, sup, values, link, session):
         _, to_start, to_restart = sup.plan(values)
         pending = sorted(set(to_start + to_restart))
         foot = h - 2
-        if teleop_mode:
-            put(stdscr, foot, 2, "TELEOP  " + model.TELEOP_KEYS,
+        if point_mode and point is not None:
+            dist_txt = (f"  dist {point_dist:.1f} m" if point_dist is not None
+                        else "")
+            yield_txt = "  — YIELDING TO REVISIT" if revisit_active() else ""
+            put(stdscr, foot, 2,
+                f"TARGET ({point[0]:.1f}, {point[1]:.1f}, {point[2]:.1f})"
+                f"{dist_txt}{yield_txt}  —  " + model.POINT_KEYS,
+                curses.color_pair(C_WARN if yield_txt else C_OK) | curses.A_BOLD)
+        elif driving and running:
+            take = " (autonomy suspended)  " if planner_suspended else "  "
+            put(stdscr, foot, 2,
+                "DRIVE" + take
+                + model.TELEOP_KEYS.get(values["keyboard"],
+                                        model.TELEOP_KEYS["qwerty"])
+                + "  Y target point",
                 curses.color_pair(C_OK) | curses.A_BOLD)
         elif status:
             put(stdscr, foot, 2, status[:w - 4], curses.color_pair(status_kind) | curses.A_BOLD)
@@ -963,59 +1205,101 @@ def control_screen(stdscr, sup, values, link, session):
             put(stdscr, foot, 2, "Enter starts the stack", curses.A_DIM)
 
         keys = ("Up/Down move  Left/Right change  " +
-                ("e edit  " if cur.kind in ("int", "float", "text") else "") +
-                "Enter apply  m arm  t teleop  r reset  a advanced  p preset  s stop  q quit")
+                ("i edit  " if cur.kind in ("int", "float", "text") else "") +
+                "Enter apply  m arm  y point  r reset  o advanced  p preset  k stop  Esc quit")
         put(stdscr, h - 1, 2, keys, curses.A_DIM)
         stdscr.refresh()
 
         # -- input
-        stdscr.timeout(200 if (running or teleop_mode) else -1)
+        stdscr.timeout(200 if running else -1)
         key = stdscr.getch()
 
-        if teleop_mode:
-            if key == -1:
+        if key == -1:
+            if driving:
                 # Republish the last command so the safety gate keeps seeing a
-                # fresh command; it fails closed on a stale one.
-                if time.time() - last_teleop_key < 0.6:
-                    link.send(getattr(link, "_last", "f"))
+                # fresh command; it fails closed on a stale one. (point mode
+                # never sets driving — see the loop-top block above, which
+                # keeps the planner's goal fresh instead.)
+                if time.time() - last_drive_at < 0.6:
+                    link.send_action(last_action)
                 else:
                     link.halt()
-                continue
-            if key == 27:
-                link.close_teleop()
-                teleop_mode = False
-                if planner_suspended:
-                    draw_busy(stdscr, "Resuming autonomy...")
-                    was_armed = bool(link.enabled)
-                    sup.stop("teleop_support")
-                    sup.start("planner", values)
-                    planner_suspended = False
-                    if was_armed:
-                        draw_busy(stdscr, "Re-arming motion...")
-                        link.set_enabled(True, timeout=8.0)
-                    set_status("Teleop off — autonomy resumed", C_INFO)
-                else:
-                    set_status("Teleop off", C_INFO)
-                continue
-            ch = chr(key) if 0 <= key < 256 else ""
-            # `ch` is empty for arrow/function keys, and "" is a substring of
-            # any string, so the membership test must reject it explicitly.
-            if ch and (ch.lower() in "wsqeadxf" or ch == " "):
-                link._last = ch.lower()
-                link.send(ch.lower())
-                last_teleop_key = time.time()
-            continue
-
-        if key == -1:
             continue
         status = None
         if key == curses.KEY_RESIZE:
             continue
-        elif key == curses.KEY_UP:
+
+        # Drive keys are always live on this screen — there is no teleop mode
+        # to enter any more. The first press takes control, suspending the
+        # planner first if autonomy is running.
+        ch = chr(key) if 0 <= key < 256 else ""
+        if point_mode and point is not None:
+            # Point mode doesn't take over teleop — the planner (already
+            # running to own this) drives to the point on its own, so
+            # dragging the point just edits local state and republishes.
+            paction = core.point_axis_action(ch, values["keyboard"])
+            if paction is not None:
+                if paction == "halt":
+                    # F recalls the point to the vehicle's current position.
+                    pose = link.control_pose()
+                    if pose:
+                        point = [pose["robot_x"], pose["robot_y"],
+                                 pose["robot_z"]]
+                else:
+                    point = core.move_point(
+                        point, paction, core.POINT_STEP_M * link.speed_factor)
+                link.publish_target_marker(point)
+                if not revisit_active():
+                    link.publish_point_goal(point)
+                    last_point_pub_at = time.time()
+                continue
+        else:
+            action = core.drive_action(ch, values["keyboard"])
+            if action is not None:
+                if ensure_driving():
+                    link.send_action(action)
+                    last_action = action
+                    last_drive_at = time.time()
+                continue
+        if ch and ch.lower() == "y":
+            if point_mode:
+                stop_point_mode()
+                set_status("Target point off — planner resumes its own goals",
+                           C_INFO)
+            elif driving:
+                set_status("Stop driving (Esc) before setting a target point",
+                           C_WARN)
+            elif "planner" not in running:
+                set_status("Target point needs the frontier planner running "
+                           "(mode:=frontier)", C_WARN)
+            else:
+                pose = link.control_pose()
+                if pose is None:
+                    set_status("No odometry yet — cannot place the target point",
+                               C_WARN)
+                else:
+                    # Start from the vehicle position, so toggling on never
+                    # commands a jump; the point then travels with the keys.
+                    point = [pose["robot_x"], pose["robot_y"], pose["robot_z"]]
+                    point_mode = True
+                    link.publish_target_marker(point)
+                    link.set_planner_suspended(True)
+                    if revisit_active():
+                        last_point_pub_at = 0.0   # publish as soon as the yield clears
+                        set_status("Target point set — yielding to an active "
+                                   "revisit until it clears", C_WARN)
+                    else:
+                        link.publish_point_goal(point)
+                        last_point_pub_at = time.time()
+                        set_status("Target point ON — drive keys move it, "
+                                   "the planner paths to it", C_OK)
+            continue
+
+        if key == curses.KEY_UP:
             idx = (idx - 1) % len(items)
         elif key == curses.KEY_DOWN:
             idx = (idx + 1) % len(items)
-        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord(" ")):
+        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT):
             delta = -1 if key == curses.KEY_LEFT else 1
             old = values[cur.id]
             if cur.kind == "enum":
@@ -1029,7 +1313,7 @@ def control_screen(stdscr, sup, values, link, session):
                 values[cur.id] = round(cur.clamp(values[cur.id] + delta * cur.step), 4)
             if values[cur.id] != old:
                 apply_live_change(cur, old)
-        elif key in (ord("e"), ord("E")) and cur.kind in ("int", "float", "text"):
+        elif key in (ord("i"), ord("I")) and cur.kind in ("int", "float", "text"):
             raw = prompt(stdscr, f"{cur.label} =")
             if raw:
                 try:
@@ -1054,13 +1338,23 @@ def control_screen(stdscr, sup, values, link, session):
             save_config()
             idx = 0
             set_status(f"Preset: {model.PRESETS[preset_idx][0]}", C_INFO)
-        elif key in (ord("a"), ord("A")):
+        elif key in (ord("o"), ord("O")):
             show_advanced = not show_advanced
             idx = 0
         elif key in (ord("r"), ord("R")):
             if not sup.running_ids():
                 set_status("Start the stack before resetting", C_WARN)
             elif confirm_reset(stdscr):
+                # A suspended planner is invisible to the reset's stateful
+                # group list and its takeover gate would fight the planner's
+                # own — hand control back first so the reset then stops and
+                # restarts the planner like normal. In teleop mode
+                # teleop_support is not stateful and driving survives.
+                if planner_suspended:
+                    release_driving(resume=True)
+                else:
+                    stop_point_mode()   # the target would drag the teleported
+                    link.halt()         # vehicle; drop it and hold position
                 was_armed = bool(link.enabled)
                 name = "bluerov2"
                 xyz = tuple(saved_robot_pose[key] for key in
@@ -1094,29 +1388,9 @@ def control_screen(stdscr, sup, values, link, session):
                            C_OK if link.enabled else C_INFO)
             else:
                 set_status(link.error or "could not reach the motion gate", C_ERR)
-        elif key in (ord("t"), ord("T")):
-            if not link.start():
-                set_status(link.error or "teleop unavailable", C_ERR)
-            else:
-                # Suspending the planner keeps teleop the only command source.
-                # frontier_slam.launch.py also owns the safety gate and thruster
-                # mixer, so teleop_support has to take over or nothing moves.
-                if "planner" in sup.running_ids():
-                    draw_busy(stdscr, "Suspending autonomy for teleop...")
-                    was_armed = bool(link.enabled)
-                    sup.stop("planner")
-                    sup.start("teleop_support", values)
-                    planner_suspended = True
-                    if was_armed:
-                        draw_busy(stdscr, "Re-arming motion for teleop...")
-                        link.set_enabled(True, timeout=8.0)
-                link.open_teleop()
-                teleop_mode = True
-                link._last = "f"
-                set_status("Teleop on" + (" — autonomy suspended" if planner_suspended
-                                          else ""), C_OK)
-        elif key in (ord("s"), ord("S")):
+        elif key in (ord("k"), ord("K")):
             if sup.running_ids():
+                release_driving(resume=False)
                 draw_busy(stdscr, "Stopping the stack...")
                 sup.shutdown_all()
                 set_status("Stack stopped", C_INFO)
@@ -1127,6 +1401,12 @@ def control_screen(stdscr, sup, values, link, session):
             if sup.running_ids() and last_slam is not None and last_slam != values["slam"]:
                 if not confirm_slam_switch(stdscr):
                     continue
+            if driving and values["mode"] == "frontier":
+                # The planner is a wanted group in frontier mode: apply would
+                # start it alongside our publisher, and the gate would read
+                # two command sources. Hand the topic back first; apply
+                # (re)starts the planner below.
+                release_driving(resume=False)
             # A live odometry readback must not silently become the next core
             # launch pose when save-on-exit is off (for example if changing
             # object scale restarts Stonefish mid-run).
@@ -1149,7 +1429,17 @@ def control_screen(stdscr, sup, values, link, session):
             set_status("Applied" + (f" — (re)started: {', '.join(changed)}" if changed
                                     else " — no changes")
                        + (" — motion re-armed" if was_armed and regated else ""), C_OK)
-        elif key in (ord("q"), ord("Q"), 27):
+        elif key == 27:
+            # Esc peels off one layer at a time: target point first, then the
+            # frontier takeover, then the screen itself. (q/Q is a drive key.)
+            if point_mode:
+                stop_point_mode()
+                set_status("Target point off — planner resumes its own goals",
+                           C_INFO)
+                continue
+            if planner_suspended:
+                release_driving(resume=True)
+                continue
             if values["robot_save_pose_on_exit"]:
                 saved_robot_pose = {key: values[key] for key in robot_pose_fields}
             save_config()

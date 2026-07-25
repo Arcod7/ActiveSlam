@@ -68,8 +68,10 @@ python3 launcher.py
 ```
 
 A terminal UI that brings the stack up, switches options while it runs without
-restarting the simulator, arms the fail-closed motion gate, and includes
-keyboard teleop. Or launch it directly:
+restarting the simulator, arms the fail-closed motion gate, and drives the
+vehicle from the keyboard — always live on the QWEASD cluster (AZERTY
+supported), with an optional follow-the-point mode on `y`. Or launch it
+directly:
 
 ```bash
 ros2 launch bringup demo.launch.py                       # teleop + OctoMap, ground-truth pose

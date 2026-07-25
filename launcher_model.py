@@ -94,10 +94,12 @@ _slam = lambda v: v["slam"] == "slam"
 
 PARAMS = [
     Param("mode", "Mode", "enum", "teleop", "primary",
-          "Who drives the vehicle. teleop hands control to the keyboard "
-          "(press t on this screen); frontier runs autonomous exploration: "
-          "frontier detection on the occupancy map, A* planning, then a path "
-          "executor.",
+          "Who drives the vehicle. teleop hands control to the keyboard — the "
+          "drive keys are always live on this screen, no mode key needed; "
+          "frontier runs autonomous exploration: frontier detection on the "
+          "occupancy map, A* planning, then a path executor. Pressing a drive "
+          "key in frontier mode suspends the planner and takes over (Esc "
+          "hands control back).",
           ["teleop", "frontier"],
           {"teleop": "Manual keyboard control, driven from this launcher.",
            "frontier": "Autonomous frontier-based exploration."}),
@@ -121,6 +123,10 @@ PARAMS = [
           "Start RViz. The view is chosen automatically: demo_slam.rviz when "
           "slam is on (drift arrow, error HUD, covariance ellipsoids), "
           "demo_tsdf.rviz for the TSDF surface, otherwise the base view."),
+    Param("rqt", "rqt", "bool", False, "primary",
+          "Start rqt alongside RViz for introspection — node graph, topic "
+          "monitor, live plots and parameter reconfigure. Off by default: it "
+          "is a debugging tool, not part of the demo view."),
 
     Param("scene", "Scene", "enum", "waterlinked", "scene",
           "Stonefish world to launch. waterlinked is the unchanged baseline; "
@@ -150,7 +156,7 @@ PARAMS = [
     Param("obj_scale", "Object scale", "float", 1.0, "scene",
           "Uniform multiplier for the selected object. Applied when the target "
           "scene starts; changing it restarts only Stonefish.",
-          step=0.03, lo=0.001, hi=10.0,
+          step=0.03, lo=0.0001, hi=10.0,
           visible=lambda v: v["scene"] == "target"),
     Param("obj_roll", "Object roll (deg)", "float", 0.0, "scene",
           "Static object roll in degrees. Live while running.",
@@ -200,6 +206,15 @@ PARAMS = [
           "executor is driving), independent of the speed factor. Also saturates "
           "at the safety gate's +-1.0 limit (roughly 6.7x). Live, no restart.",
           step=0.25, lo=0.1, hi=5.0),
+    Param("keyboard", "Keyboard layout", "enum", "qwerty", "robot",
+          "Physical-key mapping for the drive cluster, so the same finger "
+          "positions drive on either layout. qwerty uses W/S/Q/E/A/D; azerty "
+          "uses the letters those physical keys produce (Z/S/A/E/Q/D), with W "
+          "kept as a second forward key. Affects only this launcher's teleop "
+          "and target-point driving, live — the stack is not restarted.",
+          ["qwerty", "azerty"],
+          {"qwerty": "W fwd, S back, Q/E strafe, A/D yaw.",
+           "azerty": "Z fwd, S back, A/E strafe, Q/D yaw (same finger positions)."}),
     Param("robot_save_pose_on_exit", "Save robot pose on exit", "bool", False, "robot",
           "When enabled, preserve the robot's final live/teleop pose in config.yaml "
           "when leaving this control screen. When off, teleop motion is display-only "
@@ -305,6 +320,13 @@ PARAMS = [
           "scene. The gate is fail-closed: it blocks commands that are stale, "
           "oversized, or missing odometry.",
           advanced=True),
+    Param("thrust_boost", "Thrust boost (2.5x ceiling)", "bool", False, "advanced",
+          "Scale the simulated thruster RPM ceiling 2.5x for fast repositioning "
+          "between runs. Body commands still normalize to the safety gate's "
+          "+-1.0 range, so this never trips INVALID_COMMAND — it raises what "
+          "100% effort means physically, not the command range. Not a "
+          "physically realistic BlueROV2/T200 value; restarts the simulator.",
+          advanced=True),
 
     Param("scan_sweep_deg", "Sweep width", "float", 180.0, "frontier",
           "Total sweep angle in degrees for scan_style:=sweep.",
@@ -401,7 +423,13 @@ PRESETS = [
     ("Headless / CI", {"mode": "frontier", "rviz": False}),
 ]
 
-TELEOP_KEYS = "W/S forward  Q/E strafe  A/D yaw  Space/X up/down  F stop  Esc leave"
+TELEOP_KEYS = {
+    "qwerty": "W/S fwd/back  Q/E strafe  A/D yaw  Space/X up/down  F stop",
+    "azerty": "Z/S fwd/back  A/E strafe  Q/D yaw  Space/X up/down  F stop",
+}
+# Shown while the target point is on: the same cluster moves the point
+# instead of the vehicle, but along world axes (a point has no heading).
+POINT_KEYS = "W/S X  A/D Y  Q/E Z  F recalls it to the vehicle  Y off"
 
 INFOS = [
     ("What this is", [

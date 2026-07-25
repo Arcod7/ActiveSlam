@@ -168,8 +168,11 @@ as independently restartable groups, so changing the mapper, mode or pose
 source only bounces the layers that depend on it and leaves Stonefish up. It
 also arms the fail-closed motion gate (`m`) — nothing moves until it is armed,
 and with `rviz:=false` there is no other way to do that — resets a run (`r`),
-and has keyboard teleop built in (`t`). `demo.launch.py` below is unchanged and
-drives the same launch files.
+and has always-live keyboard driving built in: the QWEASD cluster (AZERTY
+option too) drives directly with no teleop mode key, `y` toggles a follow-me
+target point the vehicle swims to, and pressing a drive key in frontier mode
+suspends the planner (`Esc` resumes it). `demo.launch.py` below is unchanged
+and drives the same launch files.
 
 ```bash
 ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic mode:=frontier
