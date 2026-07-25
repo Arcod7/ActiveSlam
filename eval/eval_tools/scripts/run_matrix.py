@@ -53,6 +53,7 @@ VALID_KEYS = {
     # The motion gate is fail-closed (safety_gate.py start_enabled=False) and
     # zeroes every command until armed — sim batches must opt in explicitly.
     'safety_start_enabled', 'scan_style', 'scan_sweep_deg', 'carve_no_return',
+    'tsdf_octomap',
     'near_cutoff', 'scene', 'obj_mesh', 'obj_x', 'obj_y', 'obj_z', 'obj_scale',
     'obj_roll', 'obj_pitch', 'obj_yaw',
     'robot_x', 'robot_y', 'robot_z', 'robot_roll', 'robot_pitch', 'robot_yaw', 'depth',

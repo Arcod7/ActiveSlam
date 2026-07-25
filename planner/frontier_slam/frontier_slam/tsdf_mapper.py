@@ -45,6 +45,11 @@ Published topics:
                            from this TSDF grid so the planning map and the
                            belief map can never disagree — replacing the
                            separate octomap_server that used to build it.
+  /tsdf/free_voxels      (sensor_msgs/PointCloud2) observed-empty voxel centres
+                           (d > 0), published only when publish_free_voxels:=true.
+                           The free/unknown half that /tsdf/occupied_voxels
+                           cannot express; tsdf_to_octomap consumes both to
+                           build an octomap::OcTree from this grid.
 """
 
 from collections import deque, OrderedDict
@@ -102,6 +107,8 @@ class TSDFMapper(Node):
         # Off by default so only the belief instance under mode:=frontier
         # opts in; never enabled on tsdf_mapper_gt.
         self.declare_parameter('publish_projected_map', False)
+        # Free (d>0) voxel centres on /tsdf/free_voxels, for tsdf_to_octomap.
+        self.declare_parameter('publish_free_voxels', False)
         # Cruise depth (world_ned Z, +down) the projection band centres on.
         # -1.0 = auto: lock to the first base_link->world TF Z, then hold it.
         self.declare_parameter('target_depth_m', -1.0)
@@ -139,6 +146,8 @@ class TSDFMapper(Node):
         self._carve_range  = float(self.get_parameter('carve_range_m').value)
         self._projected_map_enabled = bool(
             self.get_parameter('publish_projected_map').value)
+        self._free_voxels_enabled = bool(
+            self.get_parameter('publish_free_voxels').value)
         self._target_depth = float(self.get_parameter('target_depth_m').value)
         self._projected_map_band = abs(float(
             self.get_parameter('projected_map_band_m').value))
@@ -241,6 +250,19 @@ class TSDFMapper(Node):
                 self.get_logger().error(
                     'publish_projected_map requested but VDBFusion lacks pyopenvdb '
                     '— /projected_map disabled; use mapper:=octomap for the planning map')
+
+        # Free (d>0) voxel centres for tsdf_to_octomap. Same grid-path
+        # requirement as /projected_map: the surface-vertex fallback knows
+        # nothing about empty space.
+        self._free_cloud_pub = None
+        if self._free_voxels_enabled:
+            if self._volume.pyopenvdb_support_enabled:
+                self._free_cloud_pub = self.create_publisher(
+                    PointCloud2, '/tsdf/free_voxels', 1)
+            else:
+                self.get_logger().error(
+                    'publish_free_voxels requested but VDBFusion lacks pyopenvdb '
+                    '— /tsdf/free_voxels disabled')
 
         # Latest marching-cubes vertices, so the voxel view can be derived from
         # them when pyopenvdb (the grid path) is unavailable.
@@ -508,14 +530,15 @@ class TSDFMapper(Node):
             self._publish_voxels_from_surface()
             return
 
-        if self._projected_map_pub is not None:
-            # One walk feeds both the solid viz and the 2-D planning map: keep
-            # every voxel at/above the low map weight (min_weight) so free
-            # (d>0) cells survive for the projection, then re-filter to solids
-            # here for the CUBE_LIST + /tsdf/occupied_voxels.
+        if self._projected_map_pub is not None or self._free_cloud_pub is not None:
+            # One walk feeds the solid viz, the 2-D planning map and the free
+            # cloud: keep every voxel at/above the low map weight (min_weight)
+            # so free (d>0) cells survive, then re-filter to solids here for
+            # the CUBE_LIST + /tsdf/occupied_voxels.
             coords, all_d, all_w = _extract_voxel_arrays(
                 self._volume.tsdf, self._volume.weights, self._min_weight)
             self._publish_projected_map(coords, all_d, all_w)
+            self._publish_free_voxels(coords, all_d)
             if coords is None:
                 pts = d_vals = w_vals = None
             else:
@@ -628,6 +651,21 @@ class TSDFMapper(Node):
             frame=self._world_frame, stamp=self.get_clock().now().to_msg())
         if grid is not None:
             self._projected_map_pub.publish(grid)
+
+    def _publish_free_voxels(self, coords, d_vals) -> None:
+        """Observed-empty voxel centres, the free half tsdf_to_octomap needs."""
+        if self._free_cloud_pub is None:
+            return
+        header = Header(stamp=self.get_clock().now().to_msg(),
+                        frame_id=self._world_frame)
+        if coords is None:
+            self._free_cloud_pub.publish(
+                _make_pointcloud2(header, np.empty((0, 3), dtype=np.float32)))
+            return
+        free = d_vals > 0.0
+        pts = (coords[free].astype(np.float32) * self._voxel_size
+               + self._voxel_size / 2.0)
+        self._free_cloud_pub.publish(_make_pointcloud2(header, pts))
 
     def _publish_voxels_from_surface(self) -> None:
         """Occupancy-voxel view built from the marching-cubes surface, for

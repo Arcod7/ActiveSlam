@@ -34,14 +34,26 @@ control screen that:
   scenario spawn pose via Stonefish's `respawn_robot` service, and the map,
   SLAM pose graph, eval output and planner blacklist are all cleared. The
   simulator keeps running throughout.
-- **includes keyboard teleop** (press `t`). It publishes to
-  `/motion/body_command` with the same keys as `ros2 run launch_tools
-  my_keyboard`, so `mode:=teleop` does not need a second terminal. In frontier
-  mode it suspends the planner first — the safety gate treats two publishers on
-  that topic as `MULTIPLE_COMMAND_SOURCES` and stops all motion.
+- **drives the vehicle straight from the option screen** — the drive keys are
+  always live, there is no teleop mode to enter. `W/S` forward/back, `Q/E`
+  strafe, `A/D` yaw, `Space/X` up/down, `F` stop (QWERTY; an AZERTY option
+  under *Keyboard layout* maps the same physical keys). The commands match
+  `ros2 run launch_tools my_keyboard`, so `mode:=teleop` does not need a
+  second terminal. Pressing a drive key in frontier mode suspends the planner
+  first — the safety gate treats two publishers on `/motion/body_command` as
+  `MULTIPLE_COMMAND_SOURCES` and stops all motion — and `Esc` hands control
+  back to autonomy.
+- **follows a target point** (press `y` to toggle). While on, the drive keys
+  move a green RViz marker instead of the vehicle, and the vehicle yaws and
+  swims to it on its own (a P-controller in the launcher, through the same
+  safety gate). `F` recalls the point to the vehicle; yaw keys do nothing —
+  a point has no heading.
 - **retunes wall-following parameters live**, via `ros2 param set`, with no
   restart at all — those parameters are re-read every control cycle. Options
   that support this are marked `(live)`.
+- **starts the viewers.** RViz is on by default; the *rqt* option adds an
+  `rqt` layer beside it (node graph, topic monitor, plots, parameter
+  reconfigure) for when a run needs introspection rather than a demo view.
 - **shuts down cleanly.** Every layer runs in its own process group and is torn
   down with an escalating SIGINT → SIGTERM → SIGKILL, on quit, on Ctrl-C, and
   on exit, so nothing is left running in the background.
@@ -88,6 +100,7 @@ ros2 launch bringup demo.launch.py mode:=teleop|frontier          # operator mod
 ros2 launch bringup demo.launch.py mapper:=octomap|tsdf           # map backend
 ros2 launch bringup demo.launch.py slam:=none|slam                # pose source
 ros2 launch bringup demo.launch.py rviz:=false                    # headless
+ros2 launch bringup demo.launch.py mapper:=tsdf tsdf_octomap:=false  # skip the TSDF→OcTree bridge
 ros2 launch bringup demo.launch.py noise_profile:=realistic|ideal|sonar_only|odom_pos_only|odom_only|degraded  # slam:=slam only
 ros2 launch bringup demo.launch.py mode:=frontier scan_style:=sweep|spin \
   scan_sweep_deg:=180.0                                           # cable-safe sweep (default) vs full revolution
@@ -189,8 +202,11 @@ The view switches automatically with `mapper`/`slam` (`slam:=slam` wins if both
 apply — see [`bringup/rviz/`](../bringup/rviz)):
 
 - default (`mapper:=octomap slam:=none`): the base view.
-- `mapper:=tsdf`: TSDF surface/voxels in place of the OctoMap displays (which
-  would just sit empty — `octomap_server` is not launched in this mode).
+- `mapper:=tsdf`: the TSDF surface plus `OcTree (occupied)`. `octomap_server`
+  is not launched in this mode — `/octomap_binary` comes from
+  `tsdf_to_octomap`, which rebuilds an `octomap::OcTree` out of the TSDF's
+  occupied and free voxels (`tsdf_octomap:=true`, the default). With the
+  bridge off, enable the marker-based `TSDFVoxels` display instead.
 - `slam:=slam`: ground truth (green) vs SLAM (blue) vs raw dead-reckoning (red)
   paths, a live drift arrow + text HUD (error/ATE/RPE/keyframes/loop
   closures/D-optimality, from `/eval/markers`), pose-graph edges, and covariance

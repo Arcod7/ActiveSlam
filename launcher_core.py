@@ -144,7 +144,8 @@ def build_groups(bringup_share=""):
                  f"mapper:={v['mapper']}",
                  f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}",
                  f"publish_projected_map:={'true' if publish_projected else 'false'}",
-                 f"target_depth_m:={v['robot_depth_target']}"]]
+                 f"target_depth_m:={v['robot_depth_target']}",
+                 f"tsdf_octomap:={'true' if v['tsdf_octomap'] else 'false'}"]]
 
     def gt_map(v):
         return [["ros2", "launch", "stonefish_groundtruth_mapping",
@@ -230,7 +231,7 @@ def build_groups(bringup_share=""):
         Group("mapper", "Map backend",
               "OctoMap occupancy grid or VDBFusion TSDF. Consumes /cloud_in "
               "only, so the backend can be swapped without touching the sim.",
-              mapper, depends=["mapper", "map_rebuild", "mode"]),
+              mapper, depends=["mapper", "map_rebuild", "mode", "tsdf_octomap"]),
         Group("gt_map", "Ground-truth reference map",
               "A second map built from the exact simulator pose, overlaid "
               "against the belief map so map drift is visible directly.",

@@ -111,6 +111,13 @@ PARAMS = [
           ["octomap", "tsdf"],
           {"octomap": "octomap_server, /projected_map + occupancy voxels.",
            "tsdf": "VDBFusion/OpenVDB surface reconstruction with normals."}),
+    Param("tsdf_octomap", "TSDF → OcTree", "bool", True, "primary",
+          "Rebuild the TSDF grid into an octomap::OcTree on /octomap_binary "
+          "(tsdf_to_octomap), from its occupied and free voxels. Gives the TSDF "
+          "backend the octree interface 3-D frontier detection and 3-D A* "
+          "expect, and makes the belief map visible under RViz's OctoMap "
+          "displays.",
+          visible=lambda v: v["mapper"] == "tsdf"),
     Param("slam", "Pose source", "enum", "none", "primary",
           "Where the vehicle pose comes from. none uses the simulator's exact "
           "pose. slam runs a GTSAM iSAM2 pose graph over simulated "

@@ -1491,3 +1491,107 @@ dominate run-to-run variance, so the arm means are directional, not precise —
 the tail elimination (peak 1.30→0.30 m, zero closure jumps) is the robust result.
 The sigmas are physically motivated but not tuned; a consistency/innovation gate
 on loop closures (Phase 39) remains available as a complementary safeguard.
+
+## Phase 41 — Launcher driving rework: always-live keys, AZERTY, follow-the-point
+
+**Date**: 2026-07-24
+**Files**: `launcher.py`, `launcher_core.py`, `launcher_model.py`,
+`bringup/rviz/demo.rviz`, `bringup/rviz/demo_slam.rviz`,
+`bringup/rviz/demo_tsdf.rviz`, `docs/RUN.md`, `STATE.md`, `README.md`,
+`Progress.md`
+
+**Objective**: Remove the `t` teleop mode key from the control screen, support
+AZERTY keyboards, and add a target-point follow mode (`y`) where the drive
+keys move a goal point the vehicle swims to autonomously.
+
+**What changed**: Driving is no longer a sub-mode. In teleop mode the launcher
+becomes the `/motion/body_command` source as soon as the gate/mixer group is
+up, and the QWEASD cluster (plus Space/X/F) drives immediately; in frontier
+mode the first drive keypress performs the old `t` flow — suspend the planner,
+bring up the teleop gate/mixer, take over — and `Esc` releases back to
+autonomy (first `Esc` drops the target point if one is active). Displaced
+option-screen keys moved: edit `e`→`i`, advanced `a`→`o`, stop stack `s`→`k`,
+quit is `Esc` only, and Space no longer cycles values (it is drive-up). The
+key table lives in `launcher_core.DRIVE_KEYS` per layout; AZERTY maps the same
+physical cluster (Z fwd, A strafe-left, Q yaw-left, W kept as a forward
+alias), selected by a new persisted `keyboard` option, applied live with no
+restart. The `y` toggle places a target point at the vehicle's current pose
+(so engaging never commands a jump), moves it in the vehicle's yaw frame with
+the same cluster (0.5 m/keypress × speed factor; yaw keys inert, `F` recalls
+the point to the vehicle), and runs a P-controller (surge ∝ distance ×
+cos heading error, yaw ∝ heading error with a 0.4 m dead zone, heave ∝
+vertical error, saturated at the gate's ±1.0) at the UI's 5 Hz tick so the
+fail-closed gate always sees a fresh command. The controller works in the
+odometry the operator sees: `/slam/odometry` under slam:=slam, ground truth
+otherwise. The point is drawn as a green sphere on
+`/activeslam/target_point`, with a Marker display added to all three RViz
+configs (fixed frame world_ned in each). Key translation, point motion and
+the controller are pure-stdlib functions in `launcher_core.py`.
+
+**Verification**: 60 headless checks pass (both layouts' key maps, command
+signs against `keyboard_control.py`, point translation in the yaw frame,
+surface clamping, controller tolerance/saturation/angle-wrap). RViz configs
+re-parsed as YAML with the new display present. Not yet exercised against the
+running simulator — the takeover/release and reset/apply interactions with
+the planner gate deserve a manual smoke run (drive in teleop, `y` follow,
+drive-key takeover and `Esc` release in frontier).
+
+## Phase 42 — TSDF as an OcTree, and an rqt layer in the launcher
+
+**Date**: 2026-07-25
+**Files**: `slam/tsdf_octomap/` (new package),
+`planner/frontier_slam/frontier_slam/tsdf_mapper.py`,
+`slam/stonefish_groundtruth_mapping/launch/mapper_only.launch.py`,
+`slam/stonefish_groundtruth_mapping/launch/tsdf.launch.py`,
+`slam/stonefish_groundtruth_mapping/package.xml`,
+`bringup/launch/demo.launch.py`, `bringup/rviz/demo_tsdf.rviz`,
+`launcher_core.py`, `launcher_model.py`,
+`eval/eval_tools/scripts/run_matrix.py`, `STATE.md`, `Progress.md`
+
+**Discovery**: Under `mapper:=tsdf` nothing publishes `/octomap_binary`,
+`/occupied_cells_vis_array` or `/octomap_point_cloud_centers` — Phase 21's
+dual-map `octomap_server` was later replaced by `tsdf_mapper` deriving
+`/projected_map` itself, and no octree source took its place. All three
+OctoMap displays in `demo_tsdf.rviz` were therefore bound to topics with no
+publisher (two also disabled), so the TSDF belief map had no occupancy view in
+RViz beyond the marker-based `TSDFVoxels`, which was off. `STATE.md` still
+described the dual-map arrangement and has been corrected.
+
+**TSDF → OcTree**: new `tsdf_octomap` package (ament_cmake) with
+`tsdf_to_octomap`, which rebuilds an `octomap::OcTree` from two clouds and
+publishes it on `/octomap_binary` (latched, `octomap_msgs/Octomap`, binary).
+`tsdf_mapper` gained `publish_free_voxels` → `/tsdf/free_voxels`, the
+observed-empty (d > 0) half that `/tsdf/occupied_voxels` cannot express;
+without it every unoccupied cell would be unknown and 3-D frontier detection
+impossible. Both come from the walk that already feeds `/projected_map`, so
+the extra cost is one cloud publish. The tree is rebuilt from scratch each
+cycle rather than accumulated: the TSDF is reset+re-integrated after a large
+loop closure (`map_rebuild:=true`), and an incrementally-updated octree would
+retain cells the TSDF has already corrected away. Free cells are written
+first so an occupied cell wins any coordinate claimed by both. Requires the
+pyopenvdb grid path; the surface-vertex fallback has no free space and the
+node logs an error and stays quiet.
+
+Wired as `tsdf_octomap:=true` (default) through `demo.launch.py` →
+`tsdf.launch.py` → `mapper_only.launch.py`, as a launcher option
+(`TSDF → OcTree`, visible under `mapper:=tsdf`, in the mapper group's
+`depends` so toggling restarts just that layer), and as a `run_matrix.py`
+matrix key so batches can turn it off. `demo_tsdf.rviz`'s two OctoMap
+displays are renamed `OcTree (occupied)` (now enabled, Z-axis coloured) and
+`OcTree (free)`, both switched to transient-local QoS to match the latched
+publisher.
+
+**Verification**: ✅ Live headless run `mode:=frontier mapper:=tsdf`:
+`/octomap_binary` publishes at 0.5 Hz (the cloud rate) with `id=OcTree`,
+`resolution=0.2`, `binary=true`, growing 4.8k→5.7k occupied and 46k→57k free
+cells into ~25k octree nodes; `tsdf_to_octomap` present exactly once in
+`ros2 node list`. Not yet confirmed in the RViz GUI — headless only.
+`/static_camera_tf` appears twice in `ros2 node list` on a single clean stack;
+pre-existing and unrelated to this change, but worth a look.
+
+**Launcher rqt layer**: new `rqt` bool option (default off) and a matching
+group after `rviz` in `GROUP_ORDER`, launching plain `rqt` — node graph, topic
+monitor, plots, parameter reconfigure. Like the RViz group it is killed
+outright rather than SIGINT-laddered (a viewer has nothing to flush) and has no
+`depends`, so it never restarts on a config change. `rqt` needs no install:
+`ros-jazzy-rqt-common-plugins` is already present in the container.

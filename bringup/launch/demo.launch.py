@@ -162,6 +162,12 @@ def generate_launch_description():
         choices=["octomap", "tsdf"],
         description="Map backend: OctoMap occupancy grid or VDBFusion TSDF",
     )
+    tsdf_octomap_arg = DeclareLaunchArgument(
+        "tsdf_octomap",
+        default_value="true",
+        description="mapper:=tsdf only: also rebuild the TSDF grid into an "
+        "octomap::OcTree on /octomap_binary (tsdf_to_octomap)",
+    )
     rviz_arg = DeclareLaunchArgument(
         "rviz",
         default_value="true",
@@ -412,6 +418,7 @@ def generate_launch_description():
                  "' == 'frontier' else 'false'"]
             ),
             "target_depth_m": LaunchConfiguration("depth"),
+            "tsdf_octomap": LaunchConfiguration("tsdf_octomap"),
         }.items(),
         condition=LaunchConfigurationEquals("mapper", "tsdf"),
     )
@@ -747,6 +754,7 @@ def generate_launch_description():
             wall_normal_offset_arg,
             wall_path_heading_weight_arg,
             mapper_arg,
+            tsdf_octomap_arg,
             rviz_arg,
             slam_arg,
             noise_profile_arg,

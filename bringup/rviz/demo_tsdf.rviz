@@ -253,7 +253,7 @@ Visualization Manager:
       Use rainbow: true
       Value: true
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
+      Enabled: false
       Name: TSDFVoxels
       Namespaces:
         tsdf_voxels: true
@@ -263,7 +263,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /tsdf/voxels
-      Value: true
+      Value: false
     - Angle Tolerance: 0.10000000149011612
       Class: rviz_default_plugins/Odometry
       Covariance:
@@ -384,10 +384,10 @@ Visualization Manager:
       Max. Height Display: 3.4028234663852886e+38
       Max. Octree Depth: 14
       Min. Height Display: -3.4028234663852886e+38
-      Name: OccupancyGrid
+      Name: OcTree (free)
       Topic:
         Depth: 5
-        Durability Policy: Volatile
+        Durability Policy: Transient Local
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
@@ -397,19 +397,19 @@ Visualization Manager:
       Voxel Coloring: Cell Color
       Voxel Rendering: Free Voxels
     - Class: octomap_rviz_plugins/OccupancyGrid
-      Enabled: false
+      Enabled: true
       Max. Height Display: 3.4028234663852886e+38
       Max. Octree Depth: 16
       Min. Height Display: -3.4028234663852886e+38
-      Name: OccupancyGrid
+      Name: OcTree (occupied)
       Topic:
         Depth: 5
-        Durability Policy: Volatile
+        Durability Policy: Transient Local
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /octomap_binary
-      Value: false
+      Value: true
       Voxel Alpha: 1
       Voxel Coloring: Z-Axis
       Voxel Rendering: Occupied Voxels

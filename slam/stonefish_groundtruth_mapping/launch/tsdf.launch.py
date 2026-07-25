@@ -10,6 +10,10 @@ Full TSDF mapping stack: Stonefish + TF + point cloud + tsdf_mapper.
                                                                   input for wall_looking)
                                   → /tsdf/voxels                 (weight/sign-coded MarkerArray)
 
+tsdf_octomap:=true additionally rebuilds the grid into an octomap::OcTree on
+/octomap_binary (tsdf_to_octomap) — the octree interface for 3-D frontier
+detection and 3-D A*.
+
 Thin composition of pointcloud.launch.py and mapper_only.launch.py
 (mapper:=tsdf) — parallel structure to octomap.launch.py, same core, different
 map backend. Launch mapper_only.launch.py by itself to swap the map backend
@@ -51,6 +55,11 @@ def generate_launch_description():
         'target_depth_m', default_value='-1.0',
         description='Cruise depth (world_ned Z) the /projected_map band centres on',
     )
+    tsdf_octomap_arg = DeclareLaunchArgument(
+        'tsdf_octomap', default_value='false',
+        description='Rebuild an octomap::OcTree from this TSDF grid and publish '
+        'it on /octomap_binary (tsdf_to_octomap)',
+    )
 
     pointcloud = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(_LAUNCH_DIR, 'pointcloud.launch.py'))
@@ -64,9 +73,11 @@ def generate_launch_description():
             'carve_no_return': LaunchConfiguration('carve_no_return'),
             'publish_projected_map': LaunchConfiguration('publish_projected_map'),
             'target_depth_m': LaunchConfiguration('target_depth_m'),
+            'tsdf_octomap': LaunchConfiguration('tsdf_octomap'),
         }.items(),
     )
 
     return LaunchDescription([map_rebuild_arg, carve_no_return_arg,
                               publish_projected_map_arg, target_depth_m_arg,
+                              tsdf_octomap_arg,
                               pointcloud, tsdf_mapper])

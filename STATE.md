@@ -1,6 +1,6 @@
 # ActiveSlam SLAM Backend — Current State
 
-Mutable snapshot. Overwrite, never append. Last updated: 2026-07-23.
+Mutable snapshot. Overwrite, never append. Last updated: 2026-07-25.
 
 Change log → `Progress.md`. Detailed design + as-built deltas → `docs/SLAM_PLAN.md`.
 
@@ -9,9 +9,13 @@ Change log → `Progress.md`. Detailed design + as-built deltas → `docs/SLAM_P
 `bringup/demo.launch.py` picks one of three configs automatically (`slam:=slam`
 takes priority over `mapper`):
 - `rviz/demo.rviz` — unchanged base view (`mapper:=octomap slam:=none`).
-- `rviz/demo_tsdf.rviz` — TSDF surface/voxel displays instead of OctoMap's
-  (OctoMap topics aren't published when `mapper:=tsdf`, so its displays would
-  just be empty).
+- `rviz/demo_tsdf.rviz` — TSDF surface plus `OcTree (occupied)` on
+  `/octomap_binary`, which under `mapper:=tsdf` is published by
+  `tsdf_to_octomap` (not `octomap_server`, which never runs in this mode).
+  `OcTree (free)` and the marker-based `TSDFVoxels` view of the same cells are
+  present but off by default. With `tsdf_octomap:=false` there is no
+  `/octomap_binary` at all and the OcTree displays sit empty — enable
+  `TSDFVoxels` instead.
 - `rviz/demo_slam.rviz` — the error/noise view: ground truth (green) vs SLAM
   (blue) vs raw dead-reckoning (red) paths, pose-graph edges, covariance
   ellipsoids, and a drift arrow + live text HUD sourced from
@@ -93,9 +97,32 @@ Nothing moves until `/motion/enable` is published — by the RViz panel
 `safety_start_enabled:=true` for headless runs. `/motion/safety_status`
 reports which condition is blocking.
 
+## Map products under `mapper:=tsdf`
+
+`octomap_server` does not run in this mode; `tsdf_mapper` owns the belief map
+and exposes it three ways, all derived from the same VDB grid so they cannot
+disagree:
+
+| Topic | Type | Consumer |
+|---|---|---|
+| `/tsdf/surface_cloud`, `/tsdf/voxels` | cloud, MarkerArray | RViz |
+| `/tsdf/occupied_voxels`, `/tsdf/free_voxels` | PointCloud2 | frontier solid rejection; `tsdf_to_octomap` |
+| `/projected_map` | OccupancyGrid | 2-D frontier detection + A* (`publish_projected_map:=true`) |
+| `/octomap_binary` | octomap_msgs/Octomap | RViz OctoMap displays; the octree interface for future 3-D frontier/A* (`tsdf_octomap:=true`, default) |
+
+`slam/tsdf_octomap/` (`tsdf_to_octomap`, C++) rebuilds an `octomap::OcTree`
+from the occupied + free clouds once a second — from scratch each cycle, since
+the TSDF itself is reset+re-integrated after a large loop closure and an
+incrementally-updated octree would keep cells the TSDF has already corrected
+away. Occupied and free voxels come straight across; everything else stays
+unknown. Requires the pyopenvdb grid path (the surface-vertex fallback has no
+free space); `tsdf_mapper` logs an error and disables `/tsdf/free_voxels` if
+it is missing.
+
 ## Packages
 
 - `slam/slam_backend/` — sensor sims (incl. `sonar_noise`), dead-reckoning fusion, pose graph, scan matcher
+- `slam/tsdf_octomap/` — `tsdf_to_octomap`: TSDF grid → `octomap::OcTree` → `/octomap_binary`
 - `eval/eval_tools/` — benchmark node, map_metrics node, TUM writer, offline plotting, batch orchestrator (`scripts/run_matrix.py`)
 - `slam/stonefish_groundtruth_mapping/launch/` — layered: `core` (Stonefish
   alone) / `tf_only` / `pointcloud_only` / `mapper_only`, with
@@ -336,10 +363,13 @@ one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.3
   wasn't included under `mapper:=tsdf`) — the robot spun in place for the
   full run instead of exploring. The map-quality-degradation finding this
   produced is an artifact of that bug, not a rebuild-fidelity result, and is
-  invalidated (Phase 21). Fix landed:
-  `demo.launch.py` now also launches `octomap_server` as a planning-only map
-  source under `mode:=frontier mapper:=tsdf` (dual-map with TSDF as the map
-  product). The `tsdf`/`tsdf_rebuild` rows still need re-specifying and
+  invalidated (Phase 21). Fix landed: `tsdf_mapper` derives `/projected_map`
+  from its own grid (a Z band around the cruise depth,
+  `publish_projected_map:=true`), so the planning map and the belief map are
+  the same map. This superseded Phase 21's dual-map stopgap, which ran a
+  second `octomap_server` purely as a planning-map source — no
+  `octomap_server` runs under `mapper:=tsdf` any more.
+  The `tsdf`/`tsdf_rebuild` rows still need re-specifying and
   re-running on a moving robot before any rebuild-fidelity claim can be made.
   A 10+ minute single session is also now done (the 600 s baseline above).
   Still open: `evo_ape`/`evo_rpe` cross-check against the written TUM files.

@@ -15,14 +15,19 @@ here, so the original cascading entry points are unchanged.
                                               -> /tsdf/surface_normals_cloud
                                               -> /tsdf/voxels
 
+tsdf_octomap:=true adds tsdf_to_octomap alongside tsdf_mapper: the TSDF's
+occupied and free voxels are rebuilt into an octomap::OcTree and published on
+/octomap_binary, giving the TSDF backend the same octree interface 3-D
+frontier detection and 3-D A* would consume from octomap_server.
+
 map_rebuild:=true (slam:=slam, mapper:=tsdf only; see pose_graph.py,
 tsdf_mapper.py) makes the belief-map instance reset+re-integrate from
 corrected keyframe poses after a big loop closure.
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.conditions import LaunchConfigurationEquals
-from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition, LaunchConfigurationEquals
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -59,6 +64,11 @@ def generate_launch_description():
         'projected_map_margin_cells', default_value='10',
         description='Unknown-cell border added around the /projected_map bounding box',
     )
+    tsdf_octomap_arg = DeclareLaunchArgument(
+        'tsdf_octomap', default_value='false',
+        description='TSDF only: rebuild an octomap::OcTree from this TSDF grid '
+        'and publish it on /octomap_binary (tsdf_to_octomap)',
+    )
 
     octomap = Node(
         package='octomap_server',
@@ -93,11 +103,30 @@ def generate_launch_description():
                 LaunchConfiguration('projected_map_band_m'), value_type=float),
             'projected_map_margin_cells': ParameterValue(
                 LaunchConfiguration('projected_map_margin_cells'), value_type=int),
+            'publish_free_voxels': ParameterValue(
+                LaunchConfiguration('tsdf_octomap'), value_type=bool),
         }],
         condition=LaunchConfigurationEquals('mapper', 'tsdf'),
+    )
+
+    # resolution mirrors tsdf_mapper's voxel_size default (0.2): the octree
+    # cells are the TSDF cells, not a resampling of them.
+    tsdf_to_octomap = Node(
+        package='tsdf_octomap',
+        executable='tsdf_to_octomap',
+        name='tsdf_to_octomap',
+        output='screen',
+        parameters=[{
+            'resolution': 0.2,
+            'world_frame': 'world_ned',
+        }],
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('mapper'), "' == 'tsdf' and '",
+            LaunchConfiguration('tsdf_octomap'), "'.lower() == 'true'"])),
     )
 
     return LaunchDescription([mapper_arg, map_rebuild_arg, carve_no_return_arg,
                               publish_projected_map_arg, target_depth_m_arg,
                               projected_map_band_m_arg, projected_map_margin_cells_arg,
-                              octomap, tsdf_mapper])
+                              tsdf_octomap_arg,
+                              octomap, tsdf_mapper, tsdf_to_octomap])
