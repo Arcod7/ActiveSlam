@@ -38,6 +38,27 @@ from slam_backend.scan_matcher import ScanMatcher
 # Rows/cols of a GTSAM [rot|trans] 6x6 that hold the drifting DoF: x, y, yaw.
 XYH_INDICES = [3, 4, 2]
 
+# Yaw variance in a ROS [trans|rot] row-major 6x6 covariance.
+YAW_COV_INDEX = 35
+
+# Index of yaw in the GTSAM [rot|trans] prior sigma vector.
+PRIOR_YAW_INDEX = 2
+
+
+def prior_sigmas_with_yaw(base_sigmas: np.ndarray, yaw_var: float) -> np.ndarray:
+    """Swap the attitude filter's own yaw sigma into the attitude+depth prior.
+
+    Roll/pitch/depth are read straight off their sensors, so the profile spec is
+    the right sigma for them. Yaw is not -- the prior asserts the FUSED yaw, and
+    the fusion is measurably wider than the IMU spec it was built from. Keeps the
+    default when no covariance is supplied.
+    """
+    if not np.isfinite(yaw_var) or yaw_var <= 0.0:
+        return base_sigmas
+    sigmas = base_sigmas.copy()
+    sigmas[PRIOR_YAW_INDEX] = float(np.sqrt(yaw_var))
+    return sigmas
+
 
 def dopt_xyh(cov_gtsam_6x6: np.ndarray) -> float:
     """Kiefer D-optimality det(Sigma)^(1/3) over XYH, per Suresh et al. (2020)
@@ -132,6 +153,7 @@ class PoseGraphNode(Node):
         self._keyframes: list[Keyframe] = []
         self._latest_dead_reckoned_T = None
         self._latest_dead_reckoned_stamp = None
+        self._latest_yaw_var = 0.0    # 0 until odometry arrives -> profile default
         self._T_base_cam = None   # static extrinsic, resolved lazily via TF
 
         self.tf_buffer = Buffer()
@@ -216,7 +238,9 @@ class PoseGraphNode(Node):
         # dead-reckoning reading (roller pattern, graph.cpp:44-46): x/y left
         # unconstrained (1e3) since only registration constrains horizontal
         # position; roll/pitch/yaw from IMU, z from pressure.
-        prior_sigmas = np.array([
+        # The yaw entry is a fallback only -- prior_sigmas_with_yaw replaces it
+        # with the attitude filter's live posterior when odometry carries one.
+        self._prior_sigmas = np.array([
             profile.imu.sigma_roll_rad,
             profile.imu.sigma_pitch_rad,
             profile.imu.sigma_yaw_rad,
@@ -224,12 +248,16 @@ class PoseGraphNode(Node):
             1e3,
             profile.pressure.sigma_depth_m,
         ])
-        self._att_depth_noise = gtsam.noiseModel.Diagonal.Sigmas(prior_sigmas)
 
         # Scratch keys for the throwaway factor _closure_nis scores; never
         # inserted into iSAM2, so they cannot collide with keyframe symbols.
         self._sym_a = gtsam.symbol('n', 0)
         self._sym_b = gtsam.symbol('n', 1)
+
+    def _att_depth_noise_for(self, yaw_var: float):
+        """Per-keyframe attitude+depth prior; rebuilt because yaw varies."""
+        return gtsam.noiseModel.Diagonal.Sigmas(
+            prior_sigmas_with_yaw(self._prior_sigmas, yaw_var))
 
     # ------------------------------------------------------------------
     # Sensor callbacks
@@ -238,6 +266,7 @@ class PoseGraphNode(Node):
         T_odom = odom_to_matrix(msg)
         self._latest_dead_reckoned_T = T_odom
         self._latest_dead_reckoned_stamp = msg.header.stamp
+        self._latest_yaw_var = msg.pose.covariance[YAW_COV_INDEX]
 
         self._path_dr_msgs.append(matrix_to_pose_stamped(T_odom, msg.header.stamp, self.world_frame))
 
@@ -330,7 +359,8 @@ class PoseGraphNode(Node):
         T_prior = T_world_est.copy()
         T_prior[:3, :3] = T_odom[:3, :3]
         T_prior[2, 3] = T_odom[2, 3]
-        graph.addPriorPose3(sym, gtsam.Pose3(T_prior), self._att_depth_noise)
+        graph.addPriorPose3(sym, gtsam.Pose3(T_prior),
+                            self._att_depth_noise_for(self._latest_yaw_var))
 
         # 4) Loop closure detection (against the pre-update world estimate).
         # Disabled entirely (A/B benchmarking) still lets _find_moved_keyframes

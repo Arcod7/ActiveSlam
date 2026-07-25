@@ -1979,3 +1979,65 @@ confirmation run fired 2 revisits with `U_r` median 1.02 / max 1.52 — the trig
 that never fired in the 2026-07-24 ablation now engages. That run also reports
 ANEES 19.7 against an expectation of 3, so the overconfidence is now a measured
 number rather than an inference.
+
+## Phase 49 — The yaw prior was labelled with the wrong sensor's sigma
+
+Phase 48 ended with a measured ANEES of 19.7 against an expectation of 3 — the
+marginal covariance was ~6.6x too tight and the cause was open. It is the
+attitude+depth prior's yaw entry.
+
+The prior asserts an absolute world-frame pose at every keyframe, and its yaw
+sigma was `profile.imu.sigma_yaw_rad`. The value it asserts, though, is not the
+IMU's yaw — it is `T_odom`'s, the *fused* output of `YawKalmanFilter`. Those are
+not the same quantity. Replaying the exact sim sensor chain against a known
+ground truth measures the gap:
+
+```
+                          true RMS err   claimed sigma    ratio
+raw IMU message                0.00999         0.01000     1.00
+fused filter output            0.02922         0.03931     0.74
+pose graph prior               0.02922         0.01000     2.92
+```
+
+The IMU message really is absolute to its stated 0.01 rad — `imu_sim.py` builds
+it from ground-truth attitude plus white noise. But `predict_imu` treats each
+reading as an *increment* (`variance += 2σ²`), so the filter random-walks away
+from a 0.01 rad input and is pulled back only by the 0.05 rad compass, landing
+at a true error of 0.0292 rad. The graph then labelled that degraded value with
+the undegraded sensor's spec: 2.9x too tight. Heading error is what converts
+into cross-track position error over a path, so an over-tight yaw marginal is
+exactly what lets D-optimality stay flat while ATE climbs.
+
+The filter already computed the right number and nothing consumed it.
+`dead_reckoning.py` now publishes `YawKalmanFilter.variance` in the fused
+odometry's `pose.covariance[35]`, and `pose_graph.prior_sigmas_with_yaw()`
+substitutes it into the prior per keyframe. Roll/pitch/depth keep their profile
+sigmas — those are read straight off their sensors, so the spec is the right
+figure. Missing covariance falls back to the profile default, so the ideal
+profile and replayed bags are unchanged.
+
+Same scene, same seed, same 240 s as the Phase 48 confirmation run:
+
+| | before | after | target |
+|---|---|---|---|
+| ANEES (final) | 19.69 | 2.37 | 3.0 |
+| NEES (median) | 11.00 | 1.45 | 3.0 |
+| ATE (final) | 0.248 m | 0.103 m | — |
+| abs_error (max) | 0.693 m | 0.177 m | — |
+| D-opt XYH (median) | 0.0021 | 0.0048 | — |
+
+The estimator is consistent now, marginally on the conservative side. ATE fell
+58% as well: the over-tight prior was not only mislabelling the uncertainty, it
+was over-constraining the solve and fighting the loop closures. D-opt roughly
+doubled, which is the honest value — any `sigma_allow_*` tuned before this
+change is now calibrated against a signal half the size and must be re-measured.
+
+**Left open.** Every noise profile labels its IMU block "gyro-integrated
+attitude" and Phase 34 recorded that the profiles "reinterpret
+`imu.sigma_yaw_rad` as short-term gyro noise (with heading error now carried by
+the compass)". `imu_sim.py` never followed: it still adds noise to ground-truth
+yaw, so the topic is an absolute heading, which is what `STATE.md` documents it
+as. The simulator and the stated design disagree, and no real IMU knows absolute
+heading to 0.01 rad underwater. Resolving it means changing what the simulated
+sensor is, which moves every recorded run number, so it is left as a decision
+rather than folded into this change.
