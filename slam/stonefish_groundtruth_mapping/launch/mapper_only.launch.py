@@ -18,12 +18,41 @@ here, so the original cascading entry points are unchanged.
 map_rebuild:=true (slam:=slam, mapper:=tsdf only; see pose_graph.py,
 tsdf_mapper.py) makes the belief-map instance reset+re-integrate from
 corrected keyframe poses after a big loop closure.
+
+`depth` (NED metres, default -1.0 = auto-lock) narrows /projected_map's Z
+range to a band centred on that depth (see z_band.py) instead of the
+stock full-column projection — skipped when depth is auto-locked, since
+the actual depth is unknown at launch time in that case.
 """
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import LaunchConfigurationEquals
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+from stonefish_groundtruth_mapping.z_band import octomap_z_band_params
+
+
+def _octomap_node(context, *args, **kwargs):
+    depth = float(LaunchConfiguration('depth').perform(context))
+    params = {
+        'frame_id':               'world_ned',
+        'resolution':             0.2,        # 20 cm voxels
+        'sensor_model/max_range': 15.0,       # matches Dcam depth_max in .scn
+        'latch':                  True,
+    }
+    params.update(octomap_z_band_params(depth))
+    return [Node(
+        package='octomap_server',
+        executable='octomap_server_node',
+        name='octomap_server',
+        output='screen',
+        parameters=[params],
+        remappings=[
+            ('cloud_in', '/cloud_in'),
+        ],
+        condition=LaunchConfigurationEquals('mapper', 'octomap'),
+    )]
 
 
 def generate_launch_description():
@@ -35,23 +64,14 @@ def generate_launch_description():
         'map_rebuild', default_value='false',
         description='Reset+re-integrate this TSDF instance after a big loop closure',
     )
-
-    octomap = Node(
-        package='octomap_server',
-        executable='octomap_server_node',
-        name='octomap_server',
-        output='screen',
-        parameters=[{
-            'frame_id':               'world_ned',
-            'resolution':             0.2,        # 20 cm voxels
-            'sensor_model/max_range': 15.0,       # matches Dcam depth_max in .scn
-            'latch':                  True,
-        }],
-        remappings=[
-            ('cloud_in', '/cloud_in'),
-        ],
-        condition=LaunchConfigurationEquals('mapper', 'octomap'),
+    depth_arg = DeclareLaunchArgument(
+        'depth', default_value='-1.0',
+        description=(
+            'Target depth in NED metres, used to centre the /projected_map Z-band. '
+            '-1 = auto-lock (unknown at launch time, so the map stays full-column).'),
     )
+
+    octomap = OpaqueFunction(function=_octomap_node)
 
     tsdf_mapper = Node(
         package='frontier_slam',
@@ -62,4 +82,5 @@ def generate_launch_description():
         condition=LaunchConfigurationEquals('mapper', 'tsdf'),
     )
 
-    return LaunchDescription([mapper_arg, map_rebuild_arg, octomap, tsdf_mapper])
+    return LaunchDescription(
+        [mapper_arg, map_rebuild_arg, depth_arg, octomap, tsdf_mapper])

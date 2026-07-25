@@ -837,3 +837,54 @@ x86_64-only.
 Note: rosdep's `gtsam` key resolves to `ros-jazzy-gtsam`, which ships the
 C++ libraries and no Python module, so it cannot replace the PyPI wheel
 that `slam_backend` imports. Left on pip deliberately.
+
+## Phase 27 — /projected_map Z-band, configurable A* inflation zones, dashboard rename
+
+**Date**: 2026-07-25
+**Files**: `slam/stonefish_groundtruth_mapping/stonefish_groundtruth_mapping/z_band.py`
+(new), `slam/stonefish_groundtruth_mapping/launch/mapper_only.launch.py`,
+`slam/stonefish_groundtruth_mapping/launch/octomap.launch.py`,
+`bringup/launch/demo.launch.py`, `planner/frontier_slam/frontier_slam/path_planner.py`,
+`planner/frontier_slam/frontier_slam/frontier_extractor.py`,
+`planner/frontier_slam/frontier_slam/visualizer.py`,
+`planner/frontier_slam/launch/frontier_slam.launch.py`,
+`planner/frontier_slam/README.md`, `launcher_model.py`, `launcher_core.py`
+
+`/projected_map` was a flat "Z-sheet": `octomap_server`'s stock
+`occupancy_min_z`/`occupancy_max_z` were never set, so the whole water
+column collapsed into one 2D cell per XY position (`FutureWork.md` item 5's
+documented limitation). A single-Z assumption at the robot's exact depth is
+unsafe anyway — depth-hold isn't precise and the hull has vertical extent —
+so `z_band.py` centres the projection on a band of `2 x ROBOT_HEIGHT_M`
+(0.25 m, BlueROV2 Heavy datasheet height) around the commanded cruise
+depth, applied to every `octomap_server` instance that feeds
+`/projected_map` (`mapper_only.launch.py`'s primary instance and
+`demo.launch.py`'s dual-map planning-only instance under
+`mode:=frontier mapper:=tsdf`). When `depth` is auto-locked (`-1`, the
+default — unknown at launch time), the band is skipped and the map stays
+full-column, same as before.
+
+`path_planner.py`'s three-zone A* inflation radii (`HARD_INFLATION_M`,
+`INFLATION_M`, `PLAN_INFLATION_M`) were Python constants with no ROS
+parameter, launch argument, or TUI control anywhere — `build_cost_grid()`
+now takes `hard_m`/`soft_m`/`plan_m` overrides, `frontier_extractor.py`
+exposes them as `hard_inflation_m`/`inflation_m`/`plan_inflation_m` ROS
+parameters (module constants remain the defaults), and both new depth/zone
+parameters are threaded through `frontier_slam.launch.py`,
+`demo.launch.py`, and `launcher.py` (as `depth_m` + the three zone params,
+advanced/frontier section).
+
+`/frontier_slam/debug_image` is renamed to `/frontier_slam/planning_dashboard`
+(`publish_debug_image` -> `publish_planning_dashboard`) — it was never a raw
+debug passthrough, always the composite map+zones+path+robot-state overhead
+view, so the old name undersold what it shows.
+
+Verified in the ROS Jazzy container: `colcon build` clean on `bringup`,
+`stonefish_groundtruth_mapping`, `frontier_slam` and their dependents;
+`ros2 launch <pkg> <file> --show-args` confirms the new arguments resolve
+on `mapper_only.launch.py`, `octomap.launch.py`, `frontier_slam.launch.py`
+and `demo.launch.py`; `octomap_z_band_params(1.0)` /
+`octomap_z_band_params(-1.0)` return the expected band / empty dict;
+`colcon test --packages-select frontier_slam` passes all 109 existing
+tests unchanged. Not yet live-run in simulation — the Z-band's effect on
+frontier/A* behaviour with a real moving robot is still unconfirmed.

@@ -1,4 +1,4 @@
-"""RViz and debug-image publishers for the frontier exploration system.
+"""RViz and planning-dashboard-image publishers for the frontier exploration system.
 
 All rendering state is derived from parameters — the class only owns
 the three ROS publishers it creates on construction.
@@ -20,11 +20,11 @@ from frontier_slam.path_planner import CostGrid, PAD_CELLS
 #   Path     set on the Path display in frontier.rviz   |  Background dark (kept)
 C_FRONTIER = (0.000, 0.659, 0.757)   # teal-cyan
 C_GOAL     = (0.961, 0.761, 0.157)   # amber
-C_OCCUPIED = (16,  65,  158)         # blue   (debug-image, 0-255)
+C_OCCUPIED = (16,  65,  158)         # blue   (planning dashboard, 0-255)
 C_FREE     = (245, 245, 245)         # near-white
 C_UNKNOWN  = (208, 217, 238)         # light blue
 C_PATH     = (38,  174, 96)          # green
-C_GOAL255  = (245, 194, 40)          # amber  (debug-image, 0-255)
+C_GOAL255  = (245, 194, 40)          # amber  (planning dashboard, 0-255)
 
 
 class FrontierVisualizer:
@@ -32,7 +32,8 @@ class FrontierVisualizer:
         self._node = node
         self._viz_pub          = node.create_publisher(MarkerArray,   '/frontier_slam/frontiers',    1)
         self._inflated_map_pub = node.create_publisher(OccupancyGrid, '/frontier_slam/inflated_map', 1)
-        self._debug_img_pub    = node.create_publisher(Image,         '/frontier_slam/debug_image',  1)
+        self._dashboard_img_pub = node.create_publisher(
+            Image, '/frontier_slam/planning_dashboard', 1)
 
     # ------------------------------------------------------------------
     def publish_markers(self, clusters, gx: float, gy: float,
@@ -81,7 +82,7 @@ class FrontierVisualizer:
         self._inflated_map_pub.publish(msg)
 
     # ------------------------------------------------------------------
-    def publish_debug_image(self, cg: CostGrid | None, grid_msg,
+    def publish_planning_dashboard(self, cg: CostGrid | None, grid_msg,
                             robot_pos: np.ndarray, robot_yaw: float,
                             robot_speed: float, path: list,
                             goal_xy: np.ndarray | None, stuck_pct: int) -> None:
@@ -152,7 +153,7 @@ class FrontierVisualizer:
         msg.is_bigendian    = False
         msg.step            = w * 3
         msg.data            = out.tobytes()
-        self._debug_img_pub.publish(msg)
+        self._dashboard_img_pub.publish(msg)
 
 
 # ------------------------------------------------------------------

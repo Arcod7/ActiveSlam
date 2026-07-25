@@ -125,7 +125,7 @@ frontier_slam/
 | out | `/frontier_slam/path` | `Path` | A\* waypoint sequence |
 | out | `/frontier_slam/frontiers` | `MarkerArray` | RViz frontier markers |
 | out | `/frontier_slam/inflated_map` | `OccupancyGrid` | 3-zone cost map (debug) |
-| out | `/frontier_slam/debug_image` | `Image` | top-down composite view (debug) |
+| out | `/frontier_slam/planning_dashboard` | `Image` | top-down composite view: map + inflation zones + path + robot/goal state (debug) |
 | internal | `/motion/body_command` | `Twist` | ungated normalized body demand; not SI velocity |
 | internal | `/motion/body_command_safe` | `Twist` | gated body demand for a sim or ArduSub adapter |
 | out | `/motion/safety_status` | `String` | `ACTIVE` or fail-closed reason |
@@ -139,11 +139,12 @@ frontier_slam/
 | `REPLAN_HZ` | 3 Hz | `frontier_extractor.py` |
 | `UPDATE_HZ` | 0.5 Hz | `frontier_extractor.py` |
 | `MIN_CLUSTER_CELLS` | 1 | `frontier_extractor.py` |
-| `HARD_INFLATION_M` | 0.20 m | `path_planner.py` |
-| `INFLATION_M` | 0.75 m | `path_planner.py` |
-| `PLAN_INFLATION_M` | 1.50 m | `path_planner.py` |
+| `hard_inflation_m` (`HARD_INFLATION_M`) | 0.20 m | ROS param, `path_planner.py` default |
+| `inflation_m` (`INFLATION_M`) | 0.75 m | ROS param, `path_planner.py` default |
+| `plan_inflation_m` (`PLAN_INFLATION_M`) | 1.50 m | ROS param, `path_planner.py` default |
 | `STUCK_TIMEOUT` | 30 s | `frontier_extractor.py` |
 | `MAX_SURGE` | 0.35 m/s | `waypoint_controller.py` |
+| `depth` / Z-band | 2x `ROBOT_HEIGHT_M` (0.25 m) centred on `depth` | `stonefish_groundtruth_mapping/z_band.py`, applied to `/projected_map` |
 
 ## Build and run
 

@@ -41,7 +41,10 @@ from frontier_slam.frontier_detection import (
     standoff_point_from_tsdf_surface,
 )
 from frontier_slam.goal_manager import GoalManager
-from frontier_slam.path_planner import CostGrid, build_cost_grid, find_path
+from frontier_slam.path_planner import (
+    CostGrid, HARD_INFLATION_M, INFLATION_M, PLAN_INFLATION_M,
+    build_cost_grid, find_path,
+)
 from frontier_slam.session_log import open_session_log
 from frontier_slam.visualizer import FrontierVisualizer
 
@@ -76,6 +79,9 @@ class FrontierExtractor(Node):
         self.declare_parameter('tsdf_surface_normals_topic', '/tsdf/surface_normals_cloud')
         self.declare_parameter('tsdf_frontier_standoff_m', 1.0)
         self.declare_parameter('tsdf_surface_normal_max_distance_m', 1.0)
+        self.declare_parameter('hard_inflation_m', HARD_INFLATION_M)
+        self.declare_parameter('inflation_m', INFLATION_M)
+        self.declare_parameter('plan_inflation_m', PLAN_INFLATION_M)
         odom_topic = str(self.get_parameter('odom_topic').value)
         motion_status_topic = str(self.get_parameter('motion_status_topic').value)
         tsdf_solid_points_topic = str(
@@ -88,6 +94,9 @@ class FrontierExtractor(Node):
             self.get_parameter('tsdf_frontier_standoff_m').value))
         self._tsdf_surface_normal_max_distance = max(0.0, float(
             self.get_parameter('tsdf_surface_normal_max_distance_m').value))
+        self._hard_inflation_m = float(self.get_parameter('hard_inflation_m').value)
+        self._inflation_m = float(self.get_parameter('inflation_m').value)
+        self._plan_inflation_m = float(self.get_parameter('plan_inflation_m').value)
 
         self._map: OccupancyGrid | None = None
         self._robot_pos: np.ndarray | None = None
@@ -360,7 +369,9 @@ class FrontierExtractor(Node):
         if self._map is None or self._robot_pos is None:
             return
 
-        self._cg = build_cost_grid(self._map)
+        self._cg = build_cost_grid(
+            self._map, hard_m=self._hard_inflation_m,
+            soft_m=self._inflation_m, plan_m=self._plan_inflation_m)
 
         path = Path()
         path.header.stamp    = self.get_clock().now().to_msg()
@@ -407,7 +418,7 @@ class FrontierExtractor(Node):
                     )
         self._path_pub.publish(path)
         self._viz.publish_inflated_map(self._cg, self._map)
-        self._viz.publish_debug_image(
+        self._viz.publish_planning_dashboard(
             self._cg, self._map,
             self._robot_pos, self._robot_yaw, self._robot_speed,
             self._current_path, self._current_goal_xy, self._last_stuck_pct,

@@ -121,17 +121,26 @@ def build_groups(bringup_share=""):
         cmds = [["ros2", "launch", "stonefish_groundtruth_mapping",
                  "mapper_only.launch.py",
                  f"mapper:={v['mapper']}",
-                 f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}"]]
+                 f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}",
+                 f"depth:={v['depth_m']}"]]
         # demo.launch.py also runs octomap_server as the frontier planning map
         # when mapper:=tsdf, since frontier detection needs /projected_map.
         if v["mode"] == "frontier" and v["mapper"] == "tsdf":
-            cmds.append(["ros2", "run", "octomap_server", "octomap_server_node",
-                         "--ros-args",
-                         "-r", "cloud_in:=/cloud_in",
-                         "-p", "frame_id:=world_ned",
-                         "-p", "resolution:=0.2",
-                         "-p", "sensor_model/max_range:=15.0",
-                         "-p", "latch:=true"])
+            cmd = ["ros2", "run", "octomap_server", "octomap_server_node",
+                   "--ros-args",
+                   "-r", "cloud_in:=/cloud_in",
+                   "-p", "frame_id:=world_ned",
+                   "-p", "resolution:=0.2",
+                   "-p", "sensor_model/max_range:=15.0",
+                   "-p", "latch:=true"]
+            # Mirrors stonefish_groundtruth_mapping/z_band.py's
+            # octomap_z_band_params() — duplicated here since this command is
+            # built directly rather than through mapper_only.launch.py.
+            if v["depth_m"] >= 0.0:
+                half = 0.25  # ROBOT_HEIGHT_M, see z_band.py
+                cmd += ["-p", f"occupancy_min_z:={v['depth_m'] - half}",
+                        "-p", f"occupancy_max_z:={v['depth_m'] + half}"]
+            cmds.append(cmd)
         return cmds
 
     def gt_map(v):
@@ -155,6 +164,10 @@ def build_groups(bringup_share=""):
     def planner(v):
         revisit = "true" if (v["revisit"] and v["slam"] == "slam") else "false"
         return [["ros2", "launch", "frontier_slam", "frontier_slam.launch.py",
+                 f"depth:={v['depth_m']}",
+                 f"hard_inflation_m:={v['hard_inflation_m']}",
+                 f"inflation_m:={v['inflation_m']}",
+                 f"plan_inflation_m:={v['plan_inflation_m']}",
                  f"odom_topic:={_odom_topic(v)}",
                  f"revisit:={revisit}",
                  f"scenario:={v['scenario']}",
@@ -211,7 +224,7 @@ def build_groups(bringup_share=""):
         Group("mapper", "Map backend",
               "OctoMap occupancy grid or VDBFusion TSDF. Consumes /cloud_in "
               "only, so the backend can be swapped without touching the sim.",
-              mapper, depends=["mapper", "map_rebuild", "mode"]),
+              mapper, depends=["mapper", "map_rebuild", "mode", "depth_m"]),
         Group("gt_map", "Ground-truth reference map",
               "A second map built from the exact simulator pose, overlaid "
               "against the belief map so map drift is visible directly.",
@@ -229,7 +242,7 @@ def build_groups(bringup_share=""):
               "Frontier detection, A* planning and the path executor that "
               "drives autonomous exploration.",
               planner, depends=["mode", "motion", "scan_style", "scenario",
-                                "revisit", "slam", "mapper",
+                                "revisit", "slam", "mapper", "depth_m",
                                 "scenario_out_dx", "scenario_out_dy",
                                 "scan_sweep_deg", "safety_start_enabled",
                                 "wall_orientation_offset_deg",
@@ -238,7 +251,8 @@ def build_groups(bringup_share=""):
                                 "wall_switch_goal_distance",
                                 "wall_switch_scan_angle", "wall_switch_scan_yaw",
                                 "wall_path_influence", "wall_path_look_offset_deg",
-                                "wall_normal_offset_deg", "wall_path_heading_weight"],
+                                "wall_normal_offset_deg", "wall_path_heading_weight",
+                                "hard_inflation_m", "inflation_m", "plan_inflation_m"],
               visible=lambda v: v["mode"] == "frontier"),
         Group("teleop_support", "Safety gate + thruster mixer",
               "Fail-closed motion safety gate and the thruster mixer that "
