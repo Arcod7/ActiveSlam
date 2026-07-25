@@ -846,15 +846,20 @@ def visible_params(values, show_advanced):
     return out
 
 
-def current_preset_name(values):
-    """Name of the preset the current values match, else '(custom)'. Avoids a
-    stale label after a restored selection or a hand-edited option."""
-    for name, overrides in model.PRESETS:
-        expected = dict(model.DEFAULTS)
-        expected.update(overrides)
-        if all(values.get(k) == expected[k] for k in expected):
-            return name
-    return "(custom)"
+def pending_tag(pend, limit=2):
+    """'[restarts mapper, planner +2]' from Supervisor.pending_for().
+
+    Names are capped so the tag stays on the option's row; the footer carries
+    the full list."""
+    verbs = {"restart": "restarts", "start": "starts", "stop": "stops"}
+    parts = []
+    for action in ("restart", "start", "stop"):
+        gids = [gid for gid, act in pend if act == action]
+        if not gids:
+            continue
+        extra = f" +{len(gids) - limit}" if len(gids) > limit else ""
+        parts.append(f"{verbs[action]} {', '.join(gids[:limit])}{extra}")
+    return "[" + "; ".join(parts) + "]"
 
 
 def fmt_value(p, v):
@@ -1103,6 +1108,13 @@ def control_screen(stdscr, sup, values, link, session):
                 last_point_pub_at = time.time()
         title = "ActiveSlam Control Center"
         put(stdscr, 0, 2, title, curses.A_BOLD)
+        # A layer that goes down on its own is named next to the title: nothing
+        # else on this screen reports one group being gone while the rest runs.
+        down = [gid for gid in core.GROUP_ORDER
+                if sup.status(gid) in ("exited", "partial")]
+        if down:
+            put(stdscr, 0, 4 + len(title), "! " + ", ".join(down) + " down",
+                curses.color_pair(C_ERR) | curses.A_BOLD)
         state = "RUNNING" if running else "STOPPED"
         # Gate state is what decides whether the vehicle can move at all, so it
         # sits next to the run state rather than buried in a pane.
@@ -1114,32 +1126,9 @@ def control_screen(stdscr, sup, values, link, session):
         put(stdscr, 0, w - len(state) - 3, state,
             curses.color_pair(C_OK if running else C_INFO) | curses.A_BOLD)
 
-        put(stdscr, 1, 2, f"Preset: {current_preset_name(values)}",
-            curses.color_pair(C_INFO))
-
-        # -- group status line
-        gstat = []
-        for gid in core.GROUP_ORDER:
-            g = sup.groups.get(gid)
-            if not g or not g.visible(values):
-                continue
-            st = sup.status(gid)
-            mark = {"running": "+", "stopped": "-", "exited": "!", "partial": "~"}[st]
-            gstat.append((f"{mark}{gid}", st))
-        col = 2
-        put(stdscr, 2, 0, " " * (w - 1))
-        for label, st in gstat:
-            attr = {"running": curses.color_pair(C_OK),
-                    "exited": curses.color_pair(C_ERR) | curses.A_BOLD,
-                    "partial": curses.color_pair(C_WARN),
-                    "stopped": curses.A_DIM}[st]
-            if col + len(label) + 1 < w - 1:
-                put(stdscr, 2, col, label, attr)
-                col += len(label) + 2
-
         # -- parameter list
         desc_h = 5
-        list_top = 4
+        list_top = 2
         list_h = max(4, h - list_top - desc_h - 4)
         if idx < scroll:
             scroll = idx
@@ -1161,10 +1150,21 @@ def control_screen(stdscr, sup, values, link, session):
                 break
             sel = (i == idx)
             marker = "> " if sel else "  "
-            live = " (live)" if p.live and running else ""
-            text = f"{marker}{p.label}: {fmt_value(p, values[p.id])}{live}"
+            text = f"{marker}{p.label}: {fmt_value(p, values[p.id])}"
             put(stdscr, row, 4, text,
                 curses.A_REVERSE if sel else curses.A_NORMAL)
+            # What applying this option costs sits on the option's own row. A
+            # live push doesn't update the group's launch snapshot, so an option
+            # can be both live and still due a restart — say both.
+            if running:
+                tag_col = 5 + len(text)
+                if p.live:
+                    put(stdscr, row, tag_col, "(live)", curses.color_pair(C_OK))
+                    tag_col += 7
+                pend = sup.pending_for(p.id, values)
+                if pend:
+                    put(stdscr, row, tag_col, pending_tag(pend),
+                        curses.color_pair(C_WARN) | curses.A_BOLD)
             row += 1
 
         # -- description pane for the selected option
