@@ -193,18 +193,47 @@ published used `ideal`, so no quoted numbers are affected. Override with `noise_
 |---|---|---|
 | `keyframe_dist_m` | 1.0 | Min travel to trigger a new keyframe |
 | `keyframe_angle_rad` | 0.3 | Min rotation (~17°) to trigger a new keyframe |
+| `keyframe_max_per_cell` | 3 | Max keyframes sharing one position+heading cell; 0 disables |
+| `keyframe_cell_radius_m` / `keyframe_cell_angle_rad` | 0.5 / 0.5 | Extent of that cell |
 | `loop_closure_enabled` | true | Master on/off switch (A/B benchmarking) |
 | `loop_closure_radius_m` | 5.0 | Proximity search radius for loop closure |
 | `loop_closure_min_gap` | 10 | Min keyframe-index gap for a valid closure |
+| `loop_closure_max_candidates` | 4 | Max registrations attempted per keyframe |
+| `loop_closure_cluster_radius_m` | 1.0 | Candidates closer than this collapse to one representative |
+| `loop_closure_retry_move_m` | 0.5 | Endpoint motion required before a failed pair is retried |
+| `loop_closure_dopt_floor` | 0.0 | Skip detection below this D-optimality; 0 disables (see below) |
+| `redetect_max_keyframes` | 5 | Most-displaced keyframes re-scanned after a closure |
+| `redetect_min_interval_s` | 5.0 | Throttle between re-detection sweeps |
 | `min_inlier_ratio` | 0.3 | Registration gate: fraction of source points matched |
 | `min_inlier_count` | 50 | Registration gate: absolute inlier floor |
 | `max_error_per_inlier` | 0.05 | Registration gate: GICP error normalized per inlier |
 | `odom_sigma_rot` / `odom_sigma_trans` | 0.02 / 0.02 | Dead-reckoning BetweenFactor noise (tight, non-robust: the DVL is accurate and must not be down-weighted by a bad closure) |
 | `scan_sigma_rot` / `scan_sigma_trans` | 0.08 / 0.12 | Scan-match + loop-closure BetweenFactor noise (looser, Huber-robust: sparse-sonar registration is decimeter-level) |
 | `scan_voxel_size` | 0.1 | small_gicp downsampling resolution |
+| `isam_relinearize_threshold` / `isam_relinearize_skip` | 0.01 / 1 | iSAM2 tuning; same values as when they were hardcoded |
+| `diagnostics_stride` | 10 | Keyframes between whole-graph chi-square evaluations |
+| `viz_period_s` | 1.0 | Path/marker publish period (was per keyframe) |
+| `path_dr_min_move_m` | 0.05 | Travel between dead-reckoned path samples |
 | `map_rebuild_enabled` | false | Rebuild the belief TSDF map after a big loop closure (TSDF only) |
 | `rebuild_min_move_m` / `rebuild_min_move_rad` | 0.3 / 0.15 | Min keyframe shift to trigger a rebuild |
 | `rebuild_min_interval_s` | 30.0 | Throttle between rebuild triggers |
+
+**Station-keeping cost.** Hovering (or sweeping in place) used to make closure
+candidacy degenerate to all-pairs: every co-located keyframe is inside
+`loop_closure_radius_m` of every other, so registrations per keyframe grew with
+the graph and the total cost was quadratic in hover length. Measured over a
+synthetic hover, one keyframe at the end of the hover cost 16 / 36 / 76
+registrations at 20 / 40 / 80 keyframes; with the candidate cap it is a flat 2.
+Totals over the same hovers: 139 / 669 / 2929 registrations and 40 / 284 /
+1044 ms, against 34 / 74 / 154 and 18 / 51 / 163 ms. `/slam/timing/keyframe_ms`,
+`/slam/timing/isam_ms` and `/slam/timing/icp_calls` publish this per keyframe.
+
+`loop_closure_dopt_floor` is the information-gain gate and defaults **off**. The
+first closure on returning to a known place absorbs the accumulated drift; later
+closures to the same place reuse correlated evidence, so they cost registrations
+and bias the marginal covariance downward without adding information. It is off
+by default because it changes SLAM behaviour and needs its own ATE A/B rather
+than riding in on a performance change.
 
 ### `revisit_planner.py` key parameters (defaults; `*` = live-read via `get_parameter`
 every tick, so `ros2 param set` takes effect without a restart)

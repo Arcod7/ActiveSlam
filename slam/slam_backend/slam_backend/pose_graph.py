@@ -11,11 +11,13 @@ the same fused odometry reading (roll, pitch, yaw, z) with X/Y left unconstraine
 (sigma=1e3) since only scan matching / loop closure can correct horizontal drift.
 """
 import os
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
 import rclpy
-from rclpy.executors import ExternalShutdownException
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.time import Time
 from nav_msgs.msg import Odometry, Path
@@ -84,6 +86,35 @@ class Keyframe:
     symbol: int
     covariance: np.ndarray = None   # 6x6 GTSAM-order marginal, cached at creation time
     loop_closures: list = field(default_factory=list)   # [(target_idx, T_rel, err_per_inlier)]
+    prepared: tuple = None          # ScanMatcher.prepare() result, built on first use as a target
+
+
+def relative_angle(R_delta: np.ndarray) -> float:
+    """Rotation magnitude of a 3x3 relative rotation, in radians."""
+    return float(np.arccos(np.clip((np.trace(R_delta) - 1) / 2, -1, 1)))
+
+
+def select_spread_candidates(candidates: list, max_candidates: int,
+                             cluster_radius_m: float) -> list:
+    """Thin loop-closure candidates to a bounded, spatially spread subset.
+
+    `candidates` is [(index, distance_m, position_xyz), ...]. Nearest first, then
+    greedily skip anything within cluster_radius_m of an already-kept candidate:
+    twenty keyframes from one hover collapse to one representative, so the
+    registration budget goes to genuinely distinct viewpoints. Returns the kept
+    entries in the same tuple form.
+    """
+    if max_candidates <= 0:
+        return []
+    kept = []
+    for entry in sorted(candidates, key=lambda c: c[1]):
+        if cluster_radius_m > 0.0 and any(
+                np.linalg.norm(entry[2] - k[2]) < cluster_radius_m for k in kept):
+            continue
+        kept.append(entry)
+        if len(kept) >= max_candidates:
+            break
+    return kept
 
 
 class PoseGraphNode(Node):
@@ -96,9 +127,27 @@ class PoseGraphNode(Node):
         self.declare_parameter('camera_frame', 'bluerov2/Dcam')
         self.declare_parameter('keyframe_dist_m', 1.0)
         self.declare_parameter('keyframe_angle_rad', 0.3)
+        # Station-keeping cap: without it a hover (or a sweep rotating in place)
+        # keeps crossing keyframe_angle_rad and piles up co-located keyframes,
+        # which is what makes closure candidacy degenerate to all-pairs.
+        self.declare_parameter('keyframe_max_per_cell', 3)
+        self.declare_parameter('keyframe_cell_radius_m', 0.5)
+        self.declare_parameter('keyframe_cell_angle_rad', 0.5)
         self.declare_parameter('loop_closure_enabled', True)
         self.declare_parameter('loop_closure_radius_m', 5.0)
         self.declare_parameter('loop_closure_min_gap', 10)
+        # Per-keyframe registration budget. Candidates are thinned to at most
+        # max_candidates, spread at least cluster_radius apart, so the budget is
+        # not spent on many near-identical targets from one hover.
+        self.declare_parameter('loop_closure_max_candidates', 4)
+        self.declare_parameter('loop_closure_cluster_radius_m', 1.0)
+        # A pair that failed registration is not retried until an endpoint moves.
+        self.declare_parameter('loop_closure_retry_move_m', 0.5)
+        # Information-gain gate, default off (0.0): skip detection when the pose
+        # is already better constrained than this D-optimality floor.
+        self.declare_parameter('loop_closure_dopt_floor', 0.0)
+        self.declare_parameter('redetect_max_keyframes', 5)
+        self.declare_parameter('redetect_min_interval_s', 5.0)
         self.declare_parameter('min_inlier_ratio', 0.3)
         self.declare_parameter('min_inlier_count', 50)
         self.declare_parameter('max_error_per_inlier', 0.05)
@@ -114,6 +163,13 @@ class PoseGraphNode(Node):
         self.declare_parameter('scan_sigma_trans', 0.12)
         self.declare_parameter('scan_voxel_size', 0.1)
         self.declare_parameter('scan_max_correspondence_dist', 0.5)
+        # Same values iSAM2 was hardcoded to; exposed so the matrix can A/B them.
+        self.declare_parameter('isam_relinearize_threshold', 0.01)
+        self.declare_parameter('isam_relinearize_skip', 1)
+        # Whole-graph chi-square costs O(factors); every keyframe is too often.
+        self.declare_parameter('diagnostics_stride', 10)
+        self.declare_parameter('viz_period_s', 1.0)
+        self.declare_parameter('path_dr_min_move_m', 0.05)
         self.declare_parameter('cov_ellipsoid_stride', 5)
         self.declare_parameter('cov_ellipsoid_n_sigma', 2.0)
         self.declare_parameter('map_rebuild_enabled', False)
@@ -127,12 +183,23 @@ class PoseGraphNode(Node):
         self.camera_frame = p('camera_frame').value
         self.keyframe_dist_m = p('keyframe_dist_m').value
         self.keyframe_angle_rad = p('keyframe_angle_rad').value
+        self.keyframe_max_per_cell = p('keyframe_max_per_cell').value
+        self.keyframe_cell_radius_m = p('keyframe_cell_radius_m').value
+        self.keyframe_cell_angle_rad = p('keyframe_cell_angle_rad').value
         self.loop_closure_enabled = p('loop_closure_enabled').value
         self.loop_closure_radius_m = p('loop_closure_radius_m').value
         self.loop_closure_min_gap = p('loop_closure_min_gap').value
+        self.loop_closure_max_candidates = p('loop_closure_max_candidates').value
+        self.loop_closure_cluster_radius_m = p('loop_closure_cluster_radius_m').value
+        self.loop_closure_retry_move_m = p('loop_closure_retry_move_m').value
+        self.loop_closure_dopt_floor = p('loop_closure_dopt_floor').value
+        self.redetect_max_keyframes = p('redetect_max_keyframes').value
+        self.redetect_min_interval_s = p('redetect_min_interval_s').value
         self.min_inlier_ratio = p('min_inlier_ratio').value
         self.min_inlier_count = p('min_inlier_count').value
         self.max_error_per_inlier = p('max_error_per_inlier').value
+        self.diagnostics_stride = p('diagnostics_stride').value
+        self.path_dr_min_move_m = p('path_dr_min_move_m').value
         self.cov_ellipsoid_stride = p('cov_ellipsoid_stride').value
         self.cov_ellipsoid_n_sigma = p('cov_ellipsoid_n_sigma').value
         self.map_rebuild_enabled = p('map_rebuild_enabled').value
@@ -159,18 +226,34 @@ class PoseGraphNode(Node):
         self._setup_gtsam(odom_sigmas, scan_sigmas, profile)
 
         self._keyframes: list[Keyframe] = []
+        # (T_odom, T_world) of the newest keyframe, as one tuple the optimiser
+        # replaces in a single assignment. The odometry thread reads the pair
+        # without a lock; reading the two fields off a live Keyframe could
+        # straddle a solve and mix a new T_world with an old T_odom.
+        self._anchor: tuple[np.ndarray, np.ndarray] | None = None
         self._latest_dead_reckoned_T = None
         self._latest_dead_reckoned_stamp = None
         self._latest_yaw_var = 0.0    # 0 until odometry arrives -> profile default
         self._T_base_cam = None   # static extrinsic, resolved lazily via TF
+        self._icp_calls = 0           # registrations this keyframe, incl. re-detection
+        self._last_redetect_time = None
+        self._last_path_dr_pos = None
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.tf_broadcaster = TransformBroadcaster(self)
 
+        # Separate groups, run by a MultiThreadedExecutor in main(). Keyframe
+        # processing costs O(graph) and grows through a run; on one thread it
+        # blocked this node's own 10 Hz /slam/odometry republish, and the
+        # controllers — which differentiate that pose — saw it frozen for up to
+        # 20 s at a time and drove the vehicle on it. The odometry callback
+        # itself is two matrix products against _anchor.
         self.create_subscription(Odometry, '/slam/sensors/dead_reckoned_odom',
-                                  self._dead_reckoned_odom_cb, 10)
-        self.create_subscription(PointCloud2, '/cloud_in', self._cloud_in_cb, 10)
+                                  self._dead_reckoned_odom_cb, 10,
+                                  callback_group=MutuallyExclusiveCallbackGroup())
+        self.create_subscription(PointCloud2, '/cloud_in', self._cloud_in_cb, 10,
+                                 callback_group=MutuallyExclusiveCallbackGroup())
 
         self.pub_pose = self.create_publisher(PoseWithCovarianceStamped, '/slam/pose', 10)
         self.pub_odom = self.create_publisher(Odometry, '/slam/odometry', 10)
@@ -203,18 +286,36 @@ class PoseGraphNode(Node):
         self._last_rebuild_time = None
         self._rebuild_old_poses: dict = {}   # idx -> T_world at last correction, cleared per rebuild
 
+        # Per-keyframe cost, so a hover's growth is measurable rather than felt.
+        self.pub_keyframe_ms = self.create_publisher(Float64, '/slam/timing/keyframe_ms', 10)
+        self.pub_isam_ms = self.create_publisher(Float64, '/slam/timing/isam_ms', 10)
+        self.pub_icp_calls = self.create_publisher(Int32, '/slam/timing/icp_calls', 10)
+
         self._path_dr_msgs = []
         self._path_slam_msgs = []
         self._rejected_edges = []   # [(idx_a, idx_b)] for viz only, cleared each keyframe
+        # frozenset({i, j}) -> (pos_i, pos_j) at the failed attempt. Registration
+        # failures were previously retried on every re-detection pass forever;
+        # a pair is now reconsidered only once an endpoint has actually moved.
+        self._failed_pairs: dict = {}
         self._closed_pairs: set = set()   # frozenset({i, j}) per accepted closure edge --
         # dedupes a pair across initial detection (recorded only under the newer
         # keyframe) and _redetect_and_apply (which re-scans from an older keyframe's
         # side and would otherwise re-add the same physical edge under it too).
 
+        # Paths and markers are O(keyframes)/O(closures) to rebuild and were
+        # republished on every keyframe; on a timer they cost the same at 1 Hz
+        # however fast keyframes arrive. /slam/pose stays per-keyframe.
+        self.create_timer(float(p('viz_period_s').value), self._publish_visualization,
+                          callback_group=MutuallyExclusiveCallbackGroup())
+
         self.get_logger().info(
             f"PoseGraph started. noise_profile={profile.name}, "
             f"keyframe_dist={self.keyframe_dist_m}m, keyframe_angle={self.keyframe_angle_rad}rad, "
+            f"keyframe_max_per_cell={self.keyframe_max_per_cell}, "
             f"loop_closure_enabled={self.loop_closure_enabled}, "
+            f"loop_closure_max_candidates={self.loop_closure_max_candidates}, "
+            f"loop_closure_dopt_floor={self.loop_closure_dopt_floor}, "
             f"map_rebuild_enabled={self.map_rebuild_enabled}, "
             f"odom_sigma=({odom_sigmas[0]},{odom_sigmas[1]}), "
             f"scan_sigma=({scan_sigmas[0]},{scan_sigmas[1]})")
@@ -224,8 +325,10 @@ class PoseGraphNode(Node):
     # ------------------------------------------------------------------
     def _setup_gtsam(self, odom_sigmas, scan_sigmas, profile: NoiseProfile):
         isam_params = gtsam.ISAM2Params()
-        isam_params.setRelinearizeThreshold(0.01)
-        isam_params.relinearizeSkip = 1
+        isam_params.setRelinearizeThreshold(
+            float(self.get_parameter('isam_relinearize_threshold').value))
+        # relinearizeSkip is a plain property in gtsam 4.2.1, not a setter.
+        isam_params.relinearizeSkip = int(self.get_parameter('isam_relinearize_skip').value)
         self._isam = gtsam.ISAM2(isam_params)
 
         # Two relative-factor noise models. DVL dead-reckoning is accurate
@@ -293,17 +396,25 @@ class PoseGraphNode(Node):
         self._latest_dead_reckoned_stamp = msg.header.stamp
         self._latest_yaw_var = msg.pose.covariance[YAW_COV_INDEX]
 
-        self._path_dr_msgs.append(matrix_to_pose_stamped(T_odom, msg.header.stamp, self.world_frame))
+        # Appended by distance, not by tick: this list used to grow with elapsed
+        # time, so a stationary vehicle inflated it and every republish with it.
+        pos = T_odom[:3, 3]
+        if (self._last_path_dr_pos is None
+                or np.linalg.norm(pos - self._last_path_dr_pos) >= self.path_dr_min_move_m):
+            self._last_path_dr_pos = pos.copy()
+            self._path_dr_msgs.append(
+                matrix_to_pose_stamped(T_odom, msg.header.stamp, self.world_frame))
 
-        if not self._keyframes:
+        anchor = self._anchor
+        if anchor is None:
             # No graph yet: broadcast the raw dead-reckoned pose directly.
             self._broadcast_tf(T_odom, msg.header.stamp)
             self._publish_odometry(T_odom, msg.header.stamp)
             return
 
-        last_kf = self._keyframes[-1]
-        T_delta = np.linalg.inv(last_kf.T_odom) @ T_odom
-        T_corrected = last_kf.T_world @ T_delta
+        anchor_odom, anchor_world = anchor
+        T_delta = np.linalg.inv(anchor_odom) @ T_odom
+        T_corrected = anchor_world @ T_delta
         self._broadcast_tf(T_corrected, msg.header.stamp)
         self._publish_odometry(T_corrected, msg.header.stamp)
 
@@ -336,20 +447,53 @@ class PoseGraphNode(Node):
         return True
 
     def _should_create_keyframe(self, T_odom_new: np.ndarray) -> bool:
-        T_delta = np.linalg.inv(self._keyframes[-1].T_odom) @ T_odom_new
+        prev = self._keyframes[-1]
+        T_delta = np.linalg.inv(prev.T_odom) @ T_odom_new
         dist = np.linalg.norm(T_delta[:3, 3])
-        angle = np.arccos(np.clip((np.trace(T_delta[:3, :3]) - 1) / 2, -1, 1))
-        return dist >= self.keyframe_dist_m or angle >= self.keyframe_angle_rad
+        angle = relative_angle(T_delta[:3, :3])
+        if dist < self.keyframe_dist_m and angle < self.keyframe_angle_rad:
+            return False
+        return not self._cell_is_saturated(prev.T_world @ T_delta)
+
+    def _cell_is_saturated(self, T_world_pred: np.ndarray) -> bool:
+        """True once this pose already has keyframe_max_per_cell near-identical
+        neighbours. A hovering vehicle keeps crossing the distance/angle gates on
+        dead-reckoning drift alone, and each extra keyframe at one viewpoint adds
+        no coverage while making every later closure search longer.
+
+        The long odometry edge that follows a saturated stretch is handled: the
+        BetweenFactor sigma from odom_trans_sigma() scales with both edge length
+        and elapsed time, so a skipped keyframe is not a silently tightened edge.
+        """
+        if self.keyframe_max_per_cell <= 0:
+            return False
+        pos = T_world_pred[:3, 3]
+        R = T_world_pred[:3, :3]
+        n_near = 0
+        for kf in self._keyframes:
+            if np.linalg.norm(pos - kf.T_world[:3, 3]) > self.keyframe_cell_radius_m:
+                continue
+            if relative_angle(kf.T_world[:3, :3].T @ R) > self.keyframe_cell_angle_rad:
+                continue
+            n_near += 1
+            if n_near >= self.keyframe_max_per_cell:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Core graph update
     # ------------------------------------------------------------------
     def _add_keyframe(self, T_odom: np.ndarray, cloud_body: np.ndarray, stamp):
+        t_start = time.perf_counter()
         graph = gtsam.NonlinearFactorGraph()
         values = gtsam.Values()
         n = len(self._keyframes)
         sym = gtsam.symbol('x', n)
         self._rejected_edges = []
+        self._icp_calls = 0
+        # Prepared once here and reused as the source for the sequential match and
+        # every closure candidate; also cached on the keyframe as a future target.
+        prepared_new = self._scanner.prepare(cloud_body)
 
         if n == 0:
             pose = gtsam.Pose3(T_odom)
@@ -366,7 +510,7 @@ class PoseGraphNode(Node):
                 self._odom_noise_for(T_delta, prev.stamp, stamp)))
 
             # 2) Sequential scan-matching BetweenFactor (looser, robustified)
-            result = self._scanner.align(cloud_body, prev.cloud, T_delta)
+            result = self._align(cloud_body, prev, T_delta, prepared_new)
             if ScanMatcher.is_acceptable(result, self.min_inlier_ratio,
                                           self.min_inlier_count, self.max_error_per_inlier):
                 graph.add(gtsam.BetweenFactorPose3(
@@ -391,8 +535,8 @@ class PoseGraphNode(Node):
         # 4) Loop closure detection (against the pre-update world estimate).
         # Disabled entirely (A/B benchmarking) still lets _find_moved_keyframes
         # run below -- poses stay current for path/viz even without closures.
-        lc_factors = (self._detect_loop_closures(n, cloud_body, T_world_est)
-                      if self.loop_closure_enabled else [])
+        lc_factors = (self._detect_loop_closures(n, cloud_body, T_world_est, prepared_new)
+                      if self.loop_closure_enabled and not self._well_constrained() else [])
         for lc_idx, lc_T, lc_err in lc_factors:
             graph.add(gtsam.BetweenFactorPose3(
                 self._keyframes[lc_idx].symbol, sym, gtsam.Pose3(lc_T),
@@ -405,8 +549,10 @@ class PoseGraphNode(Node):
                               lc_T)
             for lc_idx, lc_T, _ in lc_factors]
 
+        t_isam = time.perf_counter()
         self._isam.update(graph, values)
         result_values = self._isam.calculateEstimate()
+        isam_ms = (time.perf_counter() - t_isam) * 1e3
 
         # Refreshes every existing keyframe's T_world against this update AND
         # returns which ones shifted enough (>0.1 m / 0.05 rad) to warrant
@@ -418,14 +564,16 @@ class PoseGraphNode(Node):
         kf_new = Keyframe(index=n, stamp=stamp, T_odom=T_odom,
                            T_world=result_values.atPose3(sym).matrix(),
                            cloud=cloud_body, symbol=sym,
-                           loop_closures=list(lc_factors))
+                           loop_closures=list(lc_factors), prepared=prepared_new)
         self._keyframes.append(kf_new)
+        self._set_anchor(kf_new)
 
         if lc_factors:
             self.get_logger().info(
                 f"Loop closure: node {n} <-> {[i for i, _, _ in lc_factors]}")
-            if moved:
-                self._redetect_and_apply([idx for idx, _, _ in moved])
+            redetect = self._select_redetect_targets(moved)
+            if redetect:
+                self._redetect_and_apply(redetect)
 
         if self.map_rebuild_enabled and moved:
             max_dist = max(dist for _, dist, _ in moved)
@@ -444,8 +592,16 @@ class PoseGraphNode(Node):
         kf_new.covariance = self._isam.marginalCovariance(sym)
         for nis in nis_samples:
             self.pub_nis.publish(Float64(data=nis))
-        self.pub_chi2.publish(Float64(data=self._normalized_chi2()))
+        # Whole-graph chi-square walks every factor, so it runs on a stride and
+        # reuses the estimate already solved for above rather than re-deriving it.
+        if self.diagnostics_stride > 0 and n % self.diagnostics_stride == 0:
+            self.pub_chi2.publish(Float64(data=self._normalized_chi2(result_values)))
         self._publish_keyframe_results(kf_new, kf_new.covariance)
+
+        self.pub_isam_ms.publish(Float64(data=isam_ms))
+        self.pub_icp_calls.publish(Int32(data=self._icp_calls))
+        self.pub_keyframe_ms.publish(
+            Float64(data=(time.perf_counter() - t_start) * 1e3))
 
     def _closure_nis(self, T_predicted: np.ndarray, T_measured: np.ndarray) -> float:
         """Normalised innovation squared for one loop closure, chi-square with
@@ -465,7 +621,50 @@ class PoseGraphNode(Node):
         values.insert(self._sym_b, gtsam.Pose3(orthonormalize_pose(T_predicted)))
         return float(2.0 * factor.error(values))
 
-    def _normalized_chi2(self) -> float:
+    def _align(self, source_cloud, target_kf, T_init, source_prepared):
+        """One registration against a keyframe, reusing both sides' preprocessing.
+
+        The target's downsample and KD-tree are built once per keyframe and cached
+        on it; previously every candidate rebuilt the target tree from scratch.
+        """
+        if target_kf.prepared is None:
+            target_kf.prepared = self._scanner.prepare(target_kf.cloud)
+        self._icp_calls += 1
+        return self._scanner.align(
+            source_cloud, target_kf.cloud, T_init,
+            source_prepared=source_prepared, target_prepared=target_kf.prepared)
+
+    def _well_constrained(self) -> bool:
+        """True when the newest pose is already tighter than loop_closure_dopt_floor.
+
+        The first closure on returning to a known place absorbs the accumulated
+        drift; once the marginal has collapsed, further closures to the same place
+        re-use correlated evidence, so they cost registrations and bias the
+        covariance downward without adding information. Off by default (floor 0.0).
+        """
+        if self.loop_closure_dopt_floor <= 0.0 or not self._keyframes:
+            return False
+        cov = self._keyframes[-1].covariance
+        return cov is not None and dopt_xyh(cov) < self.loop_closure_dopt_floor
+
+    def _select_redetect_targets(self, moved: list) -> list:
+        """Most-displaced keyframes only, rate-limited.
+
+        Re-detection used to run a full candidate scan for every moved keyframe,
+        so one closure that shifted the whole graph cost O(n) scans in a single
+        callback. The largest shifts are the ones likely to expose a new closure.
+        """
+        if not moved or self.redetect_max_keyframes <= 0:
+            return []
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if (self._last_redetect_time is not None
+                and now - self._last_redetect_time < self.redetect_min_interval_s):
+            return []
+        self._last_redetect_time = now
+        ranked = sorted(moved, key=lambda m: m[1], reverse=True)
+        return [idx for idx, _, _ in ranked[:self.redetect_max_keyframes]]
+
+    def _normalized_chi2(self, values=None) -> float:
         """Whole-graph chi-square per degree of freedom. Every factor here is
         6-dimensional, so the DoF is 6*(factors - nodes). Lands near 1.0 when
         the assumed sigmas match the residuals; well below means the noise
@@ -476,9 +675,12 @@ class PoseGraphNode(Node):
         dof = 6 * (factors.size() - len(self._keyframes))
         if dof <= 0:
             return float('nan')
-        return float(2.0 * factors.error(self._isam.calculateEstimate()) / dof)
+        if values is None:
+            values = self._isam.calculateEstimate()
+        return float(2.0 * factors.error(values) / dof)
 
-    def _detect_loop_closures(self, current_idx, cloud_body, T_world_est):
+    def _detect_loop_closures(self, current_idx, cloud_body, T_world_est,
+                              source_prepared=None):
         # Candidates are filtered by |current_idx - kf.index| rather than a
         # slice on self._keyframes: this method is reused by _redetect_and_apply
         # for an arbitrary historical (possibly early) index, where a slice
@@ -488,8 +690,16 @@ class PoseGraphNode(Node):
         # of raising. The symmetric distance check is correct for both the
         # normal forward case (current_idx == len(self._keyframes)) and the
         # redetect case (current_idx already exists in self._keyframes).
-        closures = []
+        #
+        # Two phases: the cheap index/proximity/history gates build a candidate
+        # list, which is then thinned before any registration runs. Registering
+        # every in-radius keyframe is what made a hover quadratic — inside one
+        # the whole graph is in radius, and most of it is the same viewpoint.
         current_pos = T_world_est[:3, 3]
+        if source_prepared is None:
+            source_prepared = self._scanner.prepare(cloud_body)
+
+        candidates = []
         for kf in self._keyframes:
             if kf.index == current_idx:
                 continue
@@ -501,16 +711,41 @@ class PoseGraphNode(Node):
             dist = np.linalg.norm(current_pos - kf.T_world[:3, 3])
             if dist > self.loop_closure_radius_m:
                 continue
+            if self._retry_suppressed(pair, current_pos, kf.T_world[:3, 3]):
+                continue
+            candidates.append((kf.index, dist, kf.T_world[:3, 3].copy()))
 
+        closures = []
+        for kf_index, _, _ in select_spread_candidates(
+                candidates, self.loop_closure_max_candidates,
+                self.loop_closure_cluster_radius_m):
+            kf = self._keyframes[kf_index]
+            pair = frozenset((current_idx, kf.index))
             T_init = np.linalg.inv(kf.T_world) @ T_world_est
-            result = self._scanner.align(cloud_body, kf.cloud, T_init)
+            result = self._align(cloud_body, kf, T_init, source_prepared)
             if ScanMatcher.is_acceptable(result, self.min_inlier_ratio,
                                           self.min_inlier_count, self.max_error_per_inlier):
                 closures.append((kf.index, result['T_target_source'], result['error_per_inlier']))
                 self._closed_pairs.add(pair)
+                self._failed_pairs.pop(pair, None)
             else:
                 self._rejected_edges.append((kf.index, current_idx))
+                self._failed_pairs[pair] = (current_pos.copy(), kf.T_world[:3, 3].copy())
         return closures
+
+    def _retry_suppressed(self, pair, pos_a, pos_b) -> bool:
+        """True while a previously failed pair sits where it failed.
+
+        Rejected pairs carried no memory, so every re-detection pass paid full
+        registration cost to fail them again. Optimization moves poses, so a
+        retry is worth it once either endpoint has shifted materially.
+        """
+        previous = self._failed_pairs.get(pair)
+        if previous is None:
+            return False
+        moved = max(np.linalg.norm(pos_a - previous[0]),
+                    np.linalg.norm(pos_b - previous[1]))
+        return bool(moved < self.loop_closure_retry_move_m)
 
     def _refresh_pose(self, kf, T_new: np.ndarray) -> None:
         """Overwrite kf.T_world, first recording the pose it had as of the
@@ -524,6 +759,12 @@ class PoseGraphNode(Node):
         computing its correction against a stale baseline."""
         self._rebuild_old_poses.setdefault(kf.index, kf.T_world.copy())
         kf.T_world = T_new
+        if kf is self._keyframes[-1]:
+            self._set_anchor(kf)
+
+    def _set_anchor(self, kf) -> None:
+        """Republish basis for the odometry thread — one atomic assignment."""
+        self._anchor = (kf.T_odom, kf.T_world)
 
     def _find_moved_keyframes(self, result_values, threshold_m=0.1, threshold_rad=0.05):
         """Returns [(index, dist, angle), ...] for keyframes that shifted more
@@ -548,9 +789,11 @@ class PoseGraphNode(Node):
         lc_graph = gtsam.NonlinearFactorGraph()
         for idx in moved_indices:
             kf = self._keyframes[idx]
+            if kf.prepared is None:
+                kf.prepared = self._scanner.prepare(kf.cloud)
             # _detect_loop_closures already excludes pairs in self._closed_pairs,
             # so no separate "already found" filter is needed here.
-            new_lcs = self._detect_loop_closures(idx, kf.cloud, kf.T_world)
+            new_lcs = self._detect_loop_closures(idx, kf.cloud, kf.T_world, kf.prepared)
             for lc_idx, lc_T, lc_err in new_lcs:
                 lc_graph.add(gtsam.BetweenFactorPose3(
                     self._keyframes[lc_idx].symbol, kf.symbol, gtsam.Pose3(lc_T),
@@ -631,8 +874,6 @@ class PoseGraphNode(Node):
         self.pub_pose.publish(pose_msg)
 
         self._path_slam_msgs.append(pose_stamped)
-        self._publish_path(self.pub_path_slam, self._path_slam_msgs)
-        self._publish_path(self.pub_path_gt, self._path_dr_msgs)
 
         self.pub_keyframe_count.publish(Int32(data=len(self._keyframes)))
         n_closures = sum(len(k.loop_closures) for k in self._keyframes)
@@ -640,6 +881,16 @@ class PoseGraphNode(Node):
 
         self.pub_dopt.publish(Float64(data=dopt_xyh(cov_6x6)))
 
+    def _publish_visualization(self):
+        """Paths and markers, on a timer rather than per keyframe.
+
+        These rebuild O(keyframes) path messages and an O(closures) LINE_LIST
+        every call, which is why they no longer sit on the optimization path.
+        """
+        if not self._keyframes:
+            return
+        self._publish_path(self.pub_path_slam, self._path_slam_msgs)
+        self._publish_path(self.pub_path_gt, self._path_dr_msgs)
         self._publish_graph_edges()
         self._publish_covariance_ellipsoids()
 
@@ -649,7 +900,9 @@ class PoseGraphNode(Node):
             path.header = poses[-1].header
         else:
             path.header.frame_id = self.world_frame
-        path.poses = poses
+        # Snapshot: the odometry thread appends to _path_dr_msgs while this
+        # serialises, and a list must not grow under the serialiser.
+        path.poses = list(poses)
         publisher.publish(path)
 
     def _publish_graph_edges(self):
@@ -702,6 +955,8 @@ class PoseGraphNode(Node):
         conservative/oversized) upper bound after a later loop closure.
         """
         markers = MarkerArray()
+        # RViz keeps markers by (ns, id) forever, incl. across a restart -- drop ids we no longer draw.
+        markers.markers.append(Marker(action=Marker.DELETEALL))
         stamp = self._keyframes[-1].stamp
         n_sigma = self.cov_ellipsoid_n_sigma
 
@@ -750,8 +1005,12 @@ def orthonormalize_pose(T: np.ndarray) -> np.ndarray:
 def main(args=None):
     rclpy.init(args=args)
     node = PoseGraphNode()
+    # One thread per callback group: keyframe optimisation must not stall the
+    # odometry republish the controllers steer on, nor the visualization timer.
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
