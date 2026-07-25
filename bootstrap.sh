@@ -457,7 +457,8 @@ stonefish_prefix() {
 # compile error deep in the bridge rather than here.
 stonefish_missing_api() {
     for pair in "sensors/vision/Camera.h:getLastCaptureTime" \
-                "sensors/vision/DepthCamera.h:getVerticalFOV"; do
+                "sensors/vision/DepthCamera.h:getVerticalFOV" \
+                "graphics/OpenGLTrackball.h:followOrientation"; do
         grep -q "${pair##*:}" "$1/include/Stonefish/${pair%%:*}" 2>/dev/null \
             || echo "${pair##*:}"
     done
