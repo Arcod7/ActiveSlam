@@ -26,7 +26,15 @@ control screen that:
   pose source only bounces the layers that depend on that option — Stonefish,
   the slow part, keeps running. The screen shows which groups a pending change
   will restart before you apply it.
-- **explains each option** in a description pane as you move through them.
+- **explains each option** in a description pane as you move through them, with
+  the values it can take listed in the right-hand panel (bounds and arrow-key
+  step, for the numeric ones).
+- **folds sections away.** Each section heading carries a `< HIDE >` /
+  `< SHOW >` toggle worked with Left/Right; only *Primary* is open on a first
+  run, and the layout is remembered in `config.yaml` (`hidden_sections`).
+- **prints its own command line.** The second row shows the single-shot
+  `ros2 launch bringup demo.launch.py …` equivalent of the current
+  configuration, listing only what differs from the defaults.
 - **arms motion** (press `m`) and shows the safety gate's live state in the
   header. The gate is fail-closed and starts disabled, so nothing moves until
   it is armed — with RViz off, this is the only way to arm it.
@@ -49,8 +57,13 @@ control screen that:
   point has no heading, so there are no yaw keys), and the planner paths to it:
   the point is published on `/frontier_slam/goal` with frontier goal picking
   suspended, so A* and the path executor drive there exactly as they would to
-  a frontier. `goto` runs the planner layer without `revisit`, so nothing
-  preempts the operator's goal.
+  a frontier. Under `slam:=slam` the *Uncertainty revisit* option applies here
+  too: when D-optimality crosses the trigger, `revisit_planner` takes the goal
+  topic and drives a loop-closing detour, and the launcher resends the target
+  point as soon as the detour ends — the run reaches the point *and* keeps its
+  pose uncertainty bounded. The footer marks the point as on hold while that
+  happens, and the trigger/resume thresholds sit under the live `d-opt` reading
+  in the right-hand panel.
 - **retunes wall-following parameters live**, via `ros2 param set`, with no
   restart at all — those parameters are re-read every control cycle. Options
   that support this are marked `(live)`.

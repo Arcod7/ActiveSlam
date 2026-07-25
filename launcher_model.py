@@ -89,6 +89,12 @@ SECTION_TITLES = {
 }
 SECTION_ORDER = ["primary", "scene", "robot", "frontier", "slam", "advanced"]
 
+# Which sections are folded away behind their < SHOW > heading. Persisted in
+# config.yaml next to the options, so a layout survives a restart. Only the
+# primary section starts open — the rest is opened when it is wanted.
+HIDDEN_SECTIONS_KEY = "hidden_sections"
+DEFAULT_HIDDEN_SECTIONS = [s for s in SECTION_ORDER if s != "primary"]
+
 _frontier = lambda v: v["mode"] == "frontier"
 # goto and frontier both run the planner layer (A* + path executor); they
 # differ only in who picks the goal.
@@ -319,23 +325,26 @@ PARAMS = [
           "graph becomes pure dead reckoning.",
           visible=_slam),
     Param("revisit", "Uncertainty revisit", "bool", True, "slam",
-          "Suspend exploration and drive back to mapped areas when the pose "
-          "covariance (D-optimality) crosses a threshold, to force a loop "
-          "closure. This is the active part of active SLAM.",
-          visible=lambda v: _slam(v) and _frontier(v)),
+          "Suspend the current goal and drive back to mapped areas when the "
+          "pose covariance (D-optimality) crosses a threshold, to force a loop "
+          "closure. This is the active part of active SLAM. Under goto the "
+          "revisit interrupts the run to the target point and the launcher "
+          "resends the point once the detour finishes.",
+          visible=lambda v: _slam(v) and _planner(v)),
     Param("dopt_trigger", "D-opt trigger threshold", "float", 0.02, "slam",
-          "D-optimality [det(cov_pos)^(1/3)] level that suspends exploration and "
-          "drives back to close a loop. Lower triggers revisit sooner (more "
-          "cautious); higher lets more drift accumulate before correcting. "
+          "D-optimality [det(cov_pos)^(1/3)] level that suspends the current "
+          "goal and drives back to close a loop. Lower triggers revisit sooner "
+          "(more cautious); higher lets more drift accumulate before "
+          "correcting. Shown next to the live d-opt reading on the right. "
           "Live-tunable while running.",
           advanced=True, step=0.005, lo=0.0, hi=1.0,
-          visible=lambda v: _slam(v) and _frontier(v) and v["revisit"]),
+          visible=lambda v: _slam(v) and _planner(v) and v["revisit"]),
     Param("dopt_resume", "D-opt resume threshold", "float", 0.01, "slam",
-          "D-optimality level below which exploration resumes after a revisit. "
+          "D-optimality level below which the run resumes after a revisit. "
           "Must stay below the trigger threshold or revisit will not exit. "
           "Live-tunable while running.",
           advanced=True, step=0.005, lo=0.0, hi=1.0,
-          visible=lambda v: _slam(v) and _frontier(v) and v["revisit"]),
+          visible=lambda v: _slam(v) and _planner(v) and v["revisit"]),
     Param("map_rebuild", "Rebuild map on closure", "bool", False, "slam",
           "After a large loop closure, reset the TSDF and re-integrate every "
           "keyframe at its corrected pose, so the map geometry is fixed too "
@@ -435,6 +444,35 @@ PARAMS = [
 
 PARAM_MAP = {p.id: p for p in PARAMS}
 DEFAULTS = {p.id: p.default for p in PARAMS}
+DEFAULTS[HIDDEN_SECTIONS_KEY] = list(DEFAULT_HIDDEN_SECTIONS)
+
+
+# demo.launch.py's name for an option, where it differs from the launcher's id.
+LAUNCH_ARG_ALIASES = {"robot_depth_target": "depth"}
+# Options demo.launch.py has no argument for: launcher-only UI state, and the
+# noise attenuation switch, which it expresses as a near_cutoff distance.
+LAUNCH_ARG_SKIP = {"keyboard", "robot_save_pose_on_exit", "rqt", "thrust_boost",
+                   "noise_attenuation", "near_cutoff_m"}
+
+
+def launch_command(values):
+    """The `ros2 launch` line that reproduces this configuration.
+
+    Only options that differ from their default are listed, so the line stays
+    readable on one row. The launcher itself runs the per-group launch files
+    rather than this command; it is the equivalent single-shot invocation.
+    """
+    parts = ["ros2 launch bringup demo.launch.py"]
+    for p in PARAMS:
+        if p.id in LAUNCH_ARG_SKIP or values.get(p.id, p.default) == p.default:
+            continue
+        value = values[p.id]
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        parts.append(f"{LAUNCH_ARG_ALIASES.get(p.id, p.id)}:={value}")
+    if values.get("noise_attenuation") == "cut_close":
+        parts.append(f"near_cutoff:={values['near_cutoff_m']}")
+    return " ".join(parts)
 
 
 def configure_object_meshes(meshes):

@@ -139,6 +139,11 @@ def save_selection(values):
         ]
         lines.extend(f"{p.id}: {json.dumps(values[p.id])}"
                      for p in model.PARAMS)
+        # Not a Param (it is the option list's own layout, not an option), so it
+        # is written explicitly.
+        hidden = values.get(model.HIDDEN_SECTIONS_KEY)
+        if hidden is not None:
+            lines.append(f"{model.HIDDEN_SECTIONS_KEY}: {json.dumps(sorted(hidden))}")
         temporary = CONFIG_FILE + ".tmp"
         with open(temporary, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
@@ -150,6 +155,10 @@ def save_selection(values):
 def restore(values):
     saved = load_selection()
     if saved:
+        hidden = saved.get(model.HIDDEN_SECTIONS_KEY)
+        if isinstance(hidden, list):
+            values[model.HIDDEN_SECTIONS_KEY] = [s for s in hidden
+                                                 if s in model.SECTION_ORDER]
         for k, v in saved.items():
             p = model.PARAM_MAP.get(k)
             if p is None:
@@ -971,15 +980,16 @@ def robot_state_text(link, values, running, driving, drive_active):
         return "planner is starting up\n— holding position"
     doing = ACTIVITY_TEXT.get(link.activity,
                               str(link.activity).lower().replace("_", " "))
-    if values["mode"] == "goto":
-        return f"heading for the target point\n— {doing}"
+    # Checked before the mode: a revisit detour preempts the goal in goto mode
+    # too, and reporting the target point while driving away from it is a lie.
     if link.revisit_state == "revisiting":
         return ("at the revisit site, holding until d-opt drops"
                 if link.activity in HOLDING_ACTIVITIES
                 else "driving to the revisit site")
-    if link.revisit_state == "cooldown":
-        return f"exploring (revisit cooldown)\n— {doing}"
-    return f"exploring\n— {doing}"
+    cooling = " (revisit cooldown)" if link.revisit_state == "cooldown" else ""
+    if values["mode"] == "goto":
+        return f"heading for the target point{cooling}\n— {doing}"
+    return f"exploring{cooling}\n— {doing}"
 
 
 def _metric(metrics, key, spec, unit=""):
@@ -987,7 +997,7 @@ def _metric(metrics, key, spec, unit=""):
     return "-" if value is None else format(value, spec) + unit
 
 
-def metric_rows(metrics, mapper):
+def metric_rows(metrics, mapper, values=None):
     """(label, value) pairs for the metrics block, in display order."""
     rpe = ("-" if metrics.get("rpe_trans") is None else
            f"{_metric(metrics, 'rpe_trans', '.3f')}m "
@@ -998,22 +1008,47 @@ def metric_rows(metrics, mapper):
     accuracy = (("RMSE", _metric(metrics, "map_accuracy", ".3f", " m"))
                 if mapper == "tsdf"
                 else ("IoU", _metric(metrics, "map_accuracy", ".3f")))
-    return [
+    rows = [
         ("err",      _metric(metrics, "abs_error", ".3f", " m")),
         ("ATE",      _metric(metrics, "ate", ".3f", " m")),
         ("RPE",      rpe),
         ("kf",       _metric(metrics, "keyframes", "d")),
         ("lc",       _metric(metrics, "loops", "d")),
         ("d-opt",    _metric(metrics, "dopt", ".4f")),
+    ]
+    # The live d-opt only means something against the level that triggers a
+    # revisit, so the thresholds sit under it whenever revisit is armed.
+    if values and values.get("revisit") and values.get("mode") in ("frontier", "goto"):
+        rows.append(("trig/res", f"{values['dopt_trigger']:g}"
+                                 f" / {values['dopt_resume']:g}"))
+    rows += [
         ("coverage", _metric(metrics, "map_coverage", ".1%")),
         accuracy,
     ]
+    return rows
+
+
+def choice_lines(p, value):
+    """What else the selected option can be set to, as (text, is_current) rows.
+
+    Enums list their values; the numeric kinds have no list, so they show the
+    bounds and the arrow-key step instead.
+    """
+    if p.kind == "enum":
+        return [(c, c == value) for c in p.choices]
+    if p.kind == "bool":
+        return [("on", bool(value)), ("off", not value)]
+    if p.kind == "text":
+        return [("free text — i to edit", False)]
+    lo = "-inf" if p.lo is None else f"{p.lo:g}"
+    hi = "+inf" if p.hi is None else f"{p.hi:g}"
+    return [(f"{lo} .. {hi}", False), (f"step {p.step:g}", False)]
 
 
 def draw_side_panel(stdscr, link, values, running, driving, drive_active,
-                    top, height, x, width):
-    """Robot state, error metrics and the GT/belief pose table, right of the
-    option list."""
+                    top, height, x, width, cur=None):
+    """Robot state, error metrics, the GT/belief pose table and the selected
+    option's other values, right of the option list."""
     end, right = top + height, x + width
     row = top
 
@@ -1051,7 +1086,7 @@ def draw_side_panel(stdscr, link, values, running, driving, drive_active,
         # would just sit there looking live.
         stale = time.time() - link.metrics_at > METRICS_STALE_S
         attr = curses.A_DIM if stale else curses.color_pair(C_INFO)
-        for label, value in metric_rows(link.metrics, values["mapper"]):
+        for label, value in metric_rows(link.metrics, values["mapper"], values):
             if row >= end:
                 return
             put(stdscr, row, x + 1, f"{label:<9}", curses.A_DIM, maxx=right)
@@ -1072,6 +1107,22 @@ def draw_side_panel(stdscr, link, values, running, driving, drive_active,
         put(stdscr, row, x + 1,
             f"{axis:<4}{cell(gt):>10}{cell(belief):>10}",
             curses.color_pair(C_INFO), maxx=right)
+        row += 1
+
+    # What the selected row can be set to, so the alternatives are readable
+    # without arrowing through them. Nothing to list on a section heading.
+    if cur is None:
+        return
+    row += 1
+    if row >= end:
+        return
+    heading(cur.label[:width - 1])
+    for text, current in choice_lines(cur, values[cur.id]):
+        if row >= end:
+            return
+        put(stdscr, row, x + 1, f"{'*' if current else ' '} {text}",
+            (curses.color_pair(C_OK) | curses.A_BOLD) if current
+            else curses.A_DIM, maxx=right)
         row += 1
 
 
@@ -1105,11 +1156,31 @@ def control_screen(stdscr, sup, values, link, session):
     # displayed fields continuously, but must not overwrite it unless the
     # operator explicitly edits a robot field or enables save-on-exit.
     saved_robot_pose = {key: values[key] for key in robot_pose_fields}
+    # Section ids folded away by their < SHOW > / < HIDE > heading row, kept in
+    # `values` so save_config() persists the layout to config.yaml.
+    collapsed = set(values.get(model.HIDDEN_SECTIONS_KEY,
+                               model.DEFAULT_HIDDEN_SECTIONS))
+    # Row 0 is a section heading, where Enter folds rather than applies; park
+    # the cursor on the first real option instead whenever the list is rebuilt
+    # from scratch (first draw, preset, advanced toggle).
+    snap_to_option = True
 
     def set_status(msg, kind=C_OK):
         nonlocal status, status_kind
         status = msg
         status_kind = kind
+
+    def launch_values():
+        """`values` with the configured launch pose instead of the readback.
+
+        The robot pose fields track odometry while the vehicle moves and the
+        slam group depends on robot_x/robot_y, so diffing the live values
+        against a group's launch snapshot read every metre driven as a pending
+        SLAM restart.
+        """
+        merged = dict(values)
+        merged.update(saved_robot_pose)
+        return merged
 
     def save_config():
         """Persist settings without accidentally saving teleop motion."""
@@ -1238,8 +1309,21 @@ def control_screen(stdscr, sup, values, link, session):
         items = visible_params(values, show_advanced)
         if not items:
             items = visible_params(values, True)
-        idx = max(0, min(idx, len(items) - 1))
-        cur = items[idx]
+        # One entry per drawn line, so the selection can sit on a section
+        # heading and fold it: (None, section id) heading, (param, None) option.
+        rows = []
+        last_section = None
+        for p in items:
+            if p.section != last_section:
+                rows.append((None, p.section))
+                last_section = p.section
+            if p.section not in collapsed:
+                rows.append((p, None))
+        if snap_to_option:
+            idx = next((r for r, (p, _) in enumerate(rows) if p is not None), 0)
+            snap_to_option = False
+        idx = max(0, min(idx, len(rows) - 1))
+        cur, cur_section = rows[idx]
 
         link.speed_factor = values["speed_factor"]
         link.turn_factor = values["turn_factor"]
@@ -1300,7 +1384,13 @@ def control_screen(stdscr, sup, values, link, session):
                     point_dist = math.dist(
                         point, (pose["robot_x"], pose["robot_y"], pose["robot_z"]))
                 link.publish_target_marker(point)
-                if time.time() - last_point_pub_at >= core.POINT_GOAL_REPUBLISH_S:
+                # revisit_planner owns /frontier_slam/goal while it drives an
+                # uncertainty detour, so the point yields for the duration —
+                # the same rule trajectory_mission.py follows. Clearing the
+                # timestamp resends the point the moment the detour ends.
+                if link.revisit_state not in (None, "exploring"):
+                    last_point_pub_at = 0.0
+                elif time.time() - last_point_pub_at >= core.POINT_GOAL_REPUBLISH_S:
                     link.publish_point_goal(point)
                     last_point_pub_at = time.time()
         title = "ActiveSlam Control Center"
@@ -1322,6 +1412,11 @@ def control_screen(stdscr, sup, values, link, session):
             put(stdscr, 0, w - len(state) - len(gtxt) - 6, gtxt, gattr)
         put(stdscr, 0, w - len(state) - 3, state,
             curses.color_pair(C_OK if running else C_INFO) | curses.A_BOLD)
+        # The single-shot equivalent of what is configured here, listing only
+        # what differs from the defaults. Built from the launch pose, not the
+        # odometry readback, so it stays a command worth copying.
+        pending_values = launch_values()
+        put(stdscr, 1, 2, model.launch_command(pending_values), curses.A_DIM)
 
         # -- parameter list
         desc_h = 5
@@ -1334,28 +1429,28 @@ def control_screen(stdscr, sup, values, link, session):
         # Section headings occupy rows too, so scrolling counts them: over the
         # item index alone the selection can fall past the bottom of the pane
         # and get edited unseen behind the description.
-        rows = []
-        last_section = None
-        for i, p in enumerate(items):
-            if p.section != last_section:
-                rows.append((None, model.SECTION_TITLES[p.section]))
-                last_section = p.section
-            rows.append((i, p))
-        sel_row = next(r for r, (i, _) in enumerate(rows) if i == idx)
+        sel_row = idx
         if sel_row < scroll:
             # Keep a heading with the first option under it when scrolling up.
-            scroll = sel_row - 1 if rows[sel_row - 1][0] is None else sel_row
+            scroll = (sel_row - 1 if sel_row > 0 and rows[sel_row - 1][0] is None
+                      else sel_row)
         if sel_row >= scroll + list_h:
             scroll = sel_row - list_h + 1
         scroll = max(0, min(scroll, max(0, len(rows) - list_h)))
 
-        for offset, (i, p) in enumerate(rows[scroll:scroll + list_h]):
+        for offset, (p, section) in enumerate(rows[scroll:scroll + list_h]):
             row = list_top + offset
-            if i is None:
-                put(stdscr, row, 2, p,
-                    curses.A_BOLD | curses.color_pair(C_HEAD), maxx=list_right)
+            sel = (scroll + offset == idx)
+            if p is None:
+                title = model.SECTION_TITLES[section]
+                toggle = "< SHOW >" if section in collapsed else "< HIDE >"
+                put(stdscr, row, 2, title,
+                    curses.A_BOLD | curses.color_pair(C_HEAD)
+                    | (curses.A_REVERSE if sel else 0), maxx=list_right)
+                # Left plain: the reversed title already marks the cursor.
+                put(stdscr, row, 4 + len(title), toggle, curses.A_DIM,
+                    maxx=list_right)
                 continue
-            sel = (i == idx)
             marker = "> " if sel else "  "
             text = f"{marker}{p.label}: {fmt_value(p, values[p.id])}"
             put(stdscr, row, 4, text,
@@ -1369,7 +1464,7 @@ def control_screen(stdscr, sup, values, link, session):
                     put(stdscr, row, tag_col, "(live)",
                         curses.color_pair(C_OK), maxx=list_right)
                     tag_col += 7
-                pend = sup.pending_for(p.id, values)
+                pend = sup.pending_for(p.id, pending_values)
                 if pend:
                     put(stdscr, row, tag_col, pending_tag(pend),
                         curses.color_pair(C_WARN) | curses.A_BOLD,
@@ -1386,7 +1481,7 @@ def control_screen(stdscr, sup, values, link, session):
                 pass
             draw_side_panel(stdscr, link, values, running, driving,
                             driving and time.time() - last_drive_at < 0.6,
-                            list_top, panel_h, panel_x, PANEL_W - 1)
+                            list_top, panel_h, panel_x, PANEL_W - 1, cur)
 
         # -- description pane for the selected option
         # The value-specific line is rendered first and on its own, so cycling a
@@ -1397,21 +1492,32 @@ def control_screen(stdscr, sup, values, link, session):
             maxx=list_right)
         width = max(20, list_right - 6)
         drow = dtop + 1
-        if cur.kind == "enum" and values[cur.id] in cur.choice_help:
+        if cur is None:
+            hidden = cur_section in collapsed
+            count = sum(1 for p in items if p.section == cur_section)
+            text = (f"{model.SECTION_TITLES[cur_section]} — {count} option"
+                    f"{'s' if count != 1 else ''}, currently "
+                    f"{'hidden' if hidden else 'shown'}. Left/Right "
+                    f"{'shows' if hidden else 'hides'} them.")
+            for line in textwrap.wrap(text, width)[:desc_h - 1]:
+                put(stdscr, drow, 3, line, curses.color_pair(C_INFO),
+                    maxx=list_right)
+                drow += 1
+        elif cur.kind == "enum" and values[cur.id] in cur.choice_help:
             head = f"{values[cur.id]}: {cur.choice_help[values[cur.id]]}"
             for line in textwrap.wrap(head, width)[:2]:
                 put(stdscr, drow, 3, line, curses.color_pair(C_OK) | curses.A_BOLD,
                     maxx=list_right)
                 drow += 1
         remaining = (dtop + desc_h) - drow
-        if remaining > 0:
+        if cur is not None and remaining > 0:
             for line in textwrap.wrap(cur.description, width)[:remaining]:
                 put(stdscr, drow, 3, line, curses.color_pair(C_INFO),
                     maxx=list_right)
                 drow += 1
 
         # -- pending changes / status
-        _, to_start, to_restart = sup.plan(values)
+        _, to_start, to_restart = sup.plan(pending_values)
         pending = sorted(set(to_start + to_restart))
         foot = h - 2
         # The gate zeroes every command while disarmed, so the drive keys are
@@ -1425,6 +1531,10 @@ def control_screen(stdscr, sup, values, link, session):
         if goto_mode and point is not None:
             dist_txt = (f"  dist {point_dist:.1f} m" if point_dist is not None
                         else "")
+            # The distance still refers to the point while a revisit detour
+            # drives the other way, so say the point is on hold.
+            if link.revisit_state not in (None, "exploring"):
+                dist_txt += "  [revisit: point on hold]"
             # The point still moves while disarmed; the vehicle just won't
             # swim to it, which is what the middle of the line says.
             gate_txt = (f"  —  MOTION DISABLED, {arm_hint}" if disarmed else "")
@@ -1454,7 +1564,8 @@ def control_screen(stdscr, sup, values, link, session):
             put(stdscr, foot, 2, "Enter starts the stack", curses.A_DIM)
 
         keys = ("Up/Down move  Left/Right change  " +
-                ("i edit  " if cur.kind in ("int", "float", "text") else "") +
+                ("i edit  " if cur is not None
+                 and cur.kind in ("int", "float", "text") else "") +
                 "Enter apply  m arm  r reset  o advanced  "
                 "p preset  k stop  Esc quit")
         put(stdscr, h - 1, 2, keys, curses.A_DIM)
@@ -1526,9 +1637,17 @@ def control_screen(stdscr, sup, values, link, session):
                 continue
 
         if key == curses.KEY_UP:
-            idx = (idx - 1) % len(items)
+            idx = (idx - 1) % len(rows)
         elif key == curses.KEY_DOWN:
-            idx = (idx + 1) % len(items)
+            idx = (idx + 1) % len(rows)
+        elif cur is None and key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+            # Left/Right only: Enter stays the apply/launch key on every row.
+            if cur_section in collapsed:
+                collapsed.discard(cur_section)
+            else:
+                collapsed.add(cur_section)
+            values[model.HIDDEN_SECTIONS_KEY] = sorted(collapsed)
+            save_config()
         elif key in (curses.KEY_LEFT, curses.KEY_RIGHT):
             delta = -1 if key == curses.KEY_LEFT else 1
             old = values[cur.id]
@@ -1543,7 +1662,8 @@ def control_screen(stdscr, sup, values, link, session):
                 values[cur.id] = round(cur.clamp(values[cur.id] + delta * cur.step), 4)
             if values[cur.id] != old:
                 apply_live_change(cur, old)
-        elif key in (ord("i"), ord("I")) and cur.kind in ("int", "float", "text"):
+        elif (key in (ord("i"), ord("I")) and cur is not None
+              and cur.kind in ("int", "float", "text")):
             raw = prompt(stdscr, f"{cur.label} =")
             if raw:
                 try:
@@ -1565,12 +1685,13 @@ def control_screen(stdscr, sup, values, link, session):
             values.update(model.PRESETS[preset_idx][1])
             if not values["robot_save_pose_on_exit"]:
                 values.update(saved_robot_pose)
+            values[model.HIDDEN_SECTIONS_KEY] = sorted(collapsed)
             save_config()
-            idx = 0
+            snap_to_option = True
             set_status(f"Preset: {model.PRESETS[preset_idx][0]}", C_INFO)
         elif key in (ord("o"), ord("O")):
             show_advanced = not show_advanced
-            idx = 0
+            snap_to_option = True
         elif key in (ord("r"), ord("R")):
             if not sup.running_ids():
                 set_status("Start the stack before resetting", C_WARN)
@@ -1640,16 +1761,17 @@ def control_screen(stdscr, sup, values, link, session):
             if values["mode"] != "goto":
                 drop_point()
             # A live odometry readback must not silently become the next core
-            # launch pose when save-on-exit is off (for example if changing
-            # object scale restarts Stonefish mid-run).
-            launch_values = dict(values)
-            if not values["robot_save_pose_on_exit"]:
-                launch_values.update(saved_robot_pose)
+            # launch pose (for example if changing object scale restarts
+            # Stonefish mid-run), nor restart the pose graph it seeds.
+            wanted = launch_values()
             save_config()
-            draw_busy(stdscr, "Applying...")
             was_armed = bool(link.enabled)
-            session.event(f"apply: {launch_values}")
-            stopped, started, restarted = sup.apply(launch_values, on_event=session.event)
+            # Only announce work there is: apply() returns immediately when the
+            # plan is empty, and the busy line would flash for one frame.
+            if any(sup.plan(wanted)):
+                draw_busy(stdscr, "Applying...")
+            session.event(f"apply: {wanted}")
+            stopped, started, restarted = sup.apply(wanted, on_event=session.event)
             changed = sorted(set(started + restarted))
             # planner and teleop_support each bring their own motion safety
             # gate, and a fresh gate starts disabled — re-arm so applying an

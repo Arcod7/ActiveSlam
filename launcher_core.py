@@ -179,10 +179,13 @@ def build_groups(bringup_share=""):
         return [cmd]
 
     def planner(v):
-        # goto mode: the operator owns the goal, so revisit_planner must not
-        # preempt it with a loop-closure detour.
+        # goto runs revisit too: the point shows the vehicle can be sent
+        # somewhere, and the revisit detours show it can get there while keeping
+        # pose uncertainty bounded. The launcher stops republishing the
+        # operator's point while a revisit is in progress, so the two never
+        # fight over /frontier_slam/goal (see control_screen).
         revisit = "true" if (v["revisit"] and v["slam"] == "slam"
-                             and v["mode"] == "frontier") else "false"
+                             and v["mode"] in ("frontier", "goto")) else "false"
         return [["ros2", "launch", "frontier_slam", "frontier_slam.launch.py",
                  f"hard_inflation_m:={v['hard_inflation_m']}",
                  f"inflation_m:={v['inflation_m']}",
