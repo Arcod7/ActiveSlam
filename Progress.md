@@ -2041,3 +2041,59 @@ as. The simulator and the stated design disagree, and no real IMU knows absolute
 heading to 0.01 rad underwater. Resolving it means changing what the simulated
 sensor is, which moves every recorded run number, so it is left as a decision
 rather than folded into this change.
+
+## Phase 50 — A depth limit cycle, and a planner that could not see what it hit
+
+Two vehicle-behaviour faults, found by watching a run rather than reading a
+metric.
+
+**The vehicle was bouncing.** Depth hold was `heave = -KP * (pose_z - setpoint)`
+with no rate term. The vehicle is effectively a double integrator and the loop
+runs at 10 Hz, so once Phase 39's thruster-calibration fix restored the real
+actuator authority there was no phase margin left. Ground truth over a 900 s
+run:
+
+```
+z: mean 6.023 m (setpoint 6.0)  std 0.371  peak-to-peak 1.265 m
+237 zero crossings / 730 s -> sustained 6.14 s period (FFT peak 0.163 Hz)
+```
+
+A clean limit cycle, not noise. `control_utils` gains `depth_hold_effort()` and
+`LowPassRate`, a filtered finite difference; `wall_oriented_controller`,
+`waypoint_controller` and `wall_looking` all feed a damped depth rate into the
+law. Same scene afterwards: std **0.371 -> 0.038 m**, peak-to-peak **1.265 ->
+0.230 m**, and no periodic component left at all.
+
+**The vehicle was colliding.** The controller's own logs had been recording it:
+233 `EMERG_STOP` events in a 10 min run with clearance pinned at the depth
+sensor's 0.2 m floor. Two independent causes. The A* hard-wall radius was
+0.20 m, so a planned path was permitted to graze structure. More seriously,
+`/projected_map` projected only a +/-1.0 m Z-band around the cruise depth into
+the 2-D planning grid, so wreck geometry above and below the cruise plane was
+invisible to the planner — it was not avoiding those obstacles because it never
+knew they existed.
+
+```
+hard_inflation_m      0.20 -> 1.00
+inflation_m (soft)    0.75 -> 1.50
+plan_inflation_m      1.50 -> 3.00
+projected_map_band_m  1.0  -> 3.0     (the collision-relevant one)
+wall_z_band_m         1.5  -> 3.0
+```
+
+Measured over the first ~550 s of a run under each setting:
+
+| | EMERG_STOP | ticks < 0.4 m | median clearance | travel |
+|---|---|---|---|---|
+| hard 0.20, band +/-1.0 | 233 | 230 | 0.48 m | 136 m |
+| hard 1.00, band +/-3.0 | 17 | 16 | 2.32 m | 322 m |
+
+Travel distance is in that table deliberately: a robot that stops moving also
+stops colliding, and the wider margins had to be shown not to strand it. They
+do not — it covers more ground than before, because it is no longer spending
+its time in emergency stop.
+
+One coupling this introduces: a 1.0 m hard radius means a frontier goal placed
+1.0 m off a surface lands exactly on the blocked boundary and A* can never
+reach it. `tsdf_frontier_standoff_m` must now be >= 2.0; batches that pin it
+lower will stall.
