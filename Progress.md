@@ -2162,3 +2162,49 @@ relative noise models are too loose while the absolute marginal is still
 optimistic on the high-drift seeds (ANEES tracks ATE across all 12 runs). Phase
 49 removed the yaw component of that; what remains is the odometry sigma, a
 hand-set constant that cannot represent accumulating DVL scale and bias error.
+
+## Phase 52 — Odometry noise derived from the profile instead of hand-set
+
+`odom_sigma_trans` was a single 0.02 m applied to every keyframe edge whatever
+its length, its duration, or which noise profile was loaded. The 12-run Phase 51
+ablation measured both consequences.
+
+Normalised graph chi-square came out at 0.06-0.22 against an expectation of 1 --
+the assumed sigma was 2.1-4.1x larger than the residuals justified. Deriving it
+from the DVL datasheet terms instead gives 0.0039 m for a typical 1 m / 1 s edge,
+5.2x tighter, independently landing where the residuals said it should.
+
+The second consequence matters more for the planned degraded-noise work. Because
+the constant never read the profile, realistic -> degraded raises true DVL error
+3-5x while leaving D-optimality unmoved -- and D-optimality is what the revisit
+trigger reads. The mechanism was structurally blind to the degradation such an
+experiment is meant to introduce. The derived model moves a typical edge 3.8x
+between those profiles.
+
+`odom_noise.py` folds the three terms with their proper exponents: random
+velocity noise as sqrt(time), scale error linear in distance, velocity bias
+linear in time. `odom_sigma_trans` survives as a floor for near-stationary
+edges, default 0.002.
+
+Verified against `lc_s105` -- same seed, scene and duration, old model vs new:
+
+| | before | after | target |
+|---|---|---|---|
+| chi2/dof | 0.120 | 0.386 | 1.0 |
+| NIS median | 1.228 | 2.026 | 6.0 |
+| ANEES final | 115.65 | 36.65 | 3.0 |
+| ATE final | 0.406 m | 0.376 m | — |
+| drift | 0.083 %/m | 0.086 %/m | — |
+
+About a 3x move toward consistency on all three statistics, and no accuracy
+change worth claiming: one seed, and a 7% ATE difference sits well inside the
+seed variance Phase 51 measured.
+
+**The estimator is still not consistent, and the reason is known.** Scale error
+and velocity bias are perfectly correlated across consecutive edges, while a
+BetweenFactor treats each edge as independent evidence, so a per-edge Gaussian
+understates their accumulation by construction. The same objection now applies
+more forcefully to loop closures: these runs carry ~11000 of them over ~1000
+keyframes, each contributing as if independent, which is the most likely
+remaining source of the ANEES gap. Fixing that needs correlated noise or closure
+sparsification, not another sigma.
