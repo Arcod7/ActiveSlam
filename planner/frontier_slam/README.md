@@ -149,7 +149,7 @@ frontier_slam/
 ## Build and run
 
 ```bash
-distrobox enter ros2-jazzy
+distrobox enter activeslam-jazzy
 cd <path-to-your-colcon-workspace>   # the workspace that has this repo under src/
 colcon build --symlink-install
 source install/setup.zsh

@@ -5,8 +5,11 @@ path waypoints published on /frontier_slam/path.  Responsibilities:
 
   1. Path following  — advance through waypoints published by the extractor,
                        yaw toward the current waypoint, surge when aligned.
-  2. Depth hold      — keep the robot at a fixed depth setpoint captured on
-                       the first odometry message.  Goal Z is ignored.
+  2. Depth hold      — track the active goal's Z (whoever published it —
+                       frontier's own pick, a revisit/scenario/mission
+                       waypoint, the launcher's target point); with no goal
+                       (waiting or scanning), hold depth_setpoint, captured
+                       on the first odometry message unless set explicitly.
   3. Emergency stop  — zero surge if the forward depth camera detects an
                        obstacle closer than EMERGENCY_STOP_DIST (last-resort
                        safety; A* inflation should prevent this normally).
@@ -14,9 +17,13 @@ path waypoints published on /frontier_slam/path.  Responsibilities:
                        picks a cable-safe sweep (default, scan_sweep.py) or
                        the legacy spin. Same behaviour while waiting/at goal.
 
-Why a fixed depth setpoint?
-  See Progress.md "Session 1 — Findings".  Locking the setpoint once on first
-  odom breaks the slow-sink feedback loop.
+Why not just track the goal's Z unconditionally? See Progress.md "Session 1 —
+Findings": frontier_extractor used to set the goal's Z to the robot's own
+live Z every cycle, a self-referential loop that let the robot sink
+undetected (Change 12). It now anchors its own picks to depth_setpoint
+instead (locked from first odom, same as here), so goal.point.z is always a
+real target by the time it reaches this node — never a copy of the robot's
+own position.
 """
 import math
 import os
@@ -90,6 +97,9 @@ class WaypointController(Node):
         goal_topic = str(self.get_parameter('goal_topic').value)
         path_topic = str(self.get_parameter('path_topic').value)
         command_topic = str(self.get_parameter('command_topic').value)
+
+        self.declare_parameter('speed_factor', 1.0)
+        self.declare_parameter('turn_factor', 1.0)
 
         self.declare_parameter('scan_style', 'sweep')
         self.declare_parameter('scan_sweep_deg', 180.0)
@@ -181,10 +191,21 @@ class WaypointController(Node):
     # ------------------------------------------------------------------
     # Control primitives
     def _heave_cmd(self) -> float:
-        """Hold the depth setpoint. Negative output = upward thrust in Stonefish."""
-        if self._depth_setpoint is None:
+        """Hold depth: the active goal's Z while pursuing one, the locked/
+        configured setpoint otherwise (no goal — waiting or scanning).
+
+        goal.point.z is a real target here regardless of who published it —
+        a frontier pick (now locked to depth_setpoint at the source, see
+        frontier_extractor's own _cruise_z), a revisit/scenario/mission
+        waypoint, or the launcher's target point: one goal message, one Z,
+        no separate depth channel to keep in sync (Change 12 is still
+        respected — see frontier_extractor.py for why its own picks don't
+        just copy the robot's live Z).
+        """
+        target_z = self._goal[2] if self._goal is not None else self._depth_setpoint
+        if target_z is None:
             return 0.0
-        depth_err = self._pose[2] - self._depth_setpoint    # +ve = too deep
+        depth_err = self._pose[2] - target_z    # +ve = too deep
         return float(np.clip(-self.KP_HEAVE * depth_err, -1.0, 1.0))
 
     def _xy_drive(self, target_xy: np.ndarray) -> tuple:
@@ -339,11 +360,22 @@ class WaypointController(Node):
 
     # ------------------------------------------------------------------
     # Output
+    # Matches safety_gate.py's max_abs_command default (1.0): the gate rejects
+    # (and latches INVALID_COMMAND on) any out-of-range component, so a
+    # speed_factor/turn_factor above 1x must saturate here, not there.
+    MAX_ABS_COMMAND = 1.0
+
     def _send_thrust(self, surge: float, yaw: float, heave: float) -> None:
+        """Single publish choke point — applies the operator speed/turn factors
+        (live-tunable from the launcher TUI) uniformly to every caller: path
+        following, scanning, escape spin, obstacle backup."""
+        speed_factor = float(self.get_parameter('speed_factor').value)
+        turn_factor = float(self.get_parameter('turn_factor').value)
+        cap = self.MAX_ABS_COMMAND
         msg = Twist()
-        msg.linear.x = float(surge)
-        msg.linear.z = float(heave)
-        msg.angular.z = float(yaw)
+        msg.linear.x = float(np.clip(surge * speed_factor, -cap, cap))
+        msg.linear.z = float(np.clip(heave * speed_factor, -cap, cap))
+        msg.angular.z = float(np.clip(yaw * turn_factor, -cap, cap))
         self._command_pub.publish(msg)
 
     def _write_csv(self, surge, yaw_cmd, heave, event,

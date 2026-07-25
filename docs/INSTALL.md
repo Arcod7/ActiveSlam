@@ -1,113 +1,147 @@
 # Install
 
-Full instructions. See the root [`README.md`](../README.md) for the quick version.
+The short version is in the root [`README.md`](../README.md). This page covers
+the prerequisites it assumes, and what each step of `bootstrap.sh` actually
+does. When something fails, see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
-## 1. ROS 2 Jazzy
+## Prerequisites
 
-Targets Ubuntu 24.04. Follow the official ROS 2 Jazzy installation guide (search
-"ROS 2 Jazzy installation" — the `desktop` variant includes RViz, which this
-project uses). On another Linux distro, a container tool like
+**ROS 2 Jazzy**, which targets Ubuntu 24.04. Follow the official installation
+guide and pick the `desktop` variant — it includes RViz, which this project
+uses. On another Linux distro, a container tool like
 [distrobox](https://github.com/89luca89/distrobox) is one way to get an
-Ubuntu 24.04 userspace for it; that's a host-OS detail, not part of this guide.
+Ubuntu 24.04 userspace. When `bootstrap.sh` is run interactively from an
+unsupported environment (for example, Ubuntu 22.04 with ROS 2 Humble), it
+offers to install Podman and Distrobox, create an `activeslam-jazzy` Ubuntu
+24.04 container, install ROS 2 Jazzy there, and resume automatically. NVIDIA
+integration is enabled when the host driver is detected. Declining the prompt,
+or running non-interactively, leaves the host unchanged and exits.
 
-## 2. `rosdep`
-
-Not always preinstalled alongside ROS 2 itself:
+**`rosdep`**, which is not always installed alongside ROS 2 itself:
 
 ```bash
 sudo apt install python3-rosdep
-sudo rosdep init   # only if this is the first time rosdep has been set up on the machine
+sudo rosdep init   # only if rosdep has never been set up on this machine
 rosdep update
 ```
 
-## 3. Patched Stonefish
+**The scene mesh.** The BlueROV2 meshes are tracked in git, but
+`off_shore_station.obj` — the environment `scenario/waterlinked.scn` loads — is
+distributed out of band, as its provenance is unrecorded. It must be on disk
+before the simulator can load the scenario. `bootstrap.sh --meshes-from <path>`
+copies it from an existing checkout and verifies it against a checksum
+manifest. See [`sim/world/data/README.md`](../sim/world/data/README.md).
 
-This project runs a patched build of [Stonefish](https://github.com/patrykcieslak/stonefish),
-not the stock package. It comes in as a git submodule at
-`external/stonefish`, pinned to an exact commit of the patched fork, so
-there is nothing to clone or patch by hand:
+Everything else — build tools, Python packages, Stonefish's dependencies — is
+installed by `bootstrap.sh`. The Python packages go into a virtualenv, but the
+Python interpreter itself still comes from the supported Ubuntu 24.04
+environment: a virtualenv isolates packages; it does not change Python 3.10
+into Python 3.12.
 
-```bash
-git submodule update --init external/stonefish
-./bootstrap.sh --build-stonefish
-```
+## What `bootstrap.sh` does
 
-[`sim/stonefish_patches/`](../sim/stonefish_patches/) still carries the patches
-as plain files. They document what the fork changes relative to upstream and
-record the base commit; the submodule is what actually gets built.
+Run it from the repo root. In the supported environment, `ros2` must be on
+`PATH`; from an interactive unsupported host, the Distrobox prompt can create
+that environment first. The script is idempotent: re-run it after a `git pull`,
+or whenever a step failed and you have fixed the cause.
 
-**Submodules are required, not optional.** A plain `git clone` does not fetch
-them, and the workspace will not build without `external/stonefish` (the
-library `stonefish_ros2` compiles against) or `sim/stonefish_ros2` (a package
-`stonefish_groundtruth_mapping` depends on). Clone with
-`--recurse-submodules`, or run `git submodule update --init --recursive`
-afterwards — `./bootstrap.sh` does this for you. `external/vdbfusion` is the
-one genuinely optional submodule; it is only needed for `mapper:=tsdf`.
+1. **Sanity checks** — requires ROS 2 Jazzy, `rosdep`, and Python 3.12. In an
+   interactive unsupported shell, offers the Distrobox handoff described
+   above before exiting.
+2. **Submodules** — initialises the two required ones, `external/stonefish`
+   (the patched library) and `sim/stonefish_ros2` (the patched ROS 2 bridge).
+   The workspace does not build without them, so cloning with
+   `--recurse-submodules` is unnecessary; this step covers it either way.
+   `external/vdbfusion` is fetched only where no wheel matches the platform,
+   and `external/open3d` only with `--with-open3d`, which keeps ~350 MB of
+   Open3D out of a default clone.
+3. **Python dependencies** — Ubuntu 24.04 marks its system Python
+   externally-managed, so a bare `pip install` fails with PEP 668. They go into
+   a [uv](https://docs.astral.sh/uv/) virtualenv at `<workspace>/.venv` instead,
+   created with `--system-site-packages` so the distro's `rclpy` and the rest of
+   ROS 2's Python stay visible. `uv` itself is installed if missing, and an
+   already-active virtualenv is reused rather than replaced.
+   [`requirements.txt`](../requirements.txt) holds only what `rosdep` cannot
+   provide; `numpy`, `scipy` and `matplotlib` are declared in the `package.xml`
+   files instead and come from apt.
+4. **`rosdep`** — resolves every dependency declared across the workspace's
+   `package.xml` files (`depth_image_proc`, `octomap_server`, `octomap`,
+   `rviz2`, ...).
+5. **Patched Stonefish** — installs its dependencies (glm, SDL2, Freetype,
+   OpenGL, which `rosdep` does not cover), then builds and installs the pinned
+   submodule. Skipped when a standard prefix already holds a
+   `StonefishConfig.cmake` whose headers declare the methods `stonefish_ros2`
+   calls; an older install is rebuilt over rather than skipped, since it
+   satisfies `find_package(Stonefish)` but fails to compile the bridge.
+   `--skip-stonefish` forces the skip regardless. Building takes a while.
+6. **vdbfusion** — needed for `mapper:=tsdf`, so it is installed by default:
+   the wheel where one matches, the pinned submodule otherwise.
+   `--skip-vdbfusion` opts out.
+7. **Open3D**, only with `--with-open3d` — needed for FPFH descriptor work.
+8. **Scene meshes** — copies the out-of-band ones with `--meshes-from`, then
+   hashes whatever is on disk against `sim/world/data/obj.sha256`. A missing or
+   corrupted mesh a scenario needs is reported here rather than failing later
+   inside the simulator. This is a warning, not a failure: the rest of the
+   build still completes.
+9. **`colcon build --symlink-install`** over the whole workspace, with the venv
+   on `PATH` — which is all that activating it does. Rebuild the same way:
 
-The ROS 2 bridge is a patched fork too — see
-[`stonefish_ros2_fork.md`](stonefish_ros2_fork.md).
+   ```bash
+   source <workspace>/.venv/bin/activate
+   colcon build --symlink-install --cmake-args -Wno-dev
+   ```
 
-## 4. Scene meshes
+   Building without the venv active produces a workspace whose nodes cannot
+   import `gtsam` and the other wheels — see
+   [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for why. `requirements.txt`
+   installs `colcon` into the venv so that activating it is genuinely enough.
 
-`sim/world/data/obj/` (~313 MB) is gitignored — see
-[`sim/world/data/README.md`](../sim/world/data/README.md). Must be present on
-disk (not just cloned) before the demo will load the scenario.
-
-## 5. Workspace + this repo
-
-```bash
-mkdir -p ~/ros_ws/src && cd ~/ros_ws/src
-git clone --recurse-submodules git@github.com:Arcod7/ActiveSlam.git
-cd ~/ros_ws
-rosdep install --from-paths src -i -y
-colcon build --symlink-install --cmake-args -Wno-dev
-source install/setup.zsh
-```
-
-`rosdep` resolves every dependency declared in each package's `package.xml`
-(`depth_image_proc`, `octomap_server`, `rviz2`, `python3-numpy`,
-`python3-scipy`, ...).
-
-`-Wno-dev` silences CMake dev warnings from PCL's own cmake modules
-(`CMP0144`/`CMP0074` about `_ROOT` variables) — noise from upstream PCL, not
-this project.
-
-## 6. Python dependencies not covered by `rosdep`
-
-Python dependencies are split by who can install them:
-
-- **`rosdep` handles anything packaged for apt** — `numpy`, `scipy` and
-  `matplotlib` are declared in the `package.xml` of each package that imports
-  them, so step 5's `rosdep install` already pulled them in. They are
-  deliberately not repeated in `requirements.txt`.
-- **[`requirements.txt`](../requirements.txt) is only what `rosdep` cannot
-  provide** — install with:
-
-```bash
-pip install -r requirements.txt   # or --break-system-packages / inside a venv
-```
-
-`gtsam` and `small-gicp` (needed only for `slam:=slam`) and `pymavlink` (needed
-only for the real ArduSub adapter) are PyPI wheels and install cleanly this way
-on aarch64 as well as x86_64. `vdbfusion` (needed only for `mapper:=tsdf`) is
-the exception — see below, it needs a source build instead.
-
-**`vdbfusion` is NOT installable via this file.**
-PyPI only publishes wheels up to Python 3.10, x86_64
-only — there is no wheel for Python 3.11/3.12 (Ubuntu 24.04's default) on any
-architecture, so `pip install vdbfusion` fails everywhere on a fresh Jazzy
-setup, and on aarch64 (Apple Silicon, Raspberry Pi) a source build is the only
-option at all. It is pinned as a submodule for that reason:
+Then activate the virtualenv and source the workspace, in each new shell:
 
 ```bash
-git submodule update --init external/vdbfusion
-./bootstrap.sh --with-vdbfusion     # or: pip install external/vdbfusion
+source <workspace>/.venv/bin/activate
+source <workspace>/install/setup.zsh
 ```
 
-Follow [vdbfusion's own `INSTALL.md`](https://github.com/PRBonn/vdbfusion/blob/main/INSTALL.md)
-first if the build fails — it needs OpenVDB and a C++ toolchain, which aren't
-part of this project's own dependency list. Skip this entirely if you only
-plan to run the default `mapper:=octomap`.
+## Optional components
+
+Both are pinned as submodules for the platforms where no usable wheel exists.
+
+**vdbfusion** (`mapper:=tsdf`) is **not optional** — `bootstrap.sh` installs it
+by default, because the launcher offers that mapper by default and the node
+exits on import without it. What varies is how. Upstream publishes wheels for
+x86_64 only, up to CPython 3.10, so:
+
+| Platform | How it is installed |
+|---|---|
+| Humble / x86_64 (CPython 3.10) | Wheel, pinned in `dependencies.conf` |
+| Jazzy (CPython 3.12), or any aarch64 | Built from the `external/vdbfusion` submodule |
+
+The source path needs OpenVDB and a C++ toolchain, which are not in this
+project's dependency list — follow
+[vdbfusion's own `INSTALL.md`](https://github.com/PRBonn/vdbfusion/blob/main/INSTALL.md)
+if the build fails. `./bootstrap.sh --skip-vdbfusion` skips it, at the cost of
+`mapper:=tsdf`.
+
+**Open3D** (FPFH submap descriptors, point-cloud registration) — no wheel is
+published for aarch64 on any Python version, so on Apple Silicon or a Raspberry
+Pi a source build is the only option. Pinned at `v0.19.0`.
+
+```bash
+./bootstrap.sh --with-open3d
+```
+
+The build is heavy: it compiles Open3D's own third-party dependencies,
+including VTK from source. It is configured with CUDA, the GUI, examples and
+unit tests off, since none are used here.
+
+## Patched forks
+
+Stonefish is a patched build, not the stock package.
+[`sim/stonefish_patches/`](../sim/stonefish_patches/) carries the patches as
+plain files and records the upstream base commit — they document what the fork
+changes; the pinned submodule is what actually gets built. The ROS 2 bridge is a
+patched fork too — see [`stonefish_ros2_fork.md`](stonefish_ros2_fork.md).
 
 ## Verify
 
@@ -115,7 +149,6 @@ plan to run the default `mapper:=octomap`.
 ros2 launch bringup demo.launch.py
 ```
 
-Should bring up Stonefish, RViz, and print a reminder to run
+Should bring up Stonefish and RViz, and print a reminder to run
 `ros2 run launch_tools my_keyboard` in another terminal (the default mode is
-`teleop`). See the root README's *Run* section for the `mode`/`mapper`/`slam`
-switches.
+`teleop`). See [`RUN.md`](RUN.md) for the full set of switches.

@@ -28,6 +28,25 @@ sonar:                       # WaterLinked Sonar 3D-15 datasheet (as noise_reali
   lat_sigma_v_per_m: 0.005
   dropout_p0: 0.02
   dropout_p_range: 0.05
+  dropout_p_grazing: 0.35    # specular loss: an edge-on wall returns almost nothing
+  corr_length_px: 6.0        # speckle/dropout patch size, ~2 deg of beam pattern
+  corr_rho_time: 0.7         # partly frozen speckle between consecutive pings
+  range_corr_frac: 0.5       # half the range-error variance is beam-correlated
+  sos_scale_error_pct: 0.007 # 1500 m/s assumed vs. real salinity/temperature
+  dropout_p_grazing: 0.35    # specular loss: an edge-on wall returns almost nothing
+  corr_length_px: 6.0        # speckle/dropout patch size, ~2 deg of beam pattern
+  corr_rho_time: 0.7         # partly frozen speckle between consecutive pings
+  range_corr_frac: 0.5       # half the range-error variance is beam-correlated
+  sos_scale_error_pct: 0.007 # 1500 m/s assumed vs. real salinity/temperature
   outlier_p: 0.002
   outlier_range_min_m: 0.3
   outlier_range_max_m: 3.0
+  argmax_window_px: 3        # beam ~1 px wide; small window bleeds edges / fades thin targets
+  argmax_beam_sigma_px: 1.5
+  lat_sigma_beam_frac: 0.5   # cross-range jitter = half the local beam width x range
+  reverb_p: 0.01             # clear water: occasional near-field backscatter
+  reverb_max_m: 1.5
+  reverb_weak_boost: 3.0     # far/grazing surfaces beaten by reverb more often
+  multipath_p: 0.05          # geometric second-bounce, fired only where geometry re-hits
+  multipath_grazing_exp: 1.0
+  min_range_m: 0.0          # near-field gate; override per-run with the near_cutoff launch arg

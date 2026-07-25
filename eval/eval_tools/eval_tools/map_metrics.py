@@ -35,6 +35,8 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from scipy.spatial import cKDTree
 
+from eval_tools.run_paths import new_run_dir
+
 
 def _align_occupancy_grids(grid_belief: OccupancyGrid, grid_gt: OccupancyGrid):
     """Return (sub_belief, sub_gt) int16 2-D arrays over the overlapping
@@ -128,9 +130,7 @@ class MapMetricsNode(Node):
 
         out_dir = self.get_parameter('output_dir').value
         if not out_dir:
-            default_root = os.path.expanduser(
-                '~/delivery/MasterProject/ros_ws/src/ActiveSlam/eval/runs')
-            out_dir = os.path.join(default_root, pytime.strftime('%Y%m%d_%H%M%S'))
+            out_dir = new_run_dir(pytime.strftime('%Y%m%d_%H%M%S'))
         os.makedirs(out_dir, exist_ok=True)
 
         self._mapper = self.get_parameter('mapper').value

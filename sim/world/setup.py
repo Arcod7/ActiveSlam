@@ -3,17 +3,22 @@ from setuptools import setup
 
 package_name = 'world'
 
-# Mesh files (data/obj/*.obj, *.mtl) are gitignored (~313 MB — see
-# data/README.md) but may or may not be present on disk depending on the
-# checkout. glob() picks up whatever's actually there at build time instead
-# of hardcoding a file list that would break the build when they're absent.
+# Some of data/obj/ is tracked and some is distributed out of band (see
+# data/README.md), so which meshes exist depends on the checkout. glob() picks
+# up whatever is actually there at build time instead of hardcoding a file list
+# that would break the build when they are absent.
 data_files = [
     ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
     ('share/' + package_name, ['package.xml']),
-    ('share/' + package_name + '/scenario', glob.glob('scenario/*.scn')),
+    # ``target.scn.in`` is rendered into /tmp by core.launch.py when the
+    # lightweight target scene is selected.  Install the template alongside
+    # normal scenarios so this also works from an installed workspace.
+    ('share/' + package_name + '/scenario',
+     glob.glob('scenario/*.scn') + glob.glob('scenario/*.scn.in')),
     ('share/' + package_name + '/data/robot', glob.glob('data/robot/*.scn')),
     ('share/' + package_name + '/data/texture', glob.glob('data/texture/*.png')),
-    ('share/' + package_name + '/data/obj', glob.glob('data/obj/*.obj') + glob.glob('data/obj/*.mtl')),
+    ('share/' + package_name + '/data/obj',
+     glob.glob('data/obj/*.obj') + glob.glob('data/obj/*.stl') + glob.glob('data/obj/*.mtl')),
     ('share/' + package_name, ['run.sh']),
 ]
 # Drop any entry whose glob matched nothing — setuptools rejects a

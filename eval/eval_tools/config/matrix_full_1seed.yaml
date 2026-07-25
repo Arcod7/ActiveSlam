@@ -1,0 +1,37 @@
+# Single-seed sweep of matrix_full's configs: 7 configs x 1 seed = 7 runs,
+# ~8 min each -> ~1h. Same arms as matrix_full.yaml, one seed instead of five,
+# for an early read on the post-calibration baseline. Not a statistical
+# result -- seed 101 only; matrix_full.yaml remains the reportable batch.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_full_1seed.yaml
+batch_name: full_1seed
+duration_s: 480
+settle_s: 15
+seeds: [101]
+
+common_args:
+  # Motion gate is fail-closed; headless runs never arm it otherwise.
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  rviz: 'false'
+  noise_profile: realistic
+  loop_closure: 'true'
+  map_rebuild: 'false'
+  mapper: octomap
+
+runs:
+  - name: baseline
+    args: {}
+  - name: lc_off
+    args: {loop_closure: 'false'}
+  - name: tsdf
+    args: {mapper: tsdf}
+  - name: tsdf_rebuild
+    args: {mapper: tsdf, map_rebuild: 'true'}
+  - name: noise_ideal
+    args: {noise_profile: ideal}
+  - name: noise_degraded
+    args: {noise_profile: degraded}
+  - name: revisit_on
+    args: {revisit: 'true'}

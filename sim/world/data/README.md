@@ -1,20 +1,55 @@
-# Mesh assets (not tracked in git)
+# Mesh assets
 
-`data/obj/` (~313 MB) is gitignored — GitHub rejects pushes containing files
-over 100 MB, and the full set is well past that. The directory must exist on
-disk with these files for the demo to run; it just never enters git history.
+`data/obj/` is split. The BlueROV2 meshes are tracked in git; the rest are
+distributed out of band, either because they are too large for GitHub's 100 MB
+file limit or because their provenance is not established.
 
-| File | Size | Notes |
+## Tracked in git (~18 MB)
+
+Apache-2.0, from the
+[`bvibhav/stonefish_bluerov2` asset directory](https://github.com/bvibhav/stonefish_bluerov2/tree/master/data/bluerov2),
+along with `texture/br2.png`.
+
+| File | Size | Loaded by |
 |---|---|---|
-| `shipwreck.obj` | 289 MB | Wreck structure, main exploration target |
-| `bluerov2.obj` | 10 MB | Visual mesh for the BlueROV2 |
-| `br2.obj` | 7.3 MB | |
-| `cliff.obj` | 7.9 MB | |
-| `bluerov2_wings.obj` | 6.6 MB | |
-| `off_shore_station.obj` | 5.4 MB | |
-| `bluerov2_phy.obj` / `bluerov2_phy.mtl` | 232 KB | Physics/collision mesh |
-| `bluerov2_ring.obj` | 17 KB | |
-| `ccw.obj` / `cw.obj` | 429–452 KB | |
+| `bluerov2.obj` | 10 MB | `data/robot/bluerov2_unphy.scn` |
+| `bluerov2_wings.obj` | 6.6 MB | `data/robot/bluerov2_unphy.scn` |
+| `ccw.obj` / `cw.obj` | 429–452 KB | both robot scenarios (thruster propellers) |
+| `bluerov2_phy.obj` / `bluerov2_phy.mtl` | 232 KB | `data/robot/bluerov2_unphy.scn` |
+| `bluerov2_ring.obj` | 17 KB | `data/robot/bluerov2_unphy.scn` |
+
+## Out of band
+
+| File | Size | Loaded by | Why not tracked |
+|---|---|---|---|
+| `off_shore_station.obj` | 5.4 MB | `scenario/waterlinked.scn` | No recorded source or licence |
+| `shipwreck.obj` | 289 MB | nothing | Past GitHub's 100 MB file limit |
+| `cliff.obj` | 7.9 MB | nothing | No recorded source or licence |
+| `br2.obj` | 7.3 MB | nothing | Apache-2.0, but unreferenced |
+
+`off_shore_station.obj` is the only one a scenario actually loads, so it is the
+only one `bootstrap.sh` asks for. The other three are unreferenced: a checkout
+without them is complete, and the simulator never opens them.
+
+## Lightweight launch-time target
+
+`scenario/target.scn.in` is an alternative to the default `waterlinked.scn`.
+`scene:=target` renders it under `/tmp` with `obj_mesh`, `obj_x`, `obj_y`,
+`obj_z`, `obj_scale`, and `obj_roll`, `obj_pitch`, `obj_yaw`. `obj_mesh:=pipe`
+is the lightweight default. Any `.obj` or `.stl` in `data/obj` can instead be
+selected from the launcher TUI (or passed by filename). Meshes are not given
+special placement, scale, or orientation: `obj_*` is exactly what Stonefish
+uses. The initial object pose is `(8, -2, 8)` in `world_ned`; rotations are in
+degrees.
+
+`scene:=waterlinked` remains the default and opens the existing scenario file
+directly; none of the object arguments modify it.  This preserves the baseline
+scene exactly while keeping the large `shipwreck.obj` out of the sonar view.
+
+**Publishing `off_shore_station.obj` is blocked on provenance.** It is the
+environment the demo runs in, so tracking it would make the repo entirely
+self-contained — but redistributing third-party geometry under an unknown
+licence is not something to do by default. Settle the source first.
 
 ## BlueROV2 texture atlas
 
@@ -22,50 +57,29 @@ disk with these files for the demo to run; it just never enters git history.
 unchanged: rotating the atlas by 90 degrees produces apparently random black,
 grey and cyan patches because the mesh then samples unrelated UV islands.
 
-**BlueROV2 provenance:** `bluerov2*.obj`, `br2.obj`, `br2.png`, `cw.obj`, and
-`ccw.obj` come from the Apache-2.0 licensed
-[`bvibhav/stonefish_bluerov2` asset directory](https://github.com/bvibhav/stonefish_bluerov2/tree/master/data/bluerov2).
-The environment meshes (`shipwreck.obj`, `cliff.obj`, and
-`off_shore_station.obj`) still need their original sources documented.
-
 ## Verifying a copy
 
-[`obj.sha256`](obj.sha256) records the SHA-256 of every file `obj/` must
-contain. It is tracked in git even though the meshes are not, so a checkout can
-always tell whether its copy is complete and intact:
+[`obj.sha256`](obj.sha256) records the SHA-256 of the out-of-band meshes — git
+already guarantees the tracked ones. A checkout can tell whether its copy is
+intact:
 
 ```bash
 cd sim/world/data && sha256sum -c obj.sha256
 ```
 
-`./bootstrap.sh` runs this and names any file that is missing or corrupted.
-Without it a partial copy surfaces much later, as an obscure failure inside the
-simulator.
+Run directly, that reports the unreferenced meshes as failures when they are
+simply absent. `./bootstrap.sh` hashes only the files on disk and asks for a
+missing mesh only when a scenario loads it.
 
 ## Getting the files onto a new machine
 
-Copy `obj/` from an existing checkout — `./bootstrap.sh --meshes-from <path>`
-does this and then verifies against the manifest.
+Copy the out-of-band files from an existing checkout —
+`./bootstrap.sh --meshes-from <path>` does this and then verifies them.
 
-**Automating this is still an open decision**, and it is blocked on two
-separate things:
-
-1. *Where to host them.* The options, with their trade-offs:
-   - **GitHub release asset** — a tarball attached to a release. No extra
-     tooling, no repo bloat, works for anonymous clones, and versioned
-     alongside the code. 313 MB is within GitHub's 2 GB per-asset limit. This
-     is the option to pick unless something rules it out.
-   - **git-lfs** — cleanest conceptually, but it bloats every clone by
-     default, needs LFS installed, and GitHub's free LFS quota (1 GB storage,
-     1 GB/month bandwidth) is smaller than this asset set.
-   - **External URL** (institutional storage) — fine for the project's own
-     use, but a dead link makes the repo unbuildable for anyone else later.
-2. *Provenance.* `shipwreck.obj`, `cliff.obj` and `off_shore_station.obj` have
-   no recorded source or licence (see above). Redistributing them without
-   knowing their licence is not something to do by default, so that has to be
-   settled before any of them are published anywhere — regardless of which
-   hosting option is chosen.
-
-The BlueROV2 assets are unaffected by (2): they are Apache-2.0 and already
-attributed above, so they could be published immediately if the environment
-meshes were split out.
+Hosting them somewhere fetchable remains an open decision, still blocked on the
+provenance question above. Were it settled, a GitHub release asset is the
+option to pick: no extra tooling, no repo bloat, works for anonymous clones,
+versioned alongside the code, and well inside the 2 GB per-asset limit. git-lfs
+bloats every clone by default and the free quota (1 GB storage, 1 GB/month
+bandwidth) is smaller than the asset set; an external institutional URL goes
+dead and takes the repo's buildability with it.

@@ -4,7 +4,7 @@ import math
 import pytest
 
 from frontier_slam.control_utils import wrap_angle
-from frontier_slam.wall_follower import _blended_heading, _offset_heading_towards
+from frontier_slam.wall_looking import _blended_heading, _offset_heading_towards
 
 
 def test_zero_path_influence_keeps_wall_heading():

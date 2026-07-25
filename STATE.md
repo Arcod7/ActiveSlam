@@ -1,27 +1,38 @@
 # ActiveSlam SLAM Backend — Current State
 
-Mutable snapshot. Overwrite, never append. Last updated: 2026-07-22.
+Mutable snapshot. Overwrite, never append. Last updated: 2026-07-25.
 
 Change log → `Progress.md`. Detailed design + as-built deltas → `docs/SLAM_PLAN.md`.
 
-## RViz views
+## RViz view
 
-`bringup/demo.launch.py` picks one of three configs automatically (`slam:=slam`
-takes priority over `mapper`):
-- `rviz/demo.rviz` — unchanged base view (`mapper:=octomap slam:=none`).
-- `rviz/demo_tsdf.rviz` — TSDF surface/voxel displays instead of OctoMap's
-  (OctoMap topics aren't published when `mapper:=tsdf`, so its displays would
-  just be empty).
-- `rviz/demo_slam.rviz` — the error/noise view: ground truth (green) vs SLAM
-  (blue) vs raw dead-reckoning (red) paths, pose-graph edges, covariance
-  ellipsoids, and a drift arrow + live text HUD sourced from
-  `eval_tools/benchmark.py`'s `/eval/markers` (`MarkerArray`) topic —
-  `err`/`ATE`/`RPE` translation+rotation/keyframe count/loop-closure
-  count/D-optimality, refreshed on every `/slam/pose` update. Also overlays
-  a second, ground-truth-only map (`GroundTruthMap` / `/gt/octomap_binary`,
-  enabled by default; `TSDFSurface_GroundTruth`/`TSDFVoxels_GroundTruth` for
-  `mapper:=tsdf`, disabled by default) against the belief map — see
-  "Ground-truth reference map" below.
+`rviz/demo.rviz` is the only config; `bringup/demo.launch.py` and the launcher
+both pass it in every mode. A display whose topic has no publisher in the
+current mode draws nothing, so nothing has to be picked — and there is no
+second copy left to drift out of sync (three hand-edited configs were merged
+into this one; the `mapper`/`slam` branch in both launch paths is gone).
+
+Enabled by default:
+- `OcTree (occupied)` on `/octomap_binary` — published by `octomap_server`
+  under `mapper:=octomap`, by `tsdf_to_octomap` under `mapper:=tsdf`. With
+  `tsdf_octomap:=false` there is no `/octomap_binary` at all; enable
+  `TSDFVoxels` instead. `OcTree (free)` is present but off.
+- `TSDFSurface` (orange, `/tsdf/surface_cloud`) and
+  `TSDFSurface_GroundTruth` (green, `/gt/tsdf/surface_cloud`) together, so
+  `slam:=slam mapper:=tsdf` shows belief vs. truth in the same
+  representation. The marker-based `TSDFVoxels`/`TSDFVoxels_GroundTruth`
+  views of the same cells are present but off.
+- `GroundTruthMap` (`/gt/octomap_binary`) — see "Ground-truth reference map".
+- Ground truth (green) vs SLAM (blue) vs raw dead-reckoning (red) paths,
+  pose-graph edges, covariance ellipsoids, and a drift arrow, all from
+  `slam:=slam`. Metrics — `err`/`ATE`/`RPE` translation+rotation/keyframe
+  count/loop-closure count/D-optimality, refreshed on every `/slam/pose`
+  update — come from `eval_tools/benchmark.py`'s `/eval/markers` and render
+  in the Eval HUD panel docked at the bottom.
+- Exactly one image view, `SLAM input (noised range)`
+  (`/cloud_in/range_image`, published in every mode). `DepthCamera` and
+  `Clean cloud (range)` are present but off: enabling several tabs them into
+  one dock slot where only the front tab renders.
 
 ## Ground-truth reference map (`slam:=slam` only)
 
@@ -74,15 +85,57 @@ depth_image_proc ─► /cloud_in_raw ─► sonar_noise ─► /cloud_in (5Hz) 
                                                           belief vs /gt/... map: IoU/coverage/chamfer
 ```
 
+Motion path (independent of the mapping/SLAM chain above):
+
+```
+waypoint_controller / wall executors ──► /motion/body_command
+                                              │
+                                     safety_gate (fail-closed)
+                                      start_enabled=false by default;
+                                      zeroes on stale/invalid/no-odom
+                                              │
+                                    /motion/body_command_safe ──► thruster mixer
+                                                                  or ardusub_adapter
+                                                                  (MAVLink MANUAL_CONTROL)
+```
+
+Nothing moves until `/motion/enable` is published — by the RViz panel
+(`tools/motion_safety_rviz`), `launcher.py`'s `m` key, or
+`safety_start_enabled:=true` for headless runs. `/motion/safety_status`
+reports which condition is blocking.
+
+## Map products under `mapper:=tsdf`
+
+`octomap_server` does not run in this mode; `tsdf_mapper` owns the belief map
+and exposes it three ways, all derived from the same VDB grid so they cannot
+disagree:
+
+| Topic | Type | Consumer |
+|---|---|---|
+| `/tsdf/surface_cloud`, `/tsdf/voxels` | cloud, MarkerArray | RViz |
+| `/tsdf/occupied_voxels`, `/tsdf/free_voxels` | PointCloud2 | frontier solid rejection; `tsdf_to_octomap` |
+| `/projected_map` | OccupancyGrid | 2-D frontier detection + A* (`publish_projected_map:=true`) |
+| `/octomap_binary` | octomap_msgs/Octomap | RViz OctoMap displays; the octree interface for future 3-D frontier/A* (`tsdf_octomap:=true`, default) |
+
+`slam/tsdf_octomap/` (`tsdf_to_octomap`, C++) rebuilds an `octomap::OcTree`
+from the occupied + free clouds once a second — from scratch each cycle, since
+the TSDF itself is reset+re-integrated after a large loop closure and an
+incrementally-updated octree would keep cells the TSDF has already corrected
+away. Occupied and free voxels come straight across; everything else stays
+unknown. Requires the pyopenvdb grid path (the surface-vertex fallback has no
+free space); `tsdf_mapper` logs an error and disables `/tsdf/free_voxels` if
+it is missing.
+
 ## Packages
 
 - `slam/slam_backend/` — sensor sims (incl. `sonar_noise`), dead-reckoning fusion, pose graph, scan matcher
+- `slam/tsdf_octomap/` — `tsdf_to_octomap`: TSDF grid → `octomap::OcTree` → `/octomap_binary`
 - `eval/eval_tools/` — benchmark node, map_metrics node, TUM writer, offline plotting, batch orchestrator (`scripts/run_matrix.py`)
 - `slam/stonefish_groundtruth_mapping/launch/` — layered: `core` (Stonefish
   alone) / `tf_only` / `pointcloud_only` / `mapper_only`, with
   `tf`/`pointcloud`/`octomap`/`tsdf` as thin compositions of them. Launch a
   single layer to restart it without dropping the simulator.
-- `external/` — pinned submodules: the patched Stonefish fork and vdbfusion.
+- `external/` — pinned submodules: the patched Stonefish fork, vdbfusion and Open3D.
   Not colcon packages (`COLCON_IGNORE`); built by `./bootstrap.sh`.
 
 ## Parameters
@@ -97,7 +150,8 @@ depth_image_proc ─► /cloud_in_raw ─► sonar_noise ─► /cloud_in (5Hz) 
 - `noise_realistic.yaml`: matches Bar30 pressure + Pathfinder DVL + gyro/compass attitude; sonar section
   derived from the WaterLinked Sonar 3D-15 datasheet (`ActiveSlam-Resources/3d-sonar`)
 - `noise_degraded.yaml`: turbid water / magnetic interference / degraded bottom-lock; sonar section
-  worse-than-datasheet (full beam-separation lateral jitter, higher dropout/outlier rates)
+  worse-than-datasheet (full beam-separation lateral jitter, higher dropout/outlier rates,
+  stronger specular loss, larger dropout patches, uncalibrated speed of sound)
 
 Each profile's `seed:` (42 for `ideal`/`sonar_only`/`odom_pos_only`/`odom_only`,
 -1/random for `realistic`/`degraded`) is combined with a per-sensor offset
@@ -118,7 +172,8 @@ published used `ideal`, so no quoted numbers are affected. Override with `noise_
 | `min_inlier_ratio` | 0.3 | Registration gate: fraction of source points matched |
 | `min_inlier_count` | 50 | Registration gate: absolute inlier floor |
 | `max_error_per_inlier` | 0.05 | Registration gate: GICP error normalized per inlier |
-| `icp_sigma_rot` / `icp_sigma_trans` | 0.05 / 0.05 | Shared noise model for ALL Between factors |
+| `odom_sigma_rot` / `odom_sigma_trans` | 0.02 / 0.02 | Dead-reckoning BetweenFactor noise (tight, non-robust: the DVL is accurate and must not be down-weighted by a bad closure) |
+| `scan_sigma_rot` / `scan_sigma_trans` | 0.08 / 0.12 | Scan-match + loop-closure BetweenFactor noise (looser, Huber-robust: sparse-sonar registration is decimeter-level) |
 | `scan_voxel_size` | 0.1 | small_gicp downsampling resolution |
 | `map_rebuild_enabled` | false | Rebuild the belief TSDF map after a big loop closure (TSDF only) |
 | `rebuild_min_move_m` / `rebuild_min_move_rad` | 0.3 / 0.15 | Min keyframe shift to trigger a rebuild |
@@ -147,8 +202,11 @@ as independently restartable groups, so changing the mapper, mode or pose
 source only bounces the layers that depend on it and leaves Stonefish up. It
 also arms the fail-closed motion gate (`m`) — nothing moves until it is armed,
 and with `rviz:=false` there is no other way to do that — resets a run (`r`),
-and has keyboard teleop built in (`t`). `demo.launch.py` below is unchanged and
-drives the same launch files.
+and has always-live keyboard driving built in: the QWEASD cluster (AZERTY
+option too) drives directly with no teleop mode key, `y` toggles a follow-me
+target point the vehicle swims to, and pressing a drive key in frontier mode
+suspends the planner (`Esc` resumes it). `demo.launch.py` below is unchanged
+and drives the same launch files.
 
 ```bash
 ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic mode:=frontier
@@ -158,9 +216,13 @@ ros2 launch slam_backend sensors_only.launch.py noise_profile:=degraded  # senso
 # Benchmarking switches (all slam:=slam only, all default to current behavior):
 ros2 launch bringup demo.launch.py slam:=slam loop_closure:=false                    # A/B: no loop closure
 ros2 launch bringup demo.launch.py slam:=slam mapper:=tsdf map_rebuild:=true         # rebuild belief TSDF after big closures
-ros2 launch bringup demo.launch.py slam:=slam noise_seed:=7                          # reproducible, decorrelated noise draws
+ros2 launch bringup demo.launch.py slam:=slam noise_seed:=7                          # repeatable, decorrelated sensor-noise draws
 ros2 launch bringup demo.launch.py slam:=slam output_dir:=/path/to/run              # label eval output instead of a timestamp
 ros2 launch bringup demo.launch.py slam:=slam mode:=frontier revisit:=true          # Week 3: uncertainty-triggered revisit
+ros2 launch bringup demo.launch.py mode:=frontier scan_style:=spin                  # pre-2026-07-21 full-revolution scan (default is sweep)
+ros2 launch bringup demo.launch.py mode:=frontier scan_sweep_deg:=120.0             # narrower cable-safe sweep
+ros2 launch bringup demo.launch.py mode:=frontier rviz:=false safety_start_enabled:=true  # headless: arm the motion gate at startup
+ros2 launch bringup demo.launch.py mapper:=tsdf carve_no_return:=true               # measured negative, see below — stays off
 
 # Batch evaluation (plain script, not a console_script -- needs
 # `source install/setup.bash` first so eval_tools.plot_results is importable):
@@ -169,22 +231,82 @@ python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_full
 python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/<batch_dir>    # re-aggregate only
 ```
 
+`carve_no_return` frees the voxels along no-return sonar rays. It is **off and
+should stay off**: vdbfusion has no carve-only ray API, so each synthesized
+pseudo-point also writes a surface at `carve_range_m`, and on a moving vehicle
+that artefact lands inside the volume mapped from earlier poses. Measured on
+one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.33 m.
+
 ## Verification status
 
 - ✅ Sensor fusion chain (pressure+IMU+DVL→dead_reckoning): profile-dependent drift confirmed via standalone rclpy harness
 - ✅ `ScanMatcher` gating: correctly rejects a synthetic zero-overlap match despite `converged=True`
 - ✅ Pose graph + loop closure logic: synthetic square-loop test (wiring/logic sanity check only, not representative of real numbers — see caveat below)
-- ✅ **Real benchmark, refreshed** (`demo.launch.py slam:=slam mode:=frontier
+- ⚠️ **Historical real benchmark** (`demo.launch.py slam:=slam mode:=frontier
   noise_profile:=realistic noise_seed:=42`, real Stonefish sim, 600s / 94 metrics
   rows / 35 loop closures, post re-detect fix and incl. the Phase 15 sonar noise
   model): final cumulative ATE **0.5356 m**, final instantaneous error 0.7908 m,
   mean RPE (translation) 0.1137 m, map coverage 0.9651, occupied-cell IoU 0.5194.
-  Seeded and reproducible (`noise_seed:=42`). The earlier 0.58 m / 157 s figure is
+  This predates Phase 36 and sampled only irregularly-spaced keyframe poses, so
+  its ATE/RPE are not directly comparable with current continuous-odometry metrics.
+  `noise_seed:=42` repeats the sensor RNG draws, but does not make asynchronous
+  Stonefish/ROS/planner execution deterministic. The earlier 0.58 m / 157 s figure is
   superseded — it predated both the re-detect fix and the sonar noise model, so
   the two numbers happen to land close but aren't measuring the same system.
   Loop closure remains opportunistic-only — the robot never revisits anything
   on its own; closing this gap is the Week 3 active-SLAM contribution (see
   "Not yet implemented" below).
+- ✅ **Evaluation audit and repair (Phase 36)**: ATE now samples corrected
+  `/slam/odometry` continuously instead of weighting sparse keyframes; RPE uses a fixed
+  temporal delta. Two identical pre-fix 120 s runs on commit `4011d3b`/seed 1 measured
+  ATE 1.255 vs 0.709 m and 45 vs 25 loop closures, demonstrating that a noise seed is
+  not an end-to-end determinism guarantee. Matrix validity now unwraps yaw, detects
+  pre-shutdown child deaths/non-zero launch exits, ignores orphan nodes in other ROS
+  domains, accepts `near_cutoff`, and labels its status as structural validity only.
+- ✅ **TSDF cloud/TF arrival-order loss fixed (Phases 37–38)**: a read-only 65 s timing probe
+  observed 302 `/cloud_in` messages. TF was available immediately for 151; of the
+  remaining 151, 150 became transformable within 0.5 s and only one expired. The
+  mapper now uses ROS Jazzy's maintained `Buffer.wait_for_transform_async()` and a
+  10-cloud/0.5 s bounded FIFO, preserving exact timestamps and capture order without
+  falling back to latest TF. In the matched 70 s post-fix run, the belief mapper
+  deferred 141/290 clouds, recovered 140, expired one, and overflowed none by 60 s.
+  A 180 s stress run stayed at zero overflow/future failures; a deterministic rebuild
+  reset and replayed 258 retained scans in 1.32 s, then ran another 30 s cleanly.
+- ⚠️ **Fixed-duration shutdown can interrupt a late rebuild**: the Phase 38 stress
+  run naturally began replaying 547 scans only 1.7 s before its 180 s deadline and
+  was stopped by the planned SIGINT. Its structural status was still `ok`. For map
+  quality comparisons, inspect rebuild-start/completion counts and rerun or extend
+  any cell that ends mid-replay; choosing automatic overtime versus invalidation is
+  an evaluation-policy decision, not a mapper correctness fix.
+- ⚠️ **A rebuild-correlated position jump was traced upstream to loop closure
+  (Phase 39)**: in a 240 s wall-oriented/frontier/realistic-noise run, absolute
+  error jumped 0.347 -> 0.862 m 36 ms after node 84's closure update and 139 ms
+  before TSDF rebuild began. The graph moved 40/85 keyframes by up to 0.99 m;
+  TSDF subsequently replayed all 606 scans in 2.04 s. Ten-second pre/post mean
+  errors were 0.323/0.795 m, and the error remained high after replay. The mapper
+  cannot change SLAM pose, so rebuild is a downstream indicator of the large graph
+  correction, not its cause. Current closure gating checks local ICP convergence,
+  overlap, and residual but not ICP-vs-prediction innovation or mutual consistency
+  across several accepted closures. Do not add an arbitrary correction cutoff from
+  this one event: it could reject legitimate drift correction. Add per-candidate
+  diagnostics and validate a consistency gate across labelled closure events first.
+- ✅ **Split odometry/scan noise model (Phase 40)** — the fix for the above: the
+  Phase 39 jump was one symptom of a single over-confident noise model (σ=0.05 m)
+  shared by DVL dead-reckoning and sonar scan-matching. The DVL is cm-accurate
+  per keyframe while sonar GICP is decimeter-level, so the shared σ let scan
+  constraints override good odometry — dragging the estimate via sequential
+  factors (2.6× worse than raw odometry with loop closure off) and warping it via
+  loop closures (peak error to 1.3 m). Split into a tight, non-robust
+  `odom_sigma` (0.02) and a looser, Huber-robust `scan_sigma` (0.08/0.12).
+  Validated on a wall-oriented / realistic-noise, 4-arm × 3-seed, 240 s batch:
+  mean final error fell 0.454→0.150 m (loop-closure off), 0.677→0.104 m
+  (clean-sonar), 0.265→0.137 m (near_cutoff), unchanged where already healthy
+  (baseline 0.176→0.180 m); worst per-run peak error 1.30→0.30 m and the largest
+  single closure-induced step 1.23→0.11 m, with every run now degrading gradually
+  rather than jumping. Clean-sonar SLAM now beats raw dead-reckoning on all three
+  seeds despite firing 111–456 closures. Caveat: n=3 per arm and asynchronous
+  execution dominates run-to-run variance, so the arm means are directional, not
+  precise; the tail elimination is the robust result.
 - ✅ Regression check: `slam:=none` (default) unchanged, no SLAM nodes started, `odom_tf_sync` still the TF source
 - ✅ Ground-truth reference map (`gt_map.launch.py`): live-verified both `mapper:=octomap`
   and `mapper:=tsdf`. Not yet visually confirmed in RViz (headless verification only, no GUI here).
@@ -196,6 +318,58 @@ python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/<batch_
   fraction vs. range, exact quantization lattice, NaN/no-return pixels untouched, and
   bytes-identical `ideal`-profile passthrough. Live: `/cloud_in_raw`/`/cloud_in`/`/gt/cloud_in`
   all ~5 Hz with correct frame IDs; `slam:=none` unaffected.
+- ✅ **Geometry-aware sonar noise** (Phase 30): grazing-incidence dropout (0.024 head-on →
+  0.151 at 75° on `realistic`), spatially and temporally correlated speckle/dropout fields
+  (ping-to-ping +0.426, spatial lag-1 +0.559, was ~0 iid), and a per-run speed-of-sound
+  range scale. Variance-preserving, so the `realistic` error *magnitude* is unchanged —
+  only its structure. **Not fitted to hardware**: no real Sonar 3D-15 range images exist
+  yet, so these are geometrically-motivated stress-test values, not a calibrated model.
+  Note when reading raw range statistics that the multipath outlier term (~0.077 m std)
+  swamps the speckle (~0.008 m) and must be rejected before the correlation terms are visible.
+- ✅ **Imaging-sonar geometry** (Phase 31): an organized-image stage ahead of the per-point
+  noise adds strongest-return ranging (beam-window arg-max: thin targets fade, edges bleed),
+  projection-aware lateral jitter (per-pixel pinhole beam width, not a uniform constant),
+  volume reverberation (correlated near-field backscatter, elevated on weak returns), and
+  geometric multipath (screen-space second bounce: phantoms in concave corners, none on flat
+  walls). Live-verified: `ideal` still byte-exact passthrough; `realistic` fades a floated
+  blob, fires multipath on ~0.4% of the image at the concave seam only, and injects ~250
+  reverb returns/ping. **The projection-aware jitter changes lateral error magnitude across
+  the image and breaks strict comparability with pre-Phase-31 benchmark runs** (centre kept
+  near the old value, so it is a redistribution). Multipath models in-frustum bounces only.
+  Still not fitted to hardware.
+- ✅ **Near-field gate** (Phase 32): `near_cutoff:=<m>` launch arg (over any profile) drops noised
+  returns nearer than the threshold — clears the reverberation spray around the vehicle. Off by
+  default; live-verified 429 → 0 near-field returns/ping at `near_cutoff:=1.6`, far geometry
+  untouched. Hides reverb rather than retuning it; lowering `reverb_p` is the alternative.
+  Exposed in the launcher TUI as **"Noise Attenuation"** (none / cut_close) under the SLAM section
+  (Phase 33); cut_close uses the advanced **"Cut distance (m)"** param (`near_cutoff_m`, default 1.6).
+- ✅ **Range-image view** (Phase 34): `range_image` node renders the noised cloud back to a 2D
+  depth-camera-style Image. `/cloud_in/range_image` (what SLAM gets) and `/cloud_in_raw/range_image`
+  (clean) publish from `pointcloud_only.launch.py`; RViz layouts show them as "SLAM input (noised
+  range)" and "Clean cloud (range)". Toggling Noise Attenuation changes the SLAM-input image live.
+  **(Phase 43)** All three RViz configs previously had two or three of these Image displays
+  enabled at once, tabbed together in the same dock slot — only the front tab renders, so which
+  view actually appeared on launch depended on the saved (opaque, hand-uneditable) `QMainWindow
+  State` blob, not on anything the launch args controlled. **(Phase 44)** The single `demo.rviz`
+  enables exactly one, `SLAM input (noised range)`; `DepthCamera` and `Clean cloud (range)` are
+  present but off. ⚠️ On this machine RViz ignores that at startup — every `Image` display comes
+  up disabled with no dock, because RViz ties an `Image` display's enabled state to its dock
+  widget's visibility and the dock is created while the main window is still hidden. Verified
+  against unmodified configs from before Phase 44, and with the `QMainWindow State` blob removed
+  entirely, so it is neither the merge nor the saved layout. Enable the image view with one click
+  in the Displays tree after launch.
+- ✅ **Eval HUD panel** (Phase 43, `tools/eval_hud_rviz`): RViz panel plugin (mirrors
+  `motion_safety_rviz`'s structure) subscribing to `/eval/markers` and showing the `eval_hud`
+  namespace's text (err/ATE/RPE/KF/LC/D-opt) in a panel docked at the bottom of the window — a
+  fixed on-screen readout instead of a marker that floats above the robot in world space and
+  moves with the camera. Outside `slam:=slam` it shows a placeholder line, since nothing
+  publishes `/eval/markers` there. **(Phase 44)** Phase 43 removed the `Time` panel and added the
+  panel to the `Panels:` list, but left the `QMainWindow State` blob still naming `Time` in the
+  bottom dock slot and never naming `Eval HUD` — Qt turns the unmatched name into a placeholder
+  and leaves the real panel wherever `addPane` put it, which is why the metrics never appeared.
+  The blob now carries `Eval HUD` in that slot (the name is a length-prefixed UTF-16BE string
+  inside the hex blob, so it is patchable without re-saving from the GUI). Confirmed live: the
+  panel docks along the bottom, full width, and shows its placeholder outside `slam:=slam`.
 - ✅ **Benchmarking switches** (Phase 16): `loop_closure:=false` keeps
   `/slam/loop_closure_count` at 0 (default still closes loops); `noise_seed:=7` reaches all
   four sensor nodes; a forced-threshold live run fired 4 map-rebuild cycles cleanly
@@ -219,10 +393,13 @@ python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/<batch_
   wasn't included under `mapper:=tsdf`) — the robot spun in place for the
   full run instead of exploring. The map-quality-degradation finding this
   produced is an artifact of that bug, not a rebuild-fidelity result, and is
-  invalidated (Phase 21). Fix landed:
-  `demo.launch.py` now also launches `octomap_server` as a planning-only map
-  source under `mode:=frontier mapper:=tsdf` (dual-map with TSDF as the map
-  product). The `tsdf`/`tsdf_rebuild` rows still need re-specifying and
+  invalidated (Phase 21). Fix landed: `tsdf_mapper` derives `/projected_map`
+  from its own grid (a Z band around the cruise depth,
+  `publish_projected_map:=true`), so the planning map and the belief map are
+  the same map. This superseded Phase 21's dual-map stopgap, which ran a
+  second `octomap_server` purely as a planning-map source — no
+  `octomap_server` runs under `mapper:=tsdf` any more.
+  The `tsdf`/`tsdf_rebuild` rows still need re-specifying and
   re-running on a moving robot before any rebuild-fidelity claim can be made.
   A 10+ minute single session is also now done (the 600 s baseline above).
   Still open: `evo_ape`/`evo_rpe` cross-check against the written TUM files.
@@ -233,11 +410,13 @@ python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/<batch_
   `KeyboardInterrupt` as benign rather than `crashed_soft`. This means the prior
   full-matrix batch's `crashed_soft` statuses were an artifact of teardown noise,
   not real failures — the fresh 600 s baseline confirms zero harmful tracebacks
-  under the same shutdown sequence. `run_matrix` statuses are now meaningful going
-  forward; old manifests are left as historical record, not retroactively fixed.
+  under the same shutdown sequence. `run_matrix` statuses are meaningful as
+  structural-validity labels only; they do not impose an accuracy threshold.
+  Old manifests are left as historical record, not retroactively fixed.
 - ⚠️ The synthetic square-loop test's "70% ATE reduction" (Progress.md Phase 6) is superseded
   by the real benchmark above — its dense, easily-overlapping synthetic point clouds make loop
-  closure fire far more readily than real depth-camera data does. Use the 0.58 m figure, not 70%.
+  closure fire far more readily than real depth-camera data does. Both it and the old
+  0.58 m keyframe-sampled figure are historical; rerun with Phase 36's continuous metrics.
 - ✅ **Uncertainty-triggered revisit planner** (Phase 20, `revisit:=true`): forced-trigger
   live test (`ros2 param set /revisit_planner dopt_trigger 0.002`) went through the full
   cycle — suspend, drive to target, loop closure fires, dopt drops, resume. Natural-trigger

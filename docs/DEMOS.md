@@ -69,7 +69,7 @@ the planner if no mapped wall can make the requested route progress. Drop
 `motion:=walllooking` from any later command to compare against direct motion.
 
 `wall_standoff:=1.5` is the desired wall distance in metres. The live node
-parameter is also adjustable during a run: `ros2 param set /wall_follower
+parameter is also adjustable during a run: `ros2 param set /wall_looking
 standoff_m 2.0`. When a nearby goal cannot be reached along the current wall,
 wall-follow performs an odometry-confirmed 180° sweep to inspect and select
 another wall; set its distance gate at launch with

@@ -8,7 +8,7 @@ instead. The executor does not select goals and reports BLOCKED through its
 status topic when it cannot follow the requested route along a mapped wall.
 
 This adds:
-  - wall_follower: planner path + TSDF surface normals + odometry → normalized
+  - wall_looking: planner path + TSDF surface normals + odometry → normalized
     body demand. Follows the planner path, using the nearest mapped wall as a
     soft travel and viewing preference while holding `standoff` metres off it.
 
@@ -151,8 +151,8 @@ def generate_launch_description():
         ),
         Node(
             package='frontier_slam',
-            executable='wall_follower',
-            name='wall_follower',
+            executable='wall_looking',
+            name='wall_looking',
             output='screen',
             parameters=[{
                 'standoff_m':     _float_parameter('standoff'),

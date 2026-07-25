@@ -28,4 +28,14 @@ sonar:                       # exact passthrough (as noise_ideal.yaml)
   lat_sigma_v_per_m: 0.0
   dropout_p0: 0.0
   dropout_p_range: 0.0
+  dropout_p_grazing: 0.0
+  corr_length_px: 0.0
+  corr_rho_time: 0.0
+  range_corr_frac: 0.0
+  sos_scale_error_pct: 0.0
   outlier_p: 0.0
+  argmax_window_px: 0.0
+  lat_sigma_beam_frac: 0.0
+  reverb_p: 0.0
+  multipath_p: 0.0
+  min_range_m: 0.0

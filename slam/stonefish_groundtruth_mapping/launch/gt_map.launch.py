@@ -1,7 +1,7 @@
 """
 Ground-truth reference map: a second, parallel mapping stack fed from the
 EXACT simulator pose (/StoneFish/Odometry), run alongside the SLAM-estimate
-map so the two can be visually compared (see bringup/rviz/demo_slam.rviz).
+map so the two can be visually compared (see bringup/rviz/demo.rviz).
 
 Only included when slam:=slam (see bringup/launch/demo.launch.py) — that's
 the only mode where the primary map (built from pose_graph.py's estimate)
