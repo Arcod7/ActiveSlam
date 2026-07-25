@@ -211,7 +211,7 @@ running the launcher.
 **RViz: `The plugin for class 'octomap_rviz_plugins/OccupancyGrid' failed to
 load`**
 
-`octomap_rviz_plugins` is not installed. `rviz/demo_slam.rviz` uses it, and
+`octomap_rviz_plugins` is not installed. `rviz/demo.rviz` uses it, and
 `bringup` declares it, so `rosdep install --from-paths src -i -y` — or
 `./bootstrap.sh` — pulls it in. A workspace set up before that declaration
 existed needs one of those re-run. RViz itself still opens; only the octomap

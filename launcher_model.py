@@ -127,9 +127,9 @@ PARAMS = [
           {"none": "Ground-truth TF straight from Stonefish.",
            "slam": "GTSAM iSAM2 pose graph + sonar/nav noise + ATE/RPE eval."}),
     Param("rviz", "RViz", "bool", True, "primary",
-          "Start RViz. The view is chosen automatically: demo_slam.rviz when "
-          "slam is on (drift arrow, error HUD, covariance ellipsoids), "
-          "demo_tsdf.rviz for the TSDF surface, otherwise the base view."),
+          "Start RViz on demo.rviz — one view for every mode (OctoMap and "
+          "TSDF, belief and ground truth, drift arrow, error HUD, covariance "
+          "ellipsoids). Displays with no publisher in this mode draw nothing."),
     Param("rqt", "rqt", "bool", False, "primary",
           "Start rqt alongside RViz for introspection — node graph, topic "
           "monitor, live plots and parameter reconfigure. Off by default: it "

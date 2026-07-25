@@ -69,13 +69,8 @@ def _odom_topic(v):
 
 
 def _rviz_config(v, bringup_share):
-    if v["slam"] == "slam":
-        name = "demo_slam.rviz"
-    elif v["mapper"] == "tsdf":
-        name = "demo_tsdf.rviz"
-    else:
-        name = "demo.rviz"
-    return os.path.join(bringup_share, "rviz", name)
+    """One view for every mode — mirrors demo.launch.py."""
+    return os.path.join(bringup_share, "rviz", "demo.rviz")
 
 
 class Group:
