@@ -134,6 +134,15 @@ PARAMS = [
           "Start rqt alongside RViz for introspection — node graph, topic "
           "monitor, live plots and parameter reconfigure. Off by default: it "
           "is a debugging tool, not part of the demo view."),
+    Param("keyboard", "Keyboard layout", "enum", "qwerty", "primary",
+          "Physical-key mapping for the drive cluster, so the same finger "
+          "positions drive on either layout. qwerty uses W/S/Q/E/A/D; azerty "
+          "uses the letters those physical keys produce (Z/S/A/E/Q/D), with W "
+          "kept as a second forward key. Affects only this launcher's teleop "
+          "and target-point driving, live — the stack is not restarted.",
+          ["qwerty", "azerty"],
+          {"qwerty": "W fwd, S back, Q/E strafe, A/D yaw.",
+           "azerty": "Z fwd, S back, A/E strafe, Q/D yaw (same finger positions)."}),
 
     Param("scene", "Scene", "enum", "waterlinked", "scene",
           "Stonefish world to launch. waterlinked is the unchanged baseline; "
@@ -213,15 +222,6 @@ PARAMS = [
           "executor is driving), independent of the speed factor. Also saturates "
           "at the safety gate's +-1.0 limit (roughly 6.7x). Live, no restart.",
           step=0.25, lo=0.1, hi=5.0),
-    Param("keyboard", "Keyboard layout", "enum", "qwerty", "robot",
-          "Physical-key mapping for the drive cluster, so the same finger "
-          "positions drive on either layout. qwerty uses W/S/Q/E/A/D; azerty "
-          "uses the letters those physical keys produce (Z/S/A/E/Q/D), with W "
-          "kept as a second forward key. Affects only this launcher's teleop "
-          "and target-point driving, live — the stack is not restarted.",
-          ["qwerty", "azerty"],
-          {"qwerty": "W fwd, S back, Q/E strafe, A/D yaw.",
-           "azerty": "Z fwd, S back, A/E strafe, Q/D yaw (same finger positions)."}),
     Param("robot_save_pose_on_exit", "Save robot pose on exit", "bool", False, "robot",
           "When enabled, preserve the robot's final live/teleop pose in config.yaml "
           "when leaving this control screen. When off, teleop motion is display-only "
