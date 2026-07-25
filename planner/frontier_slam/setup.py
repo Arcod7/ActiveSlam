@@ -36,6 +36,7 @@ setup(
             'ardusub_adapter    = frontier_slam.ardusub_adapter:main',
             'revisit_planner     = frontier_slam.revisit_planner:main',
             'drift_return_scenario = frontier_slam.drift_return_scenario:main',
+            'trajectory_mission = frontier_slam.trajectory_mission:main',
         ],
     },
 )

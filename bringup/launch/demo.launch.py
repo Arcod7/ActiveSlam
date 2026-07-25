@@ -14,6 +14,8 @@ Usage:
   ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic near_cutoff:=1.6  # + clear near-field spray
   ros2 launch bringup demo.launch.py slam:=slam mode:=frontier revisit:=true  # break off exploration to close loops
   ros2 launch bringup demo.launch.py slam:=slam mode:=frontier scenario:=drift_return  # scripted leave-and-return
+  ros2 launch bringup demo.launch.py slam:=slam mode:=frontier revisit:=true scenario:=trajectory \
+      mission_waypoints:="[0.0,0.0,8.0, 10.0,0.0,8.0, 10.0,10.0,8.0, 0.0,10.0,8.0]"  # follow a reference path, yielding to revisit
   ros2 launch bringup demo.launch.py scene:=target obj_mesh:=shipwreck.obj obj_x:=8 obj_yaw:=30
   ros2 launch bringup demo.launch.py rviz:=false              # headless (e.g. CI, remote box)
 
@@ -246,10 +248,11 @@ def generate_launch_description():
     scenario_arg = DeclareLaunchArgument(
         "scenario",
         default_value="none",
-        choices=["none", "drift_return"],
-        description="Scripted evaluation scenario (docs/plans/plan.md T1.1): drift_return "
-        "leaves the start position, then returns to it to watch loop closure "
-        "fire (mode:=frontier only)",
+        choices=["none", "drift_return", "trajectory"],
+        description="Scripted evaluation scenario: drift_return (docs/plans/plan.md T1.1) "
+        "leaves the start position, then returns to it to watch loop closure fire; "
+        "trajectory (docs/plans/tracks/track_1_trajectory_mission.md) follows a "
+        "waypoint list, yielding to revisit:=true when it triggers (mode:=frontier only)",
     )
     scenario_out_dx_arg = DeclareLaunchArgument(
         "scenario_out_dx",
@@ -260,6 +263,21 @@ def generate_launch_description():
         "scenario_out_dy",
         default_value="0.0",
         description="drift_return: outbound leg Y offset (m) from the captured start position",
+    )
+    mission_waypoints_arg = DeclareLaunchArgument(
+        "mission_waypoints",
+        default_value="[]",
+        description="trajectory: YAML-list string of flat x,y,z triples in world_ned metres, "
+        "e.g. '[0.0,0.0,8.0, 10.0,0.0,8.0, 10.0,10.0,8.0]' — every number needs a decimal "
+        "point (a bare '0' parses as int and fails the float-array coercion). A single "
+        "triple is the point case. Required — the node rejects an empty or malformed "
+        "list at startup.",
+    )
+    mission_loop_arg = DeclareLaunchArgument(
+        "mission_loop",
+        default_value="false",
+        choices=["true", "false"],
+        description="trajectory: repeat mission_waypoints instead of finishing after the last one",
     )
     scan_style_arg = DeclareLaunchArgument(
         "scan_style",
@@ -505,6 +523,8 @@ def generate_launch_description():
             "scenario": LaunchConfiguration("scenario"),
             "scenario_out_dx": LaunchConfiguration("scenario_out_dx"),
             "scenario_out_dy": LaunchConfiguration("scenario_out_dy"),
+            "mission_waypoints": LaunchConfiguration("mission_waypoints"),
+            "mission_loop": LaunchConfiguration("mission_loop"),
             "scan_style": LaunchConfiguration("scan_style"),
             "scan_sweep_deg": LaunchConfiguration("scan_sweep_deg"),
             "depth": LaunchConfiguration("depth"),
@@ -646,7 +666,7 @@ def generate_launch_description():
 
     scenario_needs_frontier_warning = LogInfo(
         msg=(
-            "scenario=drift_return requires mode:=frontier (it drives via "
+            "scenario requires mode:=frontier (it drives via "
             "frontier_extractor/waypoint_controller) — the scenario node will not be started."
         ),
         condition=IfCondition(
@@ -654,7 +674,7 @@ def generate_launch_description():
                 [
                     "'",
                     LaunchConfiguration("scenario"),
-                    "' == 'drift_return' and '",
+                    "' != 'none' and '",
                     LaunchConfiguration("mode"),
                     "' != 'frontier'",
                 ]
@@ -753,6 +773,8 @@ def generate_launch_description():
             scenario_arg,
             scenario_out_dx_arg,
             scenario_out_dy_arg,
+            mission_waypoints_arg,
+            mission_loop_arg,
             scan_style_arg,
             scan_sweep_deg_arg,
             scene_arg,
