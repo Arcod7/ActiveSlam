@@ -22,11 +22,11 @@ import math
 import numpy as np
 from scipy.ndimage import binary_dilation
 
-HARD_INFLATION_M = 0.20   # hard A* wall — must clear actual obstacles
-INFLATION_M      = 0.75   # soft zone — high cost, last-resort passage
-PLAN_INFLATION_M = 1.50   # planning margin — moderate cost, steers paths away
-SOFT_COST        = 8.0    # cost multiplier inside soft zone   (0.20 m … 0.75 m)
-PLAN_COST        = 3.0    # cost multiplier inside planning zone (0.75 m … 1.50 m)
+HARD_INFLATION_M = 1.00   # hard A* wall — must clear actual obstacles
+INFLATION_M      = 1.50   # soft zone — high cost, last-resort passage
+PLAN_INFLATION_M = 3.00   # planning margin — moderate cost, steers paths away
+SOFT_COST        = 8.0    # cost multiplier inside soft zone   (1.00 m … 1.50 m)
+PLAN_COST        = 3.0    # cost multiplier inside planning zone (1.50 m … 3.00 m)
 PAD_CELLS        = 5      # unknown-cell border added around the grid before planning
 
 

@@ -14,7 +14,8 @@ along the planned path while its camera looks slightly toward the wall.
 import math
 import os
 
-from frontier_slam.control_utils import wrap_angle, yaw_from_quat
+from frontier_slam.control_utils import (
+    depth_hold_effort, LowPassRate, wrap_angle, yaw_from_quat)
 from frontier_slam.session_log import open_session_log
 from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry, Path
@@ -176,6 +177,8 @@ class WallOrientedController(Node):
     KP_YAW = 0.07
     KP_SPEED = 0.25
     KP_HEAVE = 0.35
+    KD_HEAVE = 0.50          # damps the 6.1 s depth limit cycle P alone sustains
+    DEPTH_RATE_TAU = 0.20    # s, low-pass on the differentiated depth
 
     MAX_SPEED = 0.25
     GOAL_RADIUS = 2.0
@@ -203,7 +206,7 @@ class WallOrientedController(Node):
         self.declare_parameter('lookahead_m', 0.0)
         self.declare_parameter('map_points_topic', '/octomap_point_cloud_centers')
         self.declare_parameter('max_wall_distance_m', 8.0)
-        self.declare_parameter('wall_z_band_m', 1.5)
+        self.declare_parameter('wall_z_band_m', 3.0)
         self.declare_parameter('side_switch_margin_m', 0.3)
         self.declare_parameter('odom_topic', '/StoneFish/Odometry')
         self.declare_parameter('goal_topic', '/frontier_slam/goal')
@@ -228,6 +231,7 @@ class WallOrientedController(Node):
 
         self._goal: np.ndarray | None = None
         self._pose: np.ndarray | None = None
+        self._depth_rate = LowPassRate(self.DEPTH_RATE_TAU)
         self._yaw = 0.0
         self._path: list[tuple[float, float]] = []
         self._wp_idx = 0
@@ -309,6 +313,7 @@ class WallOrientedController(Node):
         p = msg.pose.pose.position
         self._pose = np.array([p.x, p.y, p.z])
         self._yaw = yaw_from_quat(msg.pose.pose.orientation)
+        self._depth_rate.update(float(p.z), self._t_ros())
         if self._init_scan_end is None:
             if self._depth_setpoint is None:
                 self._depth_setpoint = float(p.z)
@@ -322,7 +327,8 @@ class WallOrientedController(Node):
         if self._depth_setpoint is None:
             return 0.0
         error = self._pose[2] - self._depth_setpoint
-        return float(np.clip(-self.KP_HEAVE * error, -1.0, 1.0))
+        return depth_hold_effort(error, self._depth_rate.value,
+                                 self.KP_HEAVE, self.KD_HEAVE)
 
     def _select_wall_side(self, route_heading: float, now: float) -> None:
         if (self._map_points is None or self._map_received_at is None

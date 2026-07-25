@@ -51,7 +51,8 @@ from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import Image, PointCloud2, PointField
 from std_msgs.msg import String
 
-from frontier_slam.control_utils import wrap_angle, yaw_from_quat
+from frontier_slam.control_utils import (
+    depth_hold_effort, LowPassRate, wrap_angle, yaw_from_quat)
 from frontier_slam.session_log import open_session_log
 
 
@@ -75,6 +76,8 @@ class WallLooking(Node):
     KP_YAW      = 0.07   # same heading gain as waypoint_controller
     KP_STANDOFF = 0.50   # standoff-distance error → approach speed
     KP_HEAVE    = 0.40
+    KD_HEAVE    = 0.57       # damps the depth limit cycle P alone sustains
+    DEPTH_RATE_TAU = 0.20    # s, low-pass on the differentiated depth
 
     MAX_SURGE           = 0.20   # approach/retreat clamp
     MAX_SWAY            = 0.25   # tangential clamp
@@ -135,6 +138,7 @@ class WallLooking(Node):
         command_topic = str(self.get_parameter('command_topic').value)
 
         self._pose: np.ndarray | None = None
+        self._depth_rate = LowPassRate(self.DEPTH_RATE_TAU)
         self._yaw  = 0.0
         self._min_front_dist = float('inf')
         self._wall_pts: np.ndarray | None = None   # (N,3) world
@@ -196,6 +200,7 @@ class WallLooking(Node):
         p = msg.pose.pose.position
         self._pose = np.array([p.x, p.y, p.z])
         new_yaw = yaw_from_quat(msg.pose.pose.orientation)
+        self._depth_rate.update(float(p.z), self._t_ros())
         if self._search_last_yaw is not None:
             self._search_turned_rad += abs(wrap_angle(new_yaw - self._search_last_yaw))
         self._yaw = new_yaw
@@ -557,7 +562,8 @@ class WallLooking(Node):
         if self._depth_setpoint is None:
             return 0.0
         depth_err = self._pose[2] - self._depth_setpoint    # +ve = too deep
-        return float(np.clip(-self.KP_HEAVE * depth_err, -1.0, 1.0))
+        return depth_hold_effort(depth_err, self._depth_rate.value,
+                                 self.KP_HEAVE, self.KD_HEAVE)
 
     # Matches safety_gate.py's max_abs_command default (1.0): the gate rejects
     # (and latches INVALID_COMMAND on) any out-of-range component, so a

@@ -60,6 +60,42 @@ def attitude_hold_effort(roll: float, pitch: float,
     return roll_effort, pitch_effort
 
 
+class LowPassRate:
+    """Low-pass-filtered finite difference of a sampled channel."""
+
+    def __init__(self, tau_s: float) -> None:
+        self._tau = max(0.0, tau_s)
+        self._last: float | None = None
+        self._last_t: float | None = None
+        self.value = 0.0
+
+    def update(self, sample: float, t: float) -> float:
+        if self._last is not None and t > self._last_t:
+            dt = t - self._last_t
+            raw = (sample - self._last) / dt
+            alpha = dt / (self._tau + dt) if self._tau > 0.0 else 1.0
+            self.value += alpha * (raw - self.value)
+        self._last, self._last_t = float(sample), float(t)
+        return self.value
+
+    def reset(self) -> None:
+        self._last = self._last_t = None
+        self.value = 0.0
+
+
+def depth_hold_effort(depth_error: float, depth_rate: float,
+                      kp: float, kd: float, limit: float = 1.0) -> float:
+    """Bounded depth-hold effort with rate damping.
+
+    Proportional-only depth hold limit-cycles: the vehicle is effectively a
+    double integrator, the loop runs at 10 Hz, and once the thrusters have their
+    real authority there is no phase margin left. The rate term supplies it.
+    """
+    if kp < 0.0 or kd < 0.0 or not 0.0 < limit <= 1.0:
+        raise ValueError('depth gains must be non-negative and limit in (0, 1]')
+    return max(-limit, min(limit, -kp * depth_error - kd * depth_rate))
+
+
 def _normalise_group(values: list[float]) -> list[float]:
     peak = max(abs(value) for value in values)
     return [value / peak for value in values] if peak > 1.0 else values

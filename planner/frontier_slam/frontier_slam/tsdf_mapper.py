@@ -112,7 +112,7 @@ class TSDFMapper(Node):
         # Cruise depth (world_ned Z, +down) the projection band centres on.
         # -1.0 = auto: lock to the first base_link->world TF Z, then hold it.
         self.declare_parameter('target_depth_m', -1.0)
-        self.declare_parameter('projected_map_band_m', 1.0)
+        self.declare_parameter('projected_map_band_m', 3.0)
         self.declare_parameter('projected_map_margin_cells', 10)
         self.declare_parameter('base_link_frame', 'bluerov2/base_link')
         # Map rebuild consumer (pose_graph.py publisher side): off by default,

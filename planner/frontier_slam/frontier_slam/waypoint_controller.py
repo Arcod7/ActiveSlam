@@ -37,7 +37,8 @@ from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
-from frontier_slam.control_utils import wrap_angle, yaw_from_quat
+from frontier_slam.control_utils import (
+    depth_hold_effort, LowPassRate, wrap_angle, yaw_from_quat)
 from frontier_slam.scan_sweep import SweepScan, scan_yaw_command
 from frontier_slam.session_log import open_session_log
 
@@ -62,6 +63,8 @@ class WaypointController(Node):
     # scan matching more overlap between consecutive mapping keyframes.
     KP_SURGE = 0.25
     KP_HEAVE = 0.35
+    KD_HEAVE = 0.50          # damps the depth limit cycle P alone sustains
+    DEPTH_RATE_TAU = 0.20    # s, low-pass on the differentiated depth
 
     MAX_SURGE             = 0.25
     GOAL_RADIUS           = 2.0    # m
@@ -110,6 +113,7 @@ class WaypointController(Node):
 
         self._goal: np.ndarray | None = None
         self._pose: np.ndarray | None = None
+        self._depth_rate = LowPassRate(self.DEPTH_RATE_TAU)
         self._yaw  = 0.0
         self._min_front_dist      = float('inf')
         self._init_scan_end: float | None  = None   # set on first odom
@@ -176,6 +180,7 @@ class WaypointController(Node):
         p = msg.pose.pose.position
         self._pose = np.array([p.x, p.y, p.z])
         self._yaw  = yaw_from_quat(msg.pose.pose.orientation)
+        self._depth_rate.update(float(p.z), self._t_ros())
         if self._init_scan_end is None:   # first odom
             if self._depth_setpoint is None:
                 self._depth_setpoint = float(p.z)
@@ -212,7 +217,8 @@ class WaypointController(Node):
         if target_z is None:
             return 0.0
         depth_err = self._pose[2] - target_z    # +ve = too deep
-        return float(np.clip(-self.KP_HEAVE * depth_err, -1.0, 1.0))
+        return depth_hold_effort(depth_err, self._depth_rate.value,
+                                 self.KP_HEAVE, self.KD_HEAVE)
 
     def _xy_drive(self, target_xy: np.ndarray) -> tuple:
         """Return (surge_cmd, yaw_cmd, dist, heading_err)."""

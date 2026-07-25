@@ -189,17 +189,17 @@ def generate_launch_description():
     )
     hard_inflation_arg = DeclareLaunchArgument(
         "hard_inflation_m",
-        default_value="0.20",
+        default_value="1.00",
         description="A* hard-wall radius around occupied cells (cost = inf)",
     )
     inflation_arg = DeclareLaunchArgument(
         "inflation_m",
-        default_value="0.75",
+        default_value="1.50",
         description="A* soft-zone radius around occupied cells (high cost, last-resort passage)",
     )
     plan_inflation_arg = DeclareLaunchArgument(
         "plan_inflation_m",
-        default_value="1.50",
+        default_value="3.00",
         description="A* planning-margin radius around occupied cells (moderate cost, steers paths away)",
     )
     tsdf_octomap_arg = DeclareLaunchArgument(

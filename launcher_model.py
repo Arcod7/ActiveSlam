@@ -277,19 +277,19 @@ PARAMS = [
           {"none": "Free exploration.",
            "drift_return": "Scripted outbound leg then return to start."},
           visible=_frontier),
-    Param("hard_inflation_m", "Hard wall zone (m)", "float", 0.20, "frontier",
+    Param("hard_inflation_m", "Hard wall zone (m)", "float", 1.00, "frontier",
           "A* hard-wall radius around occupied cells: completely blocked "
           "(cost = inf). Small enough that paths can still pass through "
           "narrow corridors.",
           advanced=True, step=0.05, lo=0.0,
           visible=_frontier),
-    Param("inflation_m", "Soft zone (m)", "float", 0.75, "frontier",
+    Param("inflation_m", "Soft zone (m)", "float", 1.50, "frontier",
           "A* soft-zone radius around occupied cells: high but finite cost, "
           "so A* routes around when a free path exists but can pass through "
           "if forced.",
           advanced=True, step=0.05, lo=0.0,
           visible=_frontier),
-    Param("plan_inflation_m", "Planning margin zone (m)", "float", 1.50, "frontier",
+    Param("plan_inflation_m", "Planning margin zone (m)", "float", 3.00, "frontier",
           "A* planning-margin radius around occupied cells: moderate cost "
           "to steer paths away from walls while keeping them usable.",
           advanced=True, step=0.05, lo=0.0,
