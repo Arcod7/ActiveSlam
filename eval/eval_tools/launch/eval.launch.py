@@ -54,10 +54,15 @@ def _launch_eval_nodes(context, *args, **kwargs):
     )
 
     # The gt map mirrors the belief backend (gt_map.launch.py), so a gt octomap
-    # to snapshot exists only when mapper:=octomap; under tsdf the belief
-    # octomap still runs as the frontier planning map and is worth keeping.
+    # to snapshot exists only when mapper:=octomap. Under tsdf the belief map
+    # no longer runs any octomap_server (the frontier planning map is now
+    # derived from the TSDF grid), so blank the belief octomap service too —
+    # otherwise map_saver blocks up to 30 s per save shelling out to
+    # octomap_saver_node against a dead /octomap_binary.
     mapper = LaunchConfiguration('mapper').perform(context)
-    gt_octomap_service = '/gt/octomap_binary' if mapper == 'octomap' else ''
+    is_octomap = mapper == 'octomap'
+    gt_octomap_service = '/gt/octomap_binary' if is_octomap else ''
+    belief_octomap_service = '/octomap_binary' if is_octomap else ''
     map_saver_node = Node(
         package='eval_tools',
         executable='map_saver',
@@ -67,6 +72,7 @@ def _launch_eval_nodes(context, *args, **kwargs):
             'output_dir': output_dir,
             'mapper': LaunchConfiguration('mapper'),
             'gt_octomap_service': gt_octomap_service,
+            'belief_octomap_service': belief_octomap_service,
         }],
     )
 

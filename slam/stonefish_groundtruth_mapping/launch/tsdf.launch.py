@@ -42,6 +42,16 @@ def generate_launch_description():
         description='Free the voxels along no-return sonar rays',
     )
 
+    publish_projected_map_arg = DeclareLaunchArgument(
+        'publish_projected_map', default_value='false',
+        description='Publish a 2-D /projected_map derived from this TSDF grid '
+        'for the frontier planner + A*',
+    )
+    target_depth_m_arg = DeclareLaunchArgument(
+        'target_depth_m', default_value='-1.0',
+        description='Cruise depth (world_ned Z) the /projected_map band centres on',
+    )
+
     pointcloud = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(_LAUNCH_DIR, 'pointcloud.launch.py'))
     )
@@ -52,8 +62,11 @@ def generate_launch_description():
             'mapper': 'tsdf',
             'map_rebuild': LaunchConfiguration('map_rebuild'),
             'carve_no_return': LaunchConfiguration('carve_no_return'),
+            'publish_projected_map': LaunchConfiguration('publish_projected_map'),
+            'target_depth_m': LaunchConfiguration('target_depth_m'),
         }.items(),
     )
 
     return LaunchDescription([map_rebuild_arg, carve_no_return_arg,
+                              publish_projected_map_arg, target_depth_m_arg,
                               pointcloud, tsdf_mapper])

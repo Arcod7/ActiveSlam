@@ -38,6 +38,13 @@ Published topics:
                                           vivid = deep solid
   /tsdf/occupied_voxels  (sensor_msgs/PointCloud2) confidently solid TSDF
                            voxel centres for collision-aware goal validation
+  /projected_map         (nav_msgs/OccupancyGrid) 2-D planning map for the
+                           frontier planner + A*, published only when
+                           publish_projected_map:=true (mode:=frontier). A thin
+                           Z-band around target_depth_m is projected straight
+                           from this TSDF grid so the planning map and the
+                           belief map can never disagree — replacing the
+                           separate octomap_server that used to build it.
 """
 
 from collections import deque, OrderedDict
@@ -50,7 +57,9 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point, PoseStamped
-from nav_msgs.msg import Path
+from nav_msgs.msg import OccupancyGrid, Path
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
+from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import ColorRGBA, Header, Int32
 from visualization_msgs.msg import Marker, MarkerArray
@@ -88,6 +97,17 @@ class TSDFMapper(Node):
         # surface — carve_range_m keeps it outside the mapped envelope.
         self.declare_parameter('carve_no_return', False)
         self.declare_parameter('carve_range_m', 16.0)
+        # 2-D planning map derived from this TSDF grid, published on
+        # /projected_map for the frontier planner + A* (see module docstring).
+        # Off by default so only the belief instance under mode:=frontier
+        # opts in; never enabled on tsdf_mapper_gt.
+        self.declare_parameter('publish_projected_map', False)
+        # Cruise depth (world_ned Z, +down) the projection band centres on.
+        # -1.0 = auto: lock to the first base_link->world TF Z, then hold it.
+        self.declare_parameter('target_depth_m', -1.0)
+        self.declare_parameter('projected_map_band_m', 1.0)
+        self.declare_parameter('projected_map_margin_cells', 10)
+        self.declare_parameter('base_link_frame', 'bluerov2/base_link')
         # Map rebuild consumer (pose_graph.py publisher side): off by default,
         # and never set true on the ground-truth instance (tsdf_mapper_gt) --
         # only the belief map should ever be reset+re-integrated.
@@ -117,6 +137,17 @@ class TSDFMapper(Node):
         self._max_range    = float(self.get_parameter('max_range_m').value)
         self._carve_no_return = bool(self.get_parameter('carve_no_return').value)
         self._carve_range  = float(self.get_parameter('carve_range_m').value)
+        self._projected_map_enabled = bool(
+            self.get_parameter('publish_projected_map').value)
+        self._target_depth = float(self.get_parameter('target_depth_m').value)
+        self._projected_map_band = abs(float(
+            self.get_parameter('projected_map_band_m').value))
+        self._projected_map_margin = max(0, int(
+            self.get_parameter('projected_map_margin_cells').value))
+        self._base_link_frame = str(self.get_parameter('base_link_frame').value)
+        # Locked band centre: seeded from target_depth_m, or filled on the
+        # first TF lookup when target_depth_m < 0. None = not yet resolved.
+        self._projected_map_z = self._target_depth if self._target_depth >= 0.0 else None
         voxel_size         = float(self.get_parameter('voxel_size').value)
         trunc              = float(self.get_parameter('trunc_distance').value)
         space_carving      = bool(self.get_parameter('space_carving').value)
@@ -189,6 +220,27 @@ class TSDFMapper(Node):
         self._voxels_pub  = self.create_publisher(MarkerArray, '/tsdf/voxels',           1)
         self._solid_cloud_pub = self.create_publisher(
             PointCloud2, '/tsdf/occupied_voxels', 1)
+
+        # 2-D planning map on /projected_map. Needs the pyopenvdb grid path for
+        # free-space (d>0) voxels — the surface-vertex fallback has none, so a
+        # surface-derived projection would be all-unknown-free and useless.
+        self._projected_map_pub = None
+        if self._projected_map_enabled:
+            if self._volume.pyopenvdb_support_enabled:
+                latched_qos = QoSProfile(
+                    depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    history=HistoryPolicy.KEEP_LAST)
+                self._projected_map_pub = self.create_publisher(
+                    OccupancyGrid, '/projected_map', latched_qos)
+                self.get_logger().info(
+                    'Publishing TSDF-derived /projected_map '
+                    f'(band {self._projected_map_band:.1f}m around '
+                    f'target_depth={self._target_depth:.1f}m)')
+            else:
+                self.get_logger().error(
+                    'publish_projected_map requested but VDBFusion lacks pyopenvdb '
+                    '— /projected_map disabled; use mapper:=octomap for the planning map')
 
         # Latest marching-cubes vertices, so the voxel view can be derived from
         # them when pyopenvdb (the grid path) is unavailable.
@@ -456,12 +508,32 @@ class TSDFMapper(Node):
             self._publish_voxels_from_surface()
             return
 
-        # Only iterate voxels we'll actually show (early filtering inside):
-        # confidently solid (TSDF-derived) AND observed often enough (weight).
-        max_d = self._voxel_max_d if not self._show_free else None
-        pts, d_vals, w_vals = _extract_voxels(
-            self._volume.tsdf, self._volume.weights,
-            self._voxel_size, min_weight=self._voxel_min_weight, max_d=max_d)
+        if self._projected_map_pub is not None:
+            # One walk feeds both the solid viz and the 2-D planning map: keep
+            # every voxel at/above the low map weight (min_weight) so free
+            # (d>0) cells survive for the projection, then re-filter to solids
+            # here for the CUBE_LIST + /tsdf/occupied_voxels.
+            coords, all_d, all_w = _extract_voxel_arrays(
+                self._volume.tsdf, self._volume.weights, self._min_weight)
+            self._publish_projected_map(coords, all_d, all_w)
+            if coords is None:
+                pts = d_vals = w_vals = None
+            else:
+                solid = (all_w >= self._voxel_min_weight) & (all_d <= self._voxel_max_d)
+                if np.any(solid):
+                    pts = (coords[solid].astype(np.float32) * self._voxel_size
+                           + self._voxel_size / 2.0)
+                    d_vals = all_d[solid]
+                    w_vals = all_w[solid]
+                else:
+                    pts = d_vals = w_vals = None
+        else:
+            # Only iterate voxels we'll actually show (early filtering inside):
+            # confidently solid (TSDF-derived) AND observed often enough (weight).
+            max_d = self._voxel_max_d if not self._show_free else None
+            pts, d_vals, w_vals = _extract_voxels(
+                self._volume.tsdf, self._volume.weights,
+                self._voxel_size, min_weight=self._voxel_min_weight, max_d=max_d)
 
         now = self.get_clock().now().to_msg()
         header = Header(stamp=now, frame_id=self._world_frame)
@@ -522,6 +594,40 @@ class TSDFMapper(Node):
 
         self._voxels_pub.publish(MarkerArray(markers=[m]))
         self.get_logger().info(f'Voxels: {len(pts)} published', throttle_duration_sec=5.0)
+
+    # ────────────────────────────────────────────────────────────────────
+    # 2-D planning map (/projected_map) derived from the TSDF grid
+    # ────────────────────────────────────────────────────────────────────
+
+    def _band_center_z(self) -> 'float | None':
+        """Target depth (world_ned Z) the projection band centres on, or None if
+        auto-lock is requested but no base_link TF is available yet."""
+        if self._projected_map_z is not None:
+            return self._projected_map_z
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                self._world_frame, self._base_link_frame, Time())
+        except tf2_ros.TransformException:
+            return None
+        self._projected_map_z = float(tf.transform.translation.z)
+        self.get_logger().info(
+            f'projected_map band centre locked to z={self._projected_map_z:.2f}m')
+        return self._projected_map_z
+
+    def _publish_projected_map(self, coords, d_vals, w_vals) -> None:
+        if self._projected_map_pub is None or coords is None:
+            return
+        z = self._band_center_z()
+        if z is None:
+            return
+        grid = _build_projected_map(
+            coords, d_vals, w_vals, self._voxel_size,
+            z_lo=z - self._projected_map_band, z_hi=z + self._projected_map_band,
+            occ_max_d=self._voxel_max_d, occ_min_weight=self._voxel_min_weight,
+            margin=self._projected_map_margin,
+            frame=self._world_frame, stamp=self.get_clock().now().to_msg())
+        if grid is not None:
+            self._projected_map_pub.publish(grid)
 
     def _publish_voxels_from_surface(self) -> None:
         """Occupancy-voxel view built from the marching-cubes surface, for
@@ -774,6 +880,101 @@ def _extract_voxels(tsdf_grid, weights_grid, voxel_size: float,
     return (np.array(pts_list, dtype=np.float32),
             np.array(d_list,   dtype=np.float32),
             np.array(w_list,   dtype=np.float32))
+
+
+def _extract_voxel_arrays(tsdf_grid, weights_grid, min_weight: float
+                          ) -> 'tuple[np.ndarray|None, np.ndarray|None, np.ndarray|None]':
+    """One iterOnValues() pass over active leaf voxels with weight >= min_weight.
+
+    Returns (coords, d_vals, w_vals) where coords is (N,3) int64 **signed VDB
+    index** coordinates (item.min), not world metres — the caller derives both
+    world centres (coord*voxel_size + half, VDBFusion uses a translation-free
+    linear transform) and integer grid cells from them without float rounding.
+    Returns (None, None, None) when no voxel qualifies.
+    """
+    w_acc = weights_grid.getAccessor()
+    coords_list: list = []
+    d_list:      list = []
+    w_list:      list = []
+
+    for item in tsdf_grid.iterOnValues():
+        if item.count != 1:          # skip interior tiles (count > 1)
+            continue
+        coord = item.min
+        w = w_acc.getValue(coord)
+        if w < min_weight:
+            continue
+        coords_list.append((coord[0], coord[1], coord[2]))
+        d_list.append(item.value)
+        w_list.append(w)
+
+    if not coords_list:
+        return None, None, None
+
+    return (np.array(coords_list, dtype=np.int64),
+            np.array(d_list,      dtype=np.float32),
+            np.array(w_list,      dtype=np.float32))
+
+
+def _build_projected_map(coords: np.ndarray, d_vals: np.ndarray, w_vals: np.ndarray,
+                         voxel_size: float, z_lo: float, z_hi: float,
+                         occ_max_d: float, occ_min_weight: float,
+                         margin: int, frame: str, stamp
+                         ) -> 'OccupancyGrid | None':
+    """Project banded TSDF voxels to a 2-D nav_msgs/OccupancyGrid.
+
+    coords are signed VDB indices (see _extract_voxel_arrays). Only voxels whose
+    world Z (coord_z*voxel_size + half) falls in [z_lo, z_hi] project. Column
+    classification (occupied wins):
+      occupied  weight >= occ_min_weight AND d <= occ_max_d  (== /tsdf/occupied_voxels)
+      free      d > 0                                        (weight already >= map min)
+    The grid matches the OctoMap projection convention find_frontier_clusters /
+    build_cost_grid expect: int8 data, row-major row=y/col=x, -1 unknown / 0 free
+    / 100 occupied, origin at the corner of cell (0,0), identity orientation.
+    Returns None when nothing lies in the band.
+    """
+    half = voxel_size / 2.0
+    world_z = coords[:, 2].astype(np.float64) * voxel_size + half
+    in_band = (world_z >= z_lo) & (world_z <= z_hi)
+    if not np.any(in_band):
+        return None
+
+    cxy = coords[in_band, :2]
+    d = d_vals[in_band]
+    w = w_vals[in_band]
+    occ = (w >= occ_min_weight) & (d <= occ_max_d)
+    free = d > 0.0
+
+    occ_cells = np.unique(cxy[occ], axis=0) if np.any(occ) else np.empty((0, 2), np.int64)
+    free_cells = np.unique(cxy[free], axis=0) if np.any(free) else np.empty((0, 2), np.int64)
+    if len(occ_cells) == 0 and len(free_cells) == 0:
+        return None
+
+    known = np.vstack([occ_cells, free_cells])
+    ix_min, iy_min = int(known[:, 0].min()), int(known[:, 1].min())
+    ix_max, iy_max = int(known[:, 0].max()), int(known[:, 1].max())
+    width = (ix_max - ix_min + 1) + 2 * margin
+    height = (iy_max - iy_min + 1) + 2 * margin
+
+    grid = np.full((height, width), -1, dtype=np.int8)
+    # Free first so occupied wins any column holding both.
+    if len(free_cells):
+        grid[free_cells[:, 1] - iy_min + margin, free_cells[:, 0] - ix_min + margin] = 0
+    if len(occ_cells):
+        grid[occ_cells[:, 1] - iy_min + margin, occ_cells[:, 0] - ix_min + margin] = 100
+
+    msg = OccupancyGrid()
+    msg.header.stamp = stamp
+    msg.header.frame_id = frame
+    msg.info.resolution = float(voxel_size)
+    msg.info.width = int(width)
+    msg.info.height = int(height)
+    msg.info.origin.position.x = float((ix_min - margin) * voxel_size)
+    msg.info.origin.position.y = float((iy_min - margin) * voxel_size)
+    msg.info.origin.position.z = 0.0
+    msg.info.origin.orientation.w = 1.0
+    msg.data = grid.reshape(-1).tolist()
+    return msg
 
 
 def _compute_normals_vdb(tsdf_grid, world_points: np.ndarray,

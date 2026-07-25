@@ -397,53 +397,42 @@ def generate_launch_description():
         condition=LaunchConfigurationEquals("mapper", "octomap"),
     )
 
+    # Under mode:=frontier the TSDF mapper derives /projected_map itself (a thin
+    # depth band projected straight from its own grid), so the frontier planner
+    # and A* share the belief map instead of a second, independent
+    # octomap_server. target_depth_m centres the projection band on the cruise
+    # depth (see tsdf_mapper.py / demo depth arg).
     tsdf_stack = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(stonefish_gt_mapping_share, "launch", "tsdf.launch.py")
         ),
+        launch_arguments={
+            "publish_projected_map": PythonExpression(
+                ["'true' if '", LaunchConfiguration("mode"),
+                 "' == 'frontier' else 'false'"]
+            ),
+            "target_depth_m": LaunchConfiguration("depth"),
+        }.items(),
         condition=LaunchConfigurationEquals("mapper", "tsdf"),
     )
 
-    # Bare node, not octomap.launch.py's include: that would double-launch
-    # stonefish_simulator/tf/pointcloud, which tsdf_stack already provides.
-    dual_map_condition = IfCondition(
-        PythonExpression(
-            [
-                "'",
-                LaunchConfiguration("mode"),
-                "' == 'frontier' and '",
-                LaunchConfiguration("mapper"),
-                "' == 'tsdf'",
-            ]
-        )
-    )
-
-    octomap_planning_map = Node(
-        package="octomap_server",
-        executable="octomap_server_node",
-        name="octomap_server",
-        output="screen",
-        parameters=[
-            {
-                "frame_id": "world_ned",
-                "resolution": 0.2,
-                "sensor_model/max_range": 15.0,
-                "latch": True,
-            }
-        ],
-        remappings=[
-            ("cloud_in", "/cloud_in"),
-        ],
-        condition=dual_map_condition,
-    )
-
-    dual_map_hint = LogInfo(
+    tsdf_planning_map_hint = LogInfo(
         msg=(
-            "mode=frontier mapper=tsdf: octomap_server is also running as the "
-            "frontier-detection planning map (/projected_map); tsdf_mapper remains "
-            "the map product."
+            "mode=frontier mapper=tsdf: tsdf_mapper derives /projected_map from "
+            "its own grid (banded around the target depth) — no separate "
+            "octomap_server planning map."
         ),
-        condition=dual_map_condition,
+        condition=IfCondition(
+            PythonExpression(
+                [
+                    "'",
+                    LaunchConfiguration("mode"),
+                    "' == 'frontier' and '",
+                    LaunchConfiguration("mapper"),
+                    "' == 'tsdf'",
+                ]
+            )
+        ),
     )
 
     # Second, parallel map built from the exact simulator pose (not the SLAM
@@ -806,8 +795,7 @@ def generate_launch_description():
             scenario_needs_frontier_warning,
             octomap_stack,
             tsdf_stack,
-            octomap_planning_map,
-            dual_map_hint,
+            tsdf_planning_map_hint,
             gt_map_stack,
             slam_stack,
             eval_stack,
