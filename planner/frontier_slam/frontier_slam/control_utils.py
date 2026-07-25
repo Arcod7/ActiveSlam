@@ -61,11 +61,22 @@ def attitude_hold_effort(roll: float, pitch: float,
 
 
 class LowPassRate:
-    """Low-pass-filtered finite difference of a sampled channel."""
+    """Low-pass-filtered finite difference of a sampled channel.
 
-    def __init__(self, tau_s: float, wrap: bool = False) -> None:
+    The channel is a pose estimate, not a measurement of motion, so two things
+    that are not rate reach this filter: a pose-graph correction, which is a
+    step, and a stalled publisher, across which alpha = dt/(tau+dt) tends to 1
+    and passes whatever arrives straight through. max_rate rejects the first,
+    max_gap_s the second.
+    """
+
+    def __init__(self, tau_s: float, wrap: bool = False,
+                 max_rate: float | None = None,
+                 max_gap_s: float = 0.0) -> None:
         self._tau = max(0.0, tau_s)
         self._wrap = wrap      # for angles: a raw difference jumps 2pi at +/-pi
+        self._max_rate = max_rate
+        self._max_gap = max(0.0, max_gap_s)
         self._last: float | None = None
         self._last_t: float | None = None
         self.value = 0.0
@@ -73,10 +84,16 @@ class LowPassRate:
     def update(self, sample: float, t: float) -> float:
         if self._last is not None and t > self._last_t:
             dt = t - self._last_t
-            delta = sample - self._last
-            raw = (wrap_angle(delta) if self._wrap else delta) / dt
-            alpha = dt / (self._tau + dt) if self._tau > 0.0 else 1.0
-            self.value += alpha * (raw - self.value)
+            if self._max_gap and dt > self._max_gap:
+                self.value = 0.0   # the gap moved the sample, not the vehicle
+            else:
+                delta = sample - self._last
+                raw = (wrap_angle(delta) if self._wrap else delta) / dt
+                # Past what the hull can do is a correction; re-baseline on it
+                # rather than filtering it, so one step cannot swamp the loop.
+                if self._max_rate is None or abs(raw) <= self._max_rate:
+                    alpha = dt / (self._tau + dt) if self._tau > 0.0 else 1.0
+                    self.value += alpha * (raw - self.value)
         self._last, self._last_t = float(sample), float(t)
         return self.value
 

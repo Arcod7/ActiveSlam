@@ -194,6 +194,15 @@ class WallOrientedController(Node):
     KD_HEAVE = 0.50          # damps the 6.1 s depth limit cycle P alone sustains
     DEPTH_RATE_TAU = 0.20    # s, low-pass on the differentiated depth
 
+    # Both rates are differentiated from a pose estimate that steps on graph
+    # corrections and stalls while the optimiser runs. Beyond these bounds the
+    # sample is one of those, not motion: measured true motion peaks at 1.26
+    # rad/s and 0.17 m/s.
+    YAW_RATE_MAX = 1.5       # rad/s (~86 deg/s)
+    DEPTH_RATE_MAX = 0.6     # m/s
+    ODOM_GAP_S = 0.5         # a longer gap carries no usable rate
+    ODOM_STALE_S = 1.0       # past this the pose is too old to steer on
+
     MAX_SPEED = 0.25
     GOAL_RADIUS = 2.0
     GOAL_REACHED_TIMEOUT = 10.0
@@ -245,9 +254,14 @@ class WallOrientedController(Node):
 
         self._goal: np.ndarray | None = None
         self._pose: np.ndarray | None = None
-        self._depth_rate = LowPassRate(self.DEPTH_RATE_TAU)
-        self._yaw_rate = LowPassRate(self.YAW_RATE_TAU, wrap=True)
+        self._depth_rate = LowPassRate(
+            self.DEPTH_RATE_TAU, max_rate=self.DEPTH_RATE_MAX,
+            max_gap_s=self.ODOM_GAP_S)
+        self._yaw_rate = LowPassRate(
+            self.YAW_RATE_TAU, wrap=True, max_rate=self.YAW_RATE_MAX,
+            max_gap_s=self.ODOM_GAP_S)
         self._yaw = 0.0
+        self._odom_at: float | None = None
         self._path: list[tuple[float, float]] = []
         self._wp_idx = 0
         self._map_points: np.ndarray | None = None
@@ -328,8 +342,9 @@ class WallOrientedController(Node):
         p = msg.pose.pose.position
         self._pose = np.array([p.x, p.y, p.z])
         self._yaw = yaw_from_quat(msg.pose.pose.orientation)
-        self._depth_rate.update(float(p.z), self._t_ros())
-        self._yaw_rate.update(self._yaw, self._t_ros())
+        self._odom_at = self._t_ros()
+        self._depth_rate.update(float(p.z), self._odom_at)
+        self._yaw_rate.update(self._yaw, self._odom_at)
         if self._init_scan_end is None:
             if self._depth_setpoint is None:
                 self._depth_setpoint = float(p.z)
@@ -406,6 +421,20 @@ class WallOrientedController(Node):
             return
 
         now = self._t_ros()
+        if self._odom_at is not None and now - self._odom_at > self.ODOM_STALE_S:
+            # Steering on a pose seconds old is what makes the vehicle lurch.
+            # The stuck reference has to clear too: a pose that is not being
+            # updated is not evidence that the vehicle failed to move.
+            self._send_thrust(0.0, 0.0, 0.0, 0.0)
+            self._stuck_ref_pos = None
+            self._stuck_ref_t = None
+            self.get_logger().warn(
+                f'odometry {now - self._odom_at:.1f}s stale — holding',
+                throttle_duration_sec=5.0)
+            if write_csv:
+                self._write_csv(0.0, 0.0, 0.0, 0.0, 'ODOM_STALE')
+            return
+
         heave = self._heave_cmd()
         if self._init_scan_end is not None and now < self._init_scan_end:
             self._send_thrust(0.0, 0.0, self._yaw_for_rate(self.SCAN_YAW_RATE), heave)

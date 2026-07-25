@@ -59,6 +59,50 @@ def test_reset_clears_history():
     assert r.value == 0.0 and r.update(9.0, 2.0) == 0.0
 
 
+# --- rate feedback off a pose estimate -----------------------------------
+# The sampled channel is /slam/odometry, which steps when the graph is
+# optimised and stalls while the optimiser runs. Neither is vehicle motion.
+
+def test_a_publisher_stall_reports_no_rate():
+    """alpha = dt/(tau+dt) tends to 1 as the gap grows, so an unguarded filter
+    passes the whole accumulated quotient exactly when it is least trustworthy."""
+    r = LowPassRate(0.15, max_gap_s=0.5)
+    r.update(0.0, 0.0)
+    assert r.update(3.0, 2.0) == 0.0
+
+
+def test_a_graph_correction_is_not_read_as_rotation():
+    """The measured fault: a fed-back 9.44 rad/s where the hull never exceeded
+    1.26 held yaw_cmd at its limit and flipped its sign."""
+    r = LowPassRate(0.15, wrap=True, max_rate=1.5)
+    for i in range(40):
+        r.update(0.5 * i * 0.1, i * 0.1)     # steady 0.5 rad/s
+    settled = r.value
+    r.update(0.5 * 40 * 0.1 + 0.94, 4.0)     # 0.94 rad step in one 0.1 s tick
+    assert r.value == pytest.approx(settled)
+
+
+def test_the_sample_after_a_correction_measures_from_the_new_pose():
+    """Rejecting the step must not also reject the motion that follows it."""
+    r = LowPassRate(0.0, max_rate=1.5)
+    r.update(0.0, 0.0)
+    r.update(9.0, 1.0)              # rejected: 9 m/s
+    assert r.update(9.5, 2.0) == pytest.approx(0.5)
+
+
+def test_motion_inside_the_bound_still_passes():
+    r = LowPassRate(0.0, max_rate=1.5)
+    r.update(0.0, 0.0)
+    assert r.update(1.2, 1.0) == pytest.approx(1.2)
+
+
+def test_guards_are_off_by_default():
+    """Existing callers must be unaffected."""
+    r = LowPassRate(0.0)
+    r.update(0.0, 0.0)
+    assert r.update(50.0, 1.0) == pytest.approx(50.0)
+
+
 # --- yaw authority -------------------------------------------------------
 
 from frontier_slam.control_utils import (

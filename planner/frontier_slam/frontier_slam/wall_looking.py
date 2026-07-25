@@ -78,6 +78,11 @@ class WallLooking(Node):
     KP_HEAVE    = 0.40
     KD_HEAVE    = 0.57       # damps the depth limit cycle P alone sustains
     DEPTH_RATE_TAU = 0.20    # s, low-pass on the differentiated depth
+    # Depth is differentiated from a pose estimate that steps on graph
+    # corrections and stalls while the optimiser runs; neither is motion.
+    DEPTH_RATE_MAX = 0.6     # m/s — past this the sample is a correction
+    ODOM_GAP_S     = 0.5     # s — a longer gap carries no usable rate
+    ODOM_STALE_S   = 1.0     # s — past this the pose is too old to steer on
 
     MAX_SURGE           = 0.20   # approach/retreat clamp
     MAX_SWAY            = 0.25   # tangential clamp
@@ -138,8 +143,11 @@ class WallLooking(Node):
         command_topic = str(self.get_parameter('command_topic').value)
 
         self._pose: np.ndarray | None = None
-        self._depth_rate = LowPassRate(self.DEPTH_RATE_TAU)
+        self._depth_rate = LowPassRate(
+            self.DEPTH_RATE_TAU, max_rate=self.DEPTH_RATE_MAX,
+            max_gap_s=self.ODOM_GAP_S)
         self._yaw  = 0.0
+        self._odom_at: float | None = None
         self._min_front_dist = float('inf')
         self._wall_pts: np.ndarray | None = None   # (N,3) world
         self._wall_nrm: np.ndarray | None = None   # (N,3) unit
@@ -200,7 +208,8 @@ class WallLooking(Node):
         p = msg.pose.pose.position
         self._pose = np.array([p.x, p.y, p.z])
         new_yaw = yaw_from_quat(msg.pose.pose.orientation)
-        self._depth_rate.update(float(p.z), self._t_ros())
+        self._odom_at = self._t_ros()
+        self._depth_rate.update(float(p.z), self._odom_at)
         if self._search_last_yaw is not None:
             self._search_turned_rad += abs(wrap_angle(new_yaw - self._search_last_yaw))
         self._yaw = new_yaw
@@ -383,9 +392,19 @@ class WallLooking(Node):
         if self._pose is None:
             return
 
+        now = self._t_ros()
+        if self._odom_at is not None and now - self._odom_at > self.ODOM_STALE_S:
+            # Steering on a pose seconds old is what makes the vehicle lurch.
+            self._send_thrust(0.0, 0.0, 0.0, 0.0)
+            self.get_logger().warn(
+                f'odometry {now - self._odom_at:.1f}s stale — holding',
+                throttle_duration_sec=5.0)
+            if write_csv:
+                self._write_csv(0.0, 0.0, 0.0, 0.0, 'ODOM_STALE')
+            return
+
         heave = self._heave_cmd()
         target_xy = self._target_xy()
-        now = self._t_ros()
 
         # At startup, and while changing walls, rotate to make the TSDF observe
         # the surroundings instead of holding a fixed view of empty water or
