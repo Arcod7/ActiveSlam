@@ -15,8 +15,7 @@ import math
 import os
 
 from frontier_slam.control_utils import (
-    depth_hold_effort, LowPassRate, wrap_angle, yaw_from_quat,
-    yaw_rate_command)
+    depth_hold_effort, LowPassRate, wrap_angle, yaw_from_quat)
 from frontier_slam.session_log import open_session_log
 from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry, Path
@@ -65,19 +64,25 @@ def wall_side_distances(points: np.ndarray, pose: np.ndarray,
 
     pts = np.asarray(points, dtype=np.float64)
     p = np.asarray(pose, dtype=np.float64)
-    finite = np.isfinite(pts).all(axis=1)
-    depth_ok = np.abs(pts[:, 2] - p[2]) <= z_band_m
-    delta = pts[:, :2] - p[:2]
-    distance = np.hypot(delta[:, 0], delta[:, 1])
-    valid = finite & depth_ok & (distance <= max_distance_m)
-    if not np.any(valid):
-        return float('inf'), float('inf')
 
-    # Starboard unit vector for a route bearing in world NED.
-    right = np.array([-math.sin(route_heading), math.cos(route_heading)])
-    lateral = delta @ right
-    left_mask = valid & (lateral < -lateral_deadband_m)
-    right_mask = valid & (lateral > lateral_deadband_m)
+    # Gate before the vector maths; non-finite points fail both gates anyway.
+    near = np.abs(pts[:, 2] - p[2]) <= z_band_m
+    if not np.any(near):
+        return float('inf'), float('inf')
+    dx = pts[near, 0] - p[0]
+    dy = pts[near, 1] - p[1]
+    distance = np.hypot(dx, dy)
+    in_range = distance <= max_distance_m
+    if not np.any(in_range):
+        return float('inf'), float('inf')
+    dx, dy, distance = dx[in_range], dy[in_range], distance[in_range]
+
+    # Starboard unit vector for a route bearing in world NED. Elementwise, not a
+    # matmul: a two-column gemv dispatches to threaded BLAS, and at control rate
+    # the worker spin-wait costs far more than the arithmetic.
+    lateral = dx * -math.sin(route_heading) + dy * math.cos(route_heading)
+    left_mask = lateral < -lateral_deadband_m
+    right_mask = lateral > lateral_deadband_m
     left_dist = float(np.min(distance[left_mask])) if np.any(left_mask) else float('inf')
     right_dist = float(np.min(distance[right_mask])) if np.any(right_mask) else float('inf')
     return left_dist, right_dist
@@ -175,19 +180,31 @@ def parse_xyz_cloud(msg: PointCloud2) -> 'np.ndarray | None':
 
 
 class WallOrientedController(Node):
-    # Heading is held through a rate loop. A direct heading->thrust law capped
-    # yaw at 0.07*pi = 0.22 of authority (under-turning); raising that gain
-    # produced 400 deg/s spins under thrust boost. MAX_YAW_RATE bounds the
-    # achieved rate instead, so it holds at any thrust ceiling.
-    MAX_YAW_RATE = 0.50      # rad/s (~29 deg/s); no-boost runs peaked near 56
-    KP_HEADING = 0.70        # heading error -> desired yaw rate
-    KP_YAW_RATE = 1.20       # rate error -> thrust command
-    # Measured yaw acceleration at full thrust is ~27 rad/s2. With the old
-    # 0.20 s rate filter the vehicle gained ~5 rad/s before the loop saw it,
-    # so it overshot to 400 deg/s and then braked -- correctly, but far too
-    # late. Sense fast, and cap the effort so the acceleration it must catch
-    # is bounded in the first place.
-    YAW_RATE_TAU = 0.05
+    # Heading is held by a direct heading->thrust law, because the only yaw rate
+    # available here is a differentiated heading estimate and that cannot close a
+    # loop: compass sigma is 0.05 rad at 10 Hz, so differentiation yields ~0.24
+    # rad/s of noise against a 0.25 rad/s target -- measured on a constant-spin
+    # scan, the fed-back rate read backwards on 4 of 18 samples and the command
+    # flipped sign on 10 of 17. No gain or filter fixes that: resolving the rate
+    # at 10:1 would need ~3 s of averaging. Heading error itself is clean (under
+    # 2 deg of noise), so the law that uses it directly is smooth.
+    #
+    # yaw_rate_command()/MAX_YAW_RATE in control_utils stay: a real gyro measures
+    # rate without differentiating, and the cascade goes back on top of one.
+    # Until then YAW_EFFORT_LIMIT bounds authority instead of achieved rate --
+    # equivalent only while thrust_boost is off, which is what caps spin here.
+    # Yaw is inertia plus a little drag -- close to a double integrator, which
+    # proportional control alone cannot stabilise; only drag damps it, so the
+    # gain has to stay under what drag can absorb. At 0.60 the loop diverged on
+    # a smooth setpoint: heading error grew 8.4 -> 24.2 -> 25.7 deg mean across
+    # a run, peaking at 146, while look_hdg moved only 3 deg/s. 0.15 is twice
+    # the 0.07 that was stable before the cascade, and still 4x under 0.60.
+    # The real fix is the D term, which needs a rate a gyro can supply and a
+    # differentiated heading cannot -- see the note above.
+    # Effective loop gain is KP_YAW * turn_factor, so the launcher's turn_factor
+    # is the live knob if this still rings.
+    KP_YAW = 0.15
+    YAW_RATE_TAU = 0.15      # diagnostic only; the CSV logs it, control ignores it
     YAW_EFFORT_LIMIT = 0.30
     KP_SPEED = 0.25
     KP_HEAVE = 0.35
@@ -206,17 +223,18 @@ class WallOrientedController(Node):
     MAX_SPEED = 0.25
     GOAL_RADIUS = 2.0
     GOAL_REACHED_TIMEOUT = 10.0
-    SCAN_YAW_RATE = 0.25     # rad/s (~14 deg/s) sweep, thrust-independent
+    SCAN_YAW = 0.08          # open-loop effort; ~0.22 rad/s achieved without boost
     INIT_SCAN_DURATION = 10.0
     WAYPOINT_ADVANCE_DIST = 1.5
     OBS_SLOW_DIST = 1.5
     EMERGENCY_STOP_DIST = 0.4
     BACK_SURGE_SPEED = 0.12
-    ESCAPE_YAW_RATE = 0.50   # rad/s
+    ESCAPE_YAW = 0.20        # open-loop effort, same basis as SCAN_YAW
     ESCAPE_DURATION = 4.0
     STUCK_SPEED_MIN = 0.15
     STUCK_WINDOW = 5.0
     STUCK_MOVE_MIN = 0.25
+    SIDE_SWITCH_DWELL_S = 4.0  # a side change must persist this long to be taken
     MAP_STALE_S = 5.0
     CTRL_HZ = 10.0
     LOG_EVERY_N_TICKS = 10
@@ -267,6 +285,8 @@ class WallOrientedController(Node):
         self._map_points: np.ndarray | None = None
         self._map_received_at: float | None = None
         self._wall_side = 0
+        self._side_candidate = 0
+        self._side_candidate_t = 0.0
         self._wall_distance = float('nan')
         self._min_front_dist = float('inf')
         self._init_scan_end: float | None = None
@@ -354,18 +374,6 @@ class WallOrientedController(Node):
             self.get_logger().info(
                 f'initial {self.INIT_SCAN_DURATION:.0f}s scan starting')
 
-    def _yaw_for_rate(self, target_rate: float) -> float:
-        """Thrust command that drives the measured yaw rate to target_rate.
-
-        Scan and escape used to send a fixed thrust fraction open-loop. With no
-        translation to share the horizontal budget and a boosted thrust ceiling
-        that produced >400 deg/s spins, so every yaw command now goes through
-        the rate loop and is bounded by what was actually asked for.
-        """
-        return float(np.clip(
-            self.KP_YAW_RATE * (target_rate - self._yaw_rate.value),
-            -self.YAW_EFFORT_LIMIT, self.YAW_EFFORT_LIMIT))
-
     def _heave_cmd(self) -> float:
         if self._depth_setpoint is None:
             return 0.0
@@ -382,8 +390,24 @@ class WallOrientedController(Node):
         left, right = wall_side_distances(
             self._map_points, self._pose, route_heading,
             self._wall_z_band, self._max_wall_distance)
-        self._wall_side = choose_wall_side(
+        candidate = choose_wall_side(
             left, right, self._wall_side, self._side_switch_margin)
+        # Switching sides re-signs the viewing offset, so each change steps the
+        # yaw setpoint by 2*look_offset_deg at once -- measured at 48.6 deg,
+        # against 2.4 deg/s while the side holds. The 0.3 m margin alone does
+        # not settle it when both sides sit at a similar range: the side flipped
+        # 8 times in 107 s, which is the left-right sweep. Make a change earn
+        # itself over SIDE_SWITCH_DWELL_S before the setpoint follows it.
+        if candidate != self._wall_side:
+            if candidate != self._side_candidate:
+                self._side_candidate = candidate
+                self._side_candidate_t = now
+            elif now - self._side_candidate_t >= self.SIDE_SWITCH_DWELL_S:
+                self._wall_side = candidate
+                self._side_candidate_t = now
+        else:
+            self._side_candidate = candidate
+            self._side_candidate_t = now
         chosen = left if self._wall_side < 0 else right
         self._wall_distance = chosen if math.isfinite(chosen) else float('nan')
 
@@ -398,10 +422,8 @@ class WallOrientedController(Node):
         look_heading = offset_heading(
             look_path_heading, self._wall_side, self._look_offset_deg)
         heading_error = wrap_angle(look_heading - self._yaw)
-        yaw_cmd = yaw_rate_command(
-            heading_error, self._yaw_rate.value,
-            self.KP_HEADING, self.KP_YAW_RATE, self.MAX_YAW_RATE,
-            limit=self.YAW_EFFORT_LIMIT)
+        yaw_cmd = float(np.clip(self.KP_YAW * heading_error,
+                                -self.YAW_EFFORT_LIMIT, self.YAW_EFFORT_LIMIT))
 
         # Reduce travel while the requested viewing heading is far away, then
         # project the unchanged route velocity onto the current body axes.
@@ -437,14 +459,14 @@ class WallOrientedController(Node):
 
         heave = self._heave_cmd()
         if self._init_scan_end is not None and now < self._init_scan_end:
-            self._send_thrust(0.0, 0.0, self._yaw_for_rate(self.SCAN_YAW_RATE), heave)
+            self._send_thrust(0.0, 0.0, self.SCAN_YAW, heave)
             if write_csv:
-                self._write_csv(0.0, 0.0, self._yaw_for_rate(self.SCAN_YAW_RATE), heave, 'INIT_SCAN')
+                self._write_csv(0.0, 0.0, self.SCAN_YAW, heave, 'INIT_SCAN')
             return
         if self._goal is None:
-            self._send_thrust(0.0, 0.0, self._yaw_for_rate(self.SCAN_YAW_RATE), heave)
+            self._send_thrust(0.0, 0.0, self.SCAN_YAW, heave)
             if write_csv:
-                self._write_csv(0.0, 0.0, self._yaw_for_rate(self.SCAN_YAW_RATE), heave, 'SCAN')
+                self._write_csv(0.0, 0.0, self.SCAN_YAW, heave, 'SCAN')
             return
 
         goal_dist = float(np.hypot(*(self._goal[:2] - self._pose[:2])))
@@ -454,9 +476,9 @@ class WallOrientedController(Node):
             elif now - self._goal_reached_at > self.GOAL_REACHED_TIMEOUT:
                 self._goal = None
                 self._goal_reached_at = None
-            self._send_thrust(0.0, 0.0, self._yaw_for_rate(self.SCAN_YAW_RATE), heave)
+            self._send_thrust(0.0, 0.0, self.SCAN_YAW, heave)
             if write_csv:
-                self._write_csv(0.0, 0.0, self._yaw_for_rate(self.SCAN_YAW_RATE), heave,
+                self._write_csv(0.0, 0.0, self.SCAN_YAW, heave,
                                 'GOAL_REACHED', distance=goal_dist)
             return
 
@@ -484,9 +506,9 @@ class WallOrientedController(Node):
 
         if self._escape_until is not None:
             if now < self._escape_until:
-                self._send_thrust(0.0, 0.0, self._yaw_for_rate(self.ESCAPE_YAW_RATE), heave)
+                self._send_thrust(0.0, 0.0, self.ESCAPE_YAW, heave)
                 if write_csv:
-                    self._write_csv(0.0, 0.0, self._yaw_for_rate(self.ESCAPE_YAW_RATE), heave,
+                    self._write_csv(0.0, 0.0, self.ESCAPE_YAW, heave,
                                     'CTRL_STUCK_ESCAPE', goal_dist,
                                     route_heading, look_heading, heading_error)
                 return
@@ -508,7 +530,7 @@ class WallOrientedController(Node):
                     self._escape_until = now + self.ESCAPE_DURATION
                     self._stuck_ref_pos = None
                     self._stuck_ref_t = None
-                    self._send_thrust(0.0, 0.0, self._yaw_for_rate(self.ESCAPE_YAW_RATE), heave)
+                    self._send_thrust(0.0, 0.0, self.ESCAPE_YAW, heave)
                     event = 'CTRL_STUCK'
                     return
         else:

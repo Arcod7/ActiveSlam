@@ -237,12 +237,12 @@ PARAMS = [
           "and in frontier mode (whichever motion executor is driving). Commands "
           "saturate at the safety gate's +-1.0 limit, so above roughly 1.1 this "
           "stops making the vehicle faster. Live, no restart.",
-          step=0.25, lo=0.1, hi=5.0),
+          step=0.20, lo=0.1, hi=5.0),
     Param("turn_factor", "Turn factor", "float", 1.0, "robot",
           "Multiplies yaw, in teleop (A/D) and in frontier mode (whichever motion "
           "executor is driving), independent of the speed factor. Also saturates "
           "at the safety gate's +-1.0 limit (roughly 6.7x). Live, no restart.",
-          step=0.25, lo=0.1, hi=5.0),
+          step=0.10, lo=0.1, hi=5.0),
     Param("robot_save_pose_on_exit", "Save robot pose on exit", "bool", False, "robot",
           "When enabled, preserve the robot's final live/teleop pose in config.yaml "
           "when leaving this control screen. When off, teleop motion is display-only "
