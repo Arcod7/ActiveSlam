@@ -42,6 +42,10 @@ TARGET_SCENE = 'target'
 SCENES = (DEFAULT_SCENE, TARGET_SCENE)
 BUILTIN_PIPE = 'pipe'
 DEFAULT_ROBOT_POSE = ((0.0, 0.0, 8.0), (0.0, 0.0, 0.0))
+# Debug/convenience only: scales the simulated thruster RPM ceiling
+# (max_setpoint) past the datasheet-grounded default for fast repositioning
+# between runs. Not a physically realistic BlueROV2/T200 value.
+THRUST_BOOST_MULTIPLIER = 2.5
 
 
 def _finite_float(context, name, *, positive=False):
@@ -90,7 +94,7 @@ def _scene_output_path(prefix, content):
     return str(output_path)
 
 
-def _render_robot_scene(robot_pose):
+def _render_robot_scene(robot_pose, thrust_boost=False):
     """Clone the robot description with a launch-time pose, never mutating it."""
     source = Path(WORLD_DATA, 'robot', 'bluerov2_unphy.scn')
     try:
@@ -103,6 +107,10 @@ def _render_robot_scene(robot_pose):
     xyz, rpy = robot_pose
     transform.set('xyz', ' '.join(format(value, '.9g') for value in xyz))
     transform.set('rpy', ' '.join(format(value, '.9g') for value in rpy))
+    if thrust_boost:
+        for specs in root.findall('.//specs[@max_setpoint]'):
+            boosted = float(specs.get('max_setpoint')) * THRUST_BOOST_MULTIPLIER
+            specs.set('max_setpoint', format(boosted, '.9g'))
     rendered = ET.tostring(root, encoding='unicode', xml_declaration=True)
     return _scene_output_path('bluerov2', rendered)
 
@@ -189,10 +197,11 @@ def _launch_stonefish(context):
     if scene not in SCENES:
         raise RuntimeError(f'Unknown scene {scene!r}; choose one of {", ".join(SCENES)}')
     robot_pose = _robot_pose(context)
-    if scene == DEFAULT_SCENE and robot_pose == DEFAULT_ROBOT_POSE:
+    thrust_boost = LaunchConfiguration('thrust_boost').perform(context) == 'true'
+    if scene == DEFAULT_SCENE and robot_pose == DEFAULT_ROBOT_POSE and not thrust_boost:
         scenario = os.path.join(SCENARIO_DIR, 'waterlinked.scn')
     else:
-        robot_scene = _render_robot_scene(robot_pose)
+        robot_scene = _render_robot_scene(robot_pose, thrust_boost)
         scenario = (_render_waterlinked_scene(robot_scene)
                     if scene == DEFAULT_SCENE else _render_target_scene(context, robot_scene))
     return [Node(
@@ -253,11 +262,18 @@ def generate_launch_description():
                                             description='robot pitch (degrees)')
     robot_yaw_arg = DeclareLaunchArgument('robot_yaw', default_value='0.0',
                                           description='robot yaw (degrees)')
+    thrust_boost_arg = DeclareLaunchArgument(
+        'thrust_boost', default_value='false', choices=['true', 'false'],
+        description=(f'Scale the simulated thruster RPM ceiling by '
+                     f'{THRUST_BOOST_MULTIPLIER}x for fast repositioning; '
+                     'not a physically realistic setting'),
+    )
 
     return LaunchDescription([
         scene_arg, obj_mesh_arg, obj_x_arg, obj_y_arg, obj_z_arg, obj_scale_arg,
         obj_roll_arg, obj_pitch_arg, obj_yaw_arg,
         robot_x_arg, robot_y_arg, robot_z_arg,
         robot_roll_arg, robot_pitch_arg, robot_yaw_arg,
+        thrust_boost_arg,
         OpaqueFunction(function=_launch_stonefish),
     ])
