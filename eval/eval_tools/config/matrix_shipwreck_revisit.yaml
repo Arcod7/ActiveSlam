@@ -50,8 +50,10 @@ common_args:
   tsdf_frontier_standoff_m: 1.0
   loop_closure: 'true'
   map_rebuild: 'false'
-  dopt_trigger: 0.004
-  dopt_resume: 0.002
+  sigma_allow_xy_m: 0.05
+  sigma_allow_yaw_rad: 0.03
+  ratio_trigger: 1.0
+  ratio_resume: 0.5
 
 runs:
   - name: lc

@@ -12,7 +12,10 @@ State machine (RevisitStateMachine, plain Python — no rclpy, directly
 unit-testable): EXPLORING -> REVISITING -> COOLDOWN -> EXPLORING.
   - Trigger source: /slam/dopt, the only live-correct uncertainty signal
     (per-keyframe covariances go stale after later closures — see
-    pose_graph.py's own comments).
+    pose_graph.py's own comments). It is compared as Suresh et al. (2020)
+    eq. 5 does — the ratio U_r = D(Sigma)/D(Sigma_allow) against a maximum
+    allowable covariance stated in metres and radians — rather than against a
+    bare determinant threshold, which has no interpretable scale.
   - Candidate scoring v1 is plain geometric distinctiveness (the fallback
     ROADMAP explicitly allows): keyframes old enough (index gap) and far
     enough from the robot, scored by how many other old keyframes cluster
@@ -50,9 +53,25 @@ _LOG_DIR = os.path.join(
 )
 
 CSV_COLUMNS = [
-    't_ros', 'state', 'dopt', 'lc_count', 'n_kf',
+    't_ros', 'state', 'dopt', 'u_ratio', 'lc_count', 'n_kf',
     'tgt_x', 'tgt_y', 'dist_m', 'revisit_count', 'event',
 ]
+
+
+def dopt_allowable(sigma_xy_m: float, sigma_yaw_rad: float) -> float:
+    """D-optimality of the largest pose covariance the mission tolerates,
+    built from per-axis sigmas so the threshold can be stated in metres and
+    radians rather than as a bare determinant."""
+    return float(np.power((sigma_xy_m ** 2) ** 2 * sigma_yaw_rad ** 2, 1.0 / 3.0))
+
+
+def uncertainty_ratio(dopt, dopt_allow: float) -> "float | None":
+    """Suresh et al. (2020) eq. 5: U_r = D(Sigma) / D(Sigma_allow). Revisit
+    when it exceeds 1, i.e. when the estimate is less certain than the mission
+    allows. Dimensionless, so the mixed metre/radian units cancel."""
+    if dopt is None or dopt_allow <= 0.0:
+        return None
+    return float(dopt) / dopt_allow
 
 
 class RevisitState(Enum):
@@ -63,8 +82,11 @@ class RevisitState(Enum):
 
 @dataclass
 class RevisitConfig:
-    dopt_trigger: float = 0.02
-    dopt_resume: float = 0.01
+    # Largest pose uncertainty the mission tolerates, as per-axis sigmas.
+    sigma_allow_xy_m: float = 0.045
+    sigma_allow_yaw_rad: float = 0.045
+    ratio_trigger: float = 1.0
+    ratio_resume: float = 0.5
     min_keyframes: int = 15
     min_index_gap: int = 10
     candidate_radius_m: float = 5.0
@@ -137,6 +159,12 @@ class RevisitStateMachine:
     def suspended(self) -> bool:
         return self.state == RevisitState.REVISITING
 
+    def dopt_allow(self) -> float:
+        return dopt_allowable(self.cfg.sigma_allow_xy_m, self.cfg.sigma_allow_yaw_rad)
+
+    def ratio(self, dopt) -> "float | None":
+        return uncertainty_ratio(dopt, self.dopt_allow())
+
     def tick(self, now: float, dopt, lc_count: int,
              kf_xyz: np.ndarray, robot_xy: np.ndarray) -> "str | None":
         """Advance one tick. Returns an event string ('TRIGGER', 'CLOSED',
@@ -150,7 +178,8 @@ class RevisitStateMachine:
 
     def _try_trigger(self, now, dopt, lc_count, kf_xyz, robot_xy):
         cfg = self.cfg
-        if dopt is None or dopt <= cfg.dopt_trigger:
+        u_ratio = self.ratio(dopt)
+        if u_ratio is None or u_ratio <= cfg.ratio_trigger:
             return None
         if len(kf_xyz) < cfg.min_keyframes:
             return None
@@ -172,7 +201,8 @@ class RevisitStateMachine:
         cfg = self.cfg
         if lc_count > self._lc_at_start:
             return self._end_revisit(now, 'CLOSED')
-        if dopt is not None and dopt < cfg.dopt_resume:
+        u_ratio = self.ratio(dopt)
+        if u_ratio is not None and u_ratio < cfg.ratio_resume:
             return self._end_revisit(now, 'RESUMED_DOPT')
         if now - self._t_start > cfg.revisit_timeout_s:
             return self._end_revisit(now, 'TIMEOUT')
@@ -211,8 +241,10 @@ class RevisitPlanner(Node):
         super().__init__('revisit_planner')
 
         self.declare_parameter('odom_topic', '/StoneFish/Odometry')
-        self.declare_parameter('dopt_trigger', 0.02)
-        self.declare_parameter('dopt_resume', 0.01)
+        self.declare_parameter('sigma_allow_xy_m', 0.045)
+        self.declare_parameter('sigma_allow_yaw_rad', 0.045)
+        self.declare_parameter('ratio_trigger', 1.0)
+        self.declare_parameter('ratio_resume', 0.5)
         self.declare_parameter('min_keyframes', 15)
         self.declare_parameter('min_index_gap', 10)
         self.declare_parameter('candidate_radius_m', 5.0)
@@ -227,6 +259,10 @@ class RevisitPlanner(Node):
         odom_topic = str(self.get_parameter('odom_topic').value)
 
         cfg = RevisitConfig(
+            sigma_allow_xy_m=float(self.get_parameter('sigma_allow_xy_m').value),
+            sigma_allow_yaw_rad=float(self.get_parameter('sigma_allow_yaw_rad').value),
+            ratio_trigger=float(self.get_parameter('ratio_trigger').value),
+            ratio_resume=float(self.get_parameter('ratio_resume').value),
             min_keyframes=int(self.get_parameter('min_keyframes').value),
             min_index_gap=int(self.get_parameter('min_index_gap').value),
             candidate_radius_m=float(self.get_parameter('candidate_radius_m').value),
@@ -245,7 +281,8 @@ class RevisitPlanner(Node):
         self._robot_xy = None
         self._last_goal_pub_time = None
 
-        self._log = open_session_log('revisit', CSV_COLUMNS, _LOG_DIR)
+        self._log = open_session_log('revisit', CSV_COLUMNS, _LOG_DIR,
+                                     precision={'dopt': 8, 'u_ratio': 4})
 
         self.create_subscription(Float64, '/slam/dopt', self._dopt_cb, 10)
         self.create_subscription(Path, '/slam/path_slam', self._path_cb, 10)
@@ -256,9 +293,14 @@ class RevisitPlanner(Node):
         self._goal_pub = self.create_publisher(PointStamped, '/frontier_slam/goal', 1)
         self._count_pub = self.create_publisher(Int32, '/frontier_slam/revisit_count', 10)
         self._state_pub = self.create_publisher(String, '/frontier_slam/revisit_state', 10)
+        self._ratio_pub = self.create_publisher(Float64, '/frontier_slam/uncertainty_ratio', 10)
 
         self.create_timer(1.0 / self.TICK_HZ, self._tick)
-        self.get_logger().info(f'revisit_planner ready — logging to {self._log.path}')
+        self.get_logger().info(
+            f'revisit_planner ready — revisit above U_r {cfg.ratio_trigger:g} '
+            f'(D_allow {self._sm.dopt_allow():.5f} from sigma_xy '
+            f'{cfg.sigma_allow_xy_m:g} m, sigma_yaw {cfg.sigma_allow_yaw_rad:g} rad) '
+            f'— logging to {self._log.path}')
 
     # ------------------------------------------------------------------
     # ROS callbacks
@@ -285,8 +327,10 @@ class RevisitPlanner(Node):
         """Live-tunable thresholds, re-read every tick so `ros2 param set`
         takes effect immediately (needed for forced-trigger testing)."""
         cfg = self._sm.cfg
-        cfg.dopt_trigger = float(self.get_parameter('dopt_trigger').value)
-        cfg.dopt_resume = float(self.get_parameter('dopt_resume').value)
+        cfg.sigma_allow_xy_m = float(self.get_parameter('sigma_allow_xy_m').value)
+        cfg.sigma_allow_yaw_rad = float(self.get_parameter('sigma_allow_yaw_rad').value)
+        cfg.ratio_trigger = float(self.get_parameter('ratio_trigger').value)
+        cfg.ratio_resume = float(self.get_parameter('ratio_resume').value)
         cfg.revisit_timeout_s = float(self.get_parameter('revisit_timeout_s').value)
 
     def _tick(self) -> None:
@@ -320,9 +364,14 @@ class RevisitPlanner(Node):
                 f'{prev_state.value} -> {self._sm.state.value}'
                 + (f' ({event})' if event else ''))
 
+        u_ratio = self._sm.ratio(self._dopt)
+        self._ratio_pub.publish(Float64(
+            data=u_ratio if u_ratio is not None else float('nan')))
+
         self._log.write([
             now, self._sm.state.value,
             self._dopt if self._dopt is not None else float('nan'),
+            u_ratio if u_ratio is not None else float('nan'),
             self._lc_count, len(self._kf_xyz),
             tgt_x, tgt_y, dist_m, self._sm.revisit_count, event or '',
         ])

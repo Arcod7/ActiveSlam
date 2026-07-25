@@ -825,13 +825,14 @@ def quaternion_to_rpy(x, y, z, w):
 # keyboard layout: an AZERTY keyboard produces different letters at those
 # positions. Canonical actions keep the rest of the code layout-independent.
 
+# Ascend is on the key left of X rather than Space, which the option list
+# needs as a Right-arrow synonym. On AZERTY that physical key types W, so the
+# old W-as-second-forward alias goes with it.
 DRIVE_KEYS = {
     "qwerty": {"w": "fwd", "s": "back", "q": "strafe_l", "e": "strafe_r",
-               "a": "yaw_l", "d": "yaw_r", " ": "up", "x": "down", "f": "halt"},
-    # Same physical cluster as qwerty. W stays as a second forward binding:
-    # it exists on AZERTY too (bottom row) and conflicts with nothing.
-    "azerty": {"z": "fwd", "w": "fwd", "s": "back", "a": "strafe_l",
-               "e": "strafe_r", "q": "yaw_l", "d": "yaw_r", " ": "up",
+               "a": "yaw_l", "d": "yaw_r", "z": "up", "x": "down", "f": "halt"},
+    "azerty": {"z": "fwd", "s": "back", "a": "strafe_l",
+               "e": "strafe_r", "q": "yaw_l", "d": "yaw_r", "w": "up",
                "x": "down", "f": "halt"},
 }
 

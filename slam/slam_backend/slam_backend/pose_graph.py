@@ -35,6 +35,18 @@ from slam_backend.geometry_utils import (
 from slam_backend.scan_matcher import ScanMatcher
 
 
+# Rows/cols of a GTSAM [rot|trans] 6x6 that hold the drifting DoF: x, y, yaw.
+XYH_INDICES = [3, 4, 2]
+
+
+def dopt_xyh(cov_gtsam_6x6: np.ndarray) -> float:
+    """Kiefer D-optimality det(Sigma)^(1/3) over XYH, per Suresh et al. (2020)
+    eq. 4. Depth/pitch/roll are directly observed, so including them would
+    deflate the geometric mean rather than report drift."""
+    cov_xyh = cov_gtsam_6x6[np.ix_(XYH_INDICES, XYH_INDICES)]
+    return float(np.power(max(np.linalg.det(cov_xyh), 0.0), 1.0 / 3.0))
+
+
 @dataclass
 class Keyframe:
     index: int
@@ -139,6 +151,11 @@ class PoseGraphNode(Node):
         self.pub_keyframe_count = self.create_publisher(Int32, '/slam/keyframe_count', 10)
         self.pub_loop_closure_count = self.create_publisher(Int32, '/slam/loop_closure_count', 10)
         self.pub_dopt = self.create_publisher(Float64, '/slam/dopt', 10)
+        # Consistency diagnostics: unlike D-optimality these say whether the
+        # assumed noise models match the residuals actually observed, and need
+        # no ground truth, so they are available on a real vehicle too.
+        self.pub_nis = self.create_publisher(Float64, '/slam/nis', 10)
+        self.pub_chi2 = self.create_publisher(Float64, '/slam/chi2_normalized', 10)
 
         # Map rebuild (parameterized, off by default): after a big loop
         # closure moves keyframes, publish only the per-keyframe pose
@@ -208,6 +225,11 @@ class PoseGraphNode(Node):
             profile.pressure.sigma_depth_m,
         ])
         self._att_depth_noise = gtsam.noiseModel.Diagonal.Sigmas(prior_sigmas)
+
+        # Scratch keys for the throwaway factor _closure_nis scores; never
+        # inserted into iSAM2, so they cannot collide with keyframe symbols.
+        self._sym_a = gtsam.symbol('n', 0)
+        self._sym_b = gtsam.symbol('n', 1)
 
     # ------------------------------------------------------------------
     # Sensor callbacks
@@ -320,6 +342,13 @@ class PoseGraphNode(Node):
                 self._keyframes[lc_idx].symbol, sym, gtsam.Pose3(lc_T),
                 self._robust_scan_noise))
 
+        # Innovations must be read off the pre-update estimate: after the solve
+        # the measurement has already been absorbed into the poses.
+        nis_samples = [
+            self._closure_nis(np.linalg.inv(self._keyframes[lc_idx].T_world) @ T_world_est,
+                              lc_T)
+            for lc_idx, lc_T, _ in lc_factors]
+
         self._isam.update(graph, values)
         result_values = self._isam.calculateEstimate()
 
@@ -357,7 +386,41 @@ class PoseGraphNode(Node):
         # covariance_ellipsoids); it goes stale (typically shrinks further)
         # after a loop closure, but stays a reasonable upper bound for display.
         kf_new.covariance = self._isam.marginalCovariance(sym)
+        for nis in nis_samples:
+            self.pub_nis.publish(Float64(data=nis))
+        self.pub_chi2.publish(Float64(data=self._normalized_chi2()))
         self._publish_keyframe_results(kf_new, kf_new.covariance)
+
+    def _closure_nis(self, T_predicted: np.ndarray, T_measured: np.ndarray) -> float:
+        """Normalised innovation squared for one loop closure, chi-square with
+        6 DoF against the scan-matching noise model alone.
+
+        The estimate's own covariance is deliberately NOT in the denominator,
+        so a single spike is not evidence of a bad noise model: a correct
+        closure after real drift carries that drift in its innovation and will
+        read high. It is the distribution over a run that is diagnostic — a
+        median far below 6 means scan_sigma_* is looser than the matches need.
+        Scored on the non-robust model, since the Huber weight would flatten
+        exactly the large residuals worth seeing."""
+        factor = gtsam.BetweenFactorPose3(
+            self._sym_a, self._sym_b, gtsam.Pose3(T_measured), self._scan_noise)
+        values = gtsam.Values()
+        values.insert(self._sym_a, gtsam.Pose3())
+        values.insert(self._sym_b, gtsam.Pose3(orthonormalize_pose(T_predicted)))
+        return float(2.0 * factor.error(values))
+
+    def _normalized_chi2(self) -> float:
+        """Whole-graph chi-square per degree of freedom. Every factor here is
+        6-dimensional, so the DoF is 6*(factors - nodes). Lands near 1.0 when
+        the assumed sigmas match the residuals; well below means the noise
+        models are looser than the data needs. Scan and closure factors are
+        counted through their Huber kernel, which caps what an outlier edge can
+        contribute."""
+        factors = self._isam.getFactorsUnsafe()
+        dof = 6 * (factors.size() - len(self._keyframes))
+        if dof <= 0:
+            return float('nan')
+        return float(2.0 * factors.error(self._isam.calculateEstimate()) / dof)
 
     def _detect_loop_closures(self, current_idx, cloud_body, T_world_est):
         # Candidates are filtered by |current_idx - kf.index| rather than a
@@ -519,9 +582,7 @@ class PoseGraphNode(Node):
         n_closures = sum(len(k.loop_closures) for k in self._keyframes)
         self.pub_loop_closure_count.publish(Int32(data=n_closures))
 
-        cov_pos = cov_6x6[3:6, 3:6]
-        dopt = float(np.power(max(np.linalg.det(cov_pos), 0.0), 1.0 / 3.0))
-        self.pub_dopt.publish(Float64(data=dopt))
+        self.pub_dopt.publish(Float64(data=dopt_xyh(cov_6x6)))
 
         self._publish_graph_edges()
         self._publish_covariance_ellipsoids()

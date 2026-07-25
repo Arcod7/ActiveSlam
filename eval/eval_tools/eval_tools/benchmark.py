@@ -14,6 +14,12 @@ Terminology: "abs_error"/"ate" are computed WITHOUT SE3 (Umeyama) alignment —
 in simulation, ground truth and the SLAM estimate already share the world_ned
 frame, so no alignment is needed. This differs from the usual offline `evo_ape
 --align` convention; state this when reporting numbers.
+
+ATE says how wrong the estimate is; NEES says whether the filter knows it.
+NEES pairs each keyframe's reported covariance with the true error over the
+same XYH DoF that feed D-optimality, so it measures whether the revisit
+trigger's input is calibrated. A consistent estimator averages NEES ~= 3
+(chi-square, 3 DoF); ANEES >> 3 means overconfident, << 3 conservative.
 """
 import os
 import bisect
@@ -25,19 +31,27 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, PoseWithCovarianceStamped
 from std_msgs.msg import Float64, Int32, ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
 from scipy.spatial.transform import Rotation
 
 from eval_tools.run_paths import new_run_dir
 from eval_tools.tum_writer import TUMWriter
+from eval_tools.consistency import (
+    XYH_ROS_INDICES, NEES_DOF, xyh_tangent_error, normalised_squared_error,
+    anees_bounds, classify_anees)
 
 PoseSample = namedtuple('PoseSample', ['t', 'pos', 'quat'])
 
 
 def _stamp_to_float(stamp) -> float:
     return stamp.sec + stamp.nanosec * 1e-9
+
+
+def _fmt(value, digits: int = 6) -> str:
+    """CSV cell: empty when the signal has not been published yet."""
+    return '' if value is None else f'{value:.{digits}f}'
 
 
 def _odom_to_sample(msg: Odometry) -> PoseSample:
@@ -102,12 +116,20 @@ class BenchmarkNode(Node):
         self._slam_tum = TUMWriter(os.path.join(out_dir, 'slam_traj.tum'))
         self._odom_tum = TUMWriter(os.path.join(out_dir, 'odom_traj.tum'))
 
+        # Consistency columns update at keyframe rate and are carried forward on
+        # the intervening odometry-rate rows, the same way dopt already is.
         self._metrics_file = open(os.path.join(out_dir, 'metrics.csv'), 'w')
         self._metrics_file.write(
-            't,abs_error,ate,rpe_trans,rpe_rot_deg,dopt,lc_count,rebuild_count,revisit_count\n')
+            't,abs_error,ate,rpe_trans,rpe_rot_deg,dopt,nees,anees,nis,chi2_norm,'
+            'lc_count,rebuild_count,revisit_count\n')
 
         self._matched_pairs = []   # time-ordered [(gt_sample, est_sample), ...] for RPE
         self._sq_errors = []       # running ATE accumulator
+        self._nees_samples = []    # running ANEES accumulator, one per keyframe
+        self._latest_nees = None
+        self._latest_anees = None
+        self._latest_nis = None         # cached from /slam/nis, per loop closure
+        self._latest_chi2_norm = None   # cached from /slam/chi2_normalized
         self._latest_dopt = None   # cached from pose_graph.py's /slam/dopt
         self._latest_kf_count = 0
         self._latest_lc_count = 0
@@ -121,6 +143,9 @@ class BenchmarkNode(Node):
         self.create_subscription(Odometry, '/slam/sensors/dead_reckoned_odom', self._dr_cb, 10)
         self.create_subscription(Odometry, '/slam/odometry', self._slam_odom_cb, 10)
         self.create_subscription(Float64, '/slam/dopt', self._dopt_cb, 10)
+        self.create_subscription(Float64, '/slam/nis', self._nis_cb, 10)
+        self.create_subscription(Float64, '/slam/chi2_normalized', self._chi2_cb, 10)
+        self.create_subscription(PoseWithCovarianceStamped, '/slam/pose', self._slam_pose_cb, 10)
         self.create_subscription(Int32, '/slam/keyframe_count', self._kf_count_cb, 10)
         self.create_subscription(Int32, '/slam/loop_closure_count', self._lc_count_cb, 10)
         self.create_subscription(Int32, '/slam/rebuild_count', self._rebuild_count_cb, 10)
@@ -131,6 +156,8 @@ class BenchmarkNode(Node):
         self.pub_rpe_trans = self.create_publisher(Float64, '/eval/rpe_trans', 10)
         self.pub_rpe_rot = self.create_publisher(Float64, '/eval/rpe_rot', 10)
         self.pub_dr_error = self.create_publisher(Float64, '/eval/dr_error', 10)
+        self.pub_nees = self.create_publisher(Float64, '/eval/nees', 10)
+        self.pub_anees = self.create_publisher(Float64, '/eval/anees', 10)
         self.pub_markers = self.create_publisher(MarkerArray, '/eval/markers', 10)
         self.pub_markers_live = self.create_publisher(MarkerArray, '/eval/markers_live', 10)
 
@@ -140,6 +167,36 @@ class BenchmarkNode(Node):
 
     def _dopt_cb(self, msg: Float64):
         self._latest_dopt = msg.data
+
+    def _nis_cb(self, msg: Float64):
+        self._latest_nis = msg.data
+
+    def _chi2_cb(self, msg: Float64):
+        self._latest_chi2_norm = msg.data
+
+    def _slam_pose_cb(self, msg: PoseWithCovarianceStamped):
+        """Score one keyframe's reported covariance against the true error."""
+        t = _stamp_to_float(msg.header.stamp)
+        gt = self._gt_buffer.nearest(t)
+        if gt is None:
+            return
+
+        p, q = msg.pose.pose.position, msg.pose.pose.orientation
+        cov = np.asarray(msg.pose.covariance).reshape(6, 6)
+        cov_xyh = cov[np.ix_(XYH_ROS_INDICES, XYH_ROS_INDICES)]
+
+        err = xyh_tangent_error(gt.pos, gt.quat,
+                                np.array([p.x, p.y, p.z]),
+                                np.array([q.x, q.y, q.z, q.w]))
+        sample = normalised_squared_error(err, cov_xyh)
+        if sample is None:
+            return
+
+        self._nees_samples.append(sample)
+        self._latest_nees = sample
+        self._latest_anees = float(np.mean(self._nees_samples))
+        self.pub_nees.publish(Float64(data=self._latest_nees))
+        self.pub_anees.publish(Float64(data=self._latest_anees))
 
     def _kf_count_cb(self, msg: Int32):
         self._latest_kf_count = msg.data
@@ -192,11 +249,11 @@ class BenchmarkNode(Node):
 
         rpe_trans, rpe_rot_deg = self._update_rpe(gt, sample)
 
-        rpe_trans_str = f'{rpe_trans:.6f}' if rpe_trans is not None else ''
-        rpe_rot_str = f'{rpe_rot_deg:.6f}' if rpe_rot_deg is not None else ''
-        dopt_str = f'{self._latest_dopt:.8f}' if self._latest_dopt is not None else ''
         self._metrics_file.write(
-            f'{sample.t:.6f},{abs_error:.6f},{ate:.6f},{rpe_trans_str},{rpe_rot_str},{dopt_str},'
+            f'{sample.t:.6f},{abs_error:.6f},{ate:.6f},'
+            f'{_fmt(rpe_trans)},{_fmt(rpe_rot_deg)},{_fmt(self._latest_dopt, 8)},'
+            f'{_fmt(self._latest_nees)},{_fmt(self._latest_anees)},'
+            f'{_fmt(self._latest_nis)},{_fmt(self._latest_chi2_norm)},'
             f'{self._latest_lc_count},{self._latest_rebuild_count},{self._latest_revisit_count}\n')
         self._metrics_file.flush()
 
@@ -239,9 +296,12 @@ class BenchmarkNode(Node):
         rpe_t_str = f'{rpe_trans:.2f}m' if rpe_trans is not None else 'n/a'
         rpe_r_str = f'{rpe_rot_deg:.1f}deg' if rpe_rot_deg is not None else 'n/a'
         dopt_str = f'{self._latest_dopt:.4f}' if self._latest_dopt is not None else 'n/a'
+        anees_str = (f'{np.mean(self._nees_samples):.1f}'
+                     if self._nees_samples else 'n/a')
         text.text = (
             f'err {abs_error:.2f}m | ATE {ate:.2f}m | RPE {rpe_t_str}/{rpe_r_str}\n'
             f'KF {self._latest_kf_count} | LC {self._latest_lc_count} | D-opt {dopt_str}'
+            f' | ANEES {anees_str}'
         )
         markers.markers.append(text)
 
@@ -342,7 +402,19 @@ class BenchmarkNode(Node):
         self.pub_rpe_rot.publish(Float64(data=rpe_rot_deg))
         return rpe_trans, rpe_rot_deg
 
+    def _log_consistency_summary(self):
+        n = len(self._nees_samples)
+        if n == 0:
+            self.get_logger().info('No NEES samples: /slam/pose never paired with GT.')
+            return
+        anees = float(np.mean(self._nees_samples))
+        lo, hi = anees_bounds(n)
+        self.get_logger().info(
+            f'ANEES {anees:.2f} over {n} keyframes, {NEES_DOF} DoF — '
+            f'95% acceptance [{lo:.2f}, {hi:.2f}] — {classify_anees(anees, n)}')
+
     def destroy_node(self):
+        self._log_consistency_summary()
         self._gt_tum.close()
         self._slam_tum.close()
         self._odom_tum.close()

@@ -151,15 +151,27 @@ def generate_launch_description():
         default_value='false',
         description='Start revisit_planner (needs a SLAM pose source, e.g. bringup slam:=slam).',
     )
-    dopt_trigger_arg = DeclareLaunchArgument(
-        'dopt_trigger', default_value='0.02',
+    sigma_allow_xy_arg = DeclareLaunchArgument(
+        'sigma_allow_xy_m', default_value='0.045',
         description=(
-            'D-optimality [det(cov_pos)^(1/3)] threshold that suspends exploration '
-            'and drives back to close a loop.'),
+            'Largest horizontal position sigma the mission tolerates, in metres. '
+            'With sigma_allow_yaw_rad it defines D(Sigma_allow), the denominator '
+            'of the revisit trigger ratio.'),
     )
-    dopt_resume_arg = DeclareLaunchArgument(
-        'dopt_resume', default_value='0.01',
-        description='D-optimality threshold below which exploration resumes after a revisit.',
+    sigma_allow_yaw_arg = DeclareLaunchArgument(
+        'sigma_allow_yaw_rad', default_value='0.045',
+        description='Largest heading sigma the mission tolerates, in radians.',
+    )
+    ratio_trigger_arg = DeclareLaunchArgument(
+        'ratio_trigger', default_value='1.0',
+        description=(
+            'Uncertainty ratio U_r = D(Sigma)/D(Sigma_allow) above which exploration '
+            'is suspended to drive back and close a loop. 1.0 means "revisit exactly '
+            'when the estimate is less certain than the mission allows".'),
+    )
+    ratio_resume_arg = DeclareLaunchArgument(
+        'ratio_resume', default_value='0.5',
+        description='Uncertainty ratio below which exploration resumes after a revisit.',
     )
     scenario_arg = DeclareLaunchArgument(
         'scenario',
@@ -301,8 +313,10 @@ def generate_launch_description():
         mavlink_url_arg,
         ardusub_params_arg,
         revisit_arg,
-        dopt_trigger_arg,
-        dopt_resume_arg,
+        sigma_allow_xy_arg,
+        sigma_allow_yaw_arg,
+        ratio_trigger_arg,
+        ratio_resume_arg,
         scenario_arg,
         scenario_out_dx_arg,
         scenario_out_dy_arg,
@@ -449,8 +463,10 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'odom_topic': odom_topic,
-                'dopt_trigger': _float_parameter('dopt_trigger'),
-                'dopt_resume': _float_parameter('dopt_resume'),
+                'sigma_allow_xy_m': _float_parameter('sigma_allow_xy_m'),
+                'sigma_allow_yaw_rad': _float_parameter('sigma_allow_yaw_rad'),
+                'ratio_trigger': _float_parameter('ratio_trigger'),
+                'ratio_resume': _float_parameter('ratio_resume'),
             }],
             condition=IfCondition(LaunchConfiguration('revisit')),
         ),

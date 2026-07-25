@@ -54,8 +54,10 @@ common_args:
   map_rebuild: 'false'
   # Below the ~0.006 ceiling observed with loop_closure alone; resume at half
   # trigger, same ratio as the framework default (0.02/0.01).
-  dopt_trigger: 0.004
-  dopt_resume: 0.002
+  sigma_allow_xy_m: 0.05
+  sigma_allow_yaw_rad: 0.03
+  ratio_trigger: 1.0
+  ratio_resume: 0.5
 
 runs:
   - name: lc

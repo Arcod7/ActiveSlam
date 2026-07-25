@@ -59,7 +59,8 @@ VALID_KEYS = {
     'robot_x', 'robot_y', 'robot_z', 'robot_roll', 'robot_pitch', 'robot_yaw', 'depth',
     # Motion tuning and the revisit trigger, so a batch can pin the same demo
     # config an interactive session was tuned to.
-    'speed_factor', 'turn_factor', 'dopt_trigger', 'dopt_resume',
+    'speed_factor', 'turn_factor', 'sigma_allow_xy_m', 'sigma_allow_yaw_rad',
+    'ratio_trigger', 'ratio_resume',
     'wall_orientation_offset_deg', 'wall_orientation_lookahead_m',
     'tsdf_frontier_standoff_m',
 }

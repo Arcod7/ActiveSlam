@@ -19,11 +19,13 @@ thing keyboard control needed a separate window for.
 """
 
 import atexit
+import base64
 import curses
 import glob
 import json
 import math
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -53,6 +55,16 @@ BLOCKED_DRIVE_FLASH_S = 1.5
 # the option rows readable.
 PANEL_W = 32
 PANEL_MIN_TERM_WIDTH = 100
+# Space cycles a value forward, so it reads as a Right arrow everywhere on the
+# option list. Ascend gave the key up for it (launcher_core.DRIVE_KEYS).
+PREV_KEYS = (curses.KEY_LEFT,)
+NEXT_KEYS = (curses.KEY_RIGHT, ord(" "))
+# How long the "copied" acknowledgement stays next to the button.
+COPY_NOTE_S = 2.5
+# Pose table: how far GT and belief may diverge before the row stops being
+# background noise and gets coloured.
+POSE_DIFF_WARN_M = 0.25
+POSE_DIFF_ERR_M = 1.0
 METRICS_STALE_S = 8.0
 ACTIVITY_STALE_S = 3.0
 
@@ -63,6 +75,9 @@ EVAL_METRICS = (
     ("rpe_trans",    "/eval/rpe_trans",          False),
     ("rpe_rot",      "/eval/rpe_rot",            False),
     ("dopt",         "/slam/dopt",               False),
+    ("u_ratio",      "/frontier_slam/uncertainty_ratio", False),
+    ("anees",        "/eval/anees",              False),
+    ("nis",          "/slam/nis",                False),
     ("keyframes",    "/slam/keyframe_count",     True),
     ("loops",        "/slam/loop_closure_count", True),
     ("map_coverage", "/eval/map_coverage",       False),
@@ -774,6 +789,50 @@ def init_colors():
     curses.init_pair(C_INFO, curses.COLOR_CYAN, -1)
     curses.init_pair(C_OK, curses.COLOR_GREEN, -1)
     curses.init_pair(C_WARN, curses.COLOR_MAGENTA, -1)
+    # Button clicks only; leaving position reporting off keeps the terminal's
+    # own text selection working.
+    try:
+        curses.mousemask(curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED)
+    except curses.error:
+        pass
+
+
+def _clicked(button) -> bool:
+    """True when the pending mouse event is a press inside `button`, given as
+    (row, x_start, x_end)."""
+    if button is None:
+        return False
+    try:
+        _, mx, my, _, state = curses.getmouse()
+    except curses.error:
+        return False
+    if not state & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
+        return False
+    row, x0, x1 = button
+    return my == row and x0 <= mx < x1
+
+
+def copy_to_clipboard(text: str) -> str:
+    """Put `text` on the system clipboard, returning what was used so the
+    caller can say so. Falls back to the OSC 52 escape sequence, which the
+    terminal emulator handles itself and so works over SSH too."""
+    for argv, name in ((["wl-copy"], "wl-copy"),
+                       (["xclip", "-selection", "clipboard"], "xclip"),
+                       (["xsel", "--clipboard", "--input"], "xsel")):
+        if shutil.which(argv[0]) is None:
+            continue
+        try:
+            subprocess.run(argv, input=text.encode(), check=True, timeout=2)
+            return name
+        except (subprocess.SubprocessError, OSError):
+            continue
+    payload = base64.b64encode(text.encode()).decode()
+    try:
+        sys.stdout.write(f"\033]52;c;{payload}\a")
+        sys.stdout.flush()
+        return "terminal"
+    except OSError:
+        return ""
 
 
 def put(stdscr, y, x, text, attr=0, maxx=None):
@@ -1015,12 +1074,17 @@ def metric_rows(metrics, mapper, values=None):
         ("kf",       _metric(metrics, "keyframes", "d")),
         ("lc",       _metric(metrics, "loops", "d")),
         ("d-opt",    _metric(metrics, "dopt", ".4f")),
+        ("U_r",      _metric(metrics, "u_ratio", ".2f")),
+        # Consistency pair: ANEES wants ~3 against ground truth, NIS ~6 against
+        # the scan-matching model. Both far off means the sigmas are wrong.
+        ("ANEES/NIS", (f'{_metric(metrics, "anees", ".1f")}'
+                       f' / {_metric(metrics, "nis", ".1f")}')),
     ]
     # The live d-opt only means something against the level that triggers a
     # revisit, so the thresholds sit under it whenever revisit is armed.
     if values and values.get("revisit") and values.get("mode") in ("frontier", "goto"):
-        rows.append(("trig/res", f"{values['dopt_trigger']:g}"
-                                 f" / {values['dopt_resume']:g}"))
+        rows.append(("trig/res", f"{values['ratio_trigger']:g}"
+                                 f" / {values['ratio_resume']:g}"))
     rows += [
         ("coverage", _metric(metrics, "map_coverage", ".1%")),
         accuracy,
@@ -1049,7 +1113,12 @@ def draw_side_panel(stdscr, link, values, running, driving, drive_active,
                     top, height, x, width, cur=None):
     """Robot state, error metrics, the GT/belief pose table and the selected
     option's other values, right of the option list."""
-    end, right = top + height, x + width
+    right = x + width
+    # The value list is placed first and the flowing sections above are given
+    # what is left, so it stays anchored to the bottom of the panel.
+    block_top = draw_choice_block(stdscr, cur, values[cur.id] if cur else None,
+                                  x, width, top, top + height)
+    end = block_top
     row = top
 
     def note(message, attr=curses.A_DIM):
@@ -1098,32 +1167,60 @@ def draw_side_panel(stdscr, link, values, running, driving, drive_active,
     if row >= end:
         return
 
-    heading("Pos" + f"{'GT':>12}{'belief':>10}")
+    heading("Pos" + f"{'GT':>9}{'belief':>8}{'diff':>7}")
     gt, belief = link.robot_pose, link.slam_pose
     for axis, key in (("x", "robot_x"), ("y", "robot_y"), ("z", "robot_z")):
         if row >= end:
             return
         cell = lambda pose: "-" if pose is None else f"{pose[key]:.2f}"
-        put(stdscr, row, x + 1,
-            f"{axis:<4}{cell(gt):>10}{cell(belief):>10}",
+        put(stdscr, row, x + 1, f"{axis:<3}{cell(gt):>9}{cell(belief):>8}",
             curses.color_pair(C_INFO), maxx=right)
+        # The per-axis gap is the number being looked for; it stays grey while
+        # it is noise and only takes colour once it is worth reacting to.
+        diff = (None if gt is None or belief is None
+                else belief[key] - gt[key])
+        if diff is None:
+            put(stdscr, row, x + 21, f"{'-':>7}", curses.A_DIM, maxx=right)
+        else:
+            magnitude = abs(diff)
+            if magnitude >= POSE_DIFF_ERR_M:
+                attr = curses.color_pair(C_ERR) | curses.A_BOLD
+            elif magnitude >= POSE_DIFF_WARN_M:
+                attr = curses.color_pair(C_WARN)
+            else:
+                attr = curses.A_DIM
+            put(stdscr, row, x + 21, f"{diff:>+7.2f}", attr, maxx=right)
         row += 1
 
-    # What the selected row can be set to, so the alternatives are readable
-    # without arrowing through them. Nothing to list on a section heading.
+
+def draw_choice_block(stdscr, cur, value, x, width, top, end):
+    """The selected option's other values, pinned to the bottom of the panel so
+    it stays in one place instead of sliding with the content above it.
+    Returns the first row it occupies, or `end` when there is nothing to show."""
     if cur is None:
-        return
-    row += 1
-    if row >= end:
-        return
-    heading(cur.label[:width - 1])
-    for text, current in choice_lines(cur, values[cur.id]):
-        if row >= end:
-            return
-        put(stdscr, row, x + 1, f"{'*' if current else ' '} {text}",
+        return end
+    lines = choice_lines(cur, value)
+    if not lines:
+        return end
+    right = x + width
+    # divider + heading + one row per value. Capped at half the panel so a long
+    # enum on a short terminal cannot push the pose table off the top.
+    budget = max(3, (end - top) // 2)
+    block_top = max(top, end - min(len(lines) + 2, budget))
+    lines = lines[:max(0, end - block_top - 2)]
+    if not lines:
+        return end
+    try:
+        stdscr.hline(block_top, x, curses.ACS_HLINE, width)
+    except curses.error:
+        pass
+    put(stdscr, block_top + 1, x, cur.label[:width - 1],
+        curses.A_BOLD | curses.color_pair(C_HEAD), maxx=right)
+    for offset, (text, current) in enumerate(lines):
+        put(stdscr, block_top + 2 + offset, x + 1, f"{'*' if current else ' '} {text}",
             (curses.color_pair(C_OK) | curses.A_BOLD) if current
             else curses.A_DIM, maxx=right)
-        row += 1
+    return block_top
 
 
 def control_screen(stdscr, sup, values, link, session):
@@ -1150,6 +1247,10 @@ def control_screen(stdscr, sup, values, link, session):
     # highlights the arm hint for a moment after, so a dead key press says
     # why it did nothing instead of looking like a broken teleop.
     last_blocked_drive_at = 0.0
+    # Click target and acknowledgement for the copy-launch-command button.
+    copy_button = None
+    copy_note = None
+    copy_note_at = 0.0
     robot_pose_fields = ("robot_x", "robot_y", "robot_z",
                          "robot_roll", "robot_pitch", "robot_yaw")
     # This is the deliberately configured launch pose. Odometry updates the
@@ -1414,9 +1515,11 @@ def control_screen(stdscr, sup, values, link, session):
             curses.color_pair(C_OK if running else C_INFO) | curses.A_BOLD)
         # The single-shot equivalent of what is configured here, listing only
         # what differs from the defaults. Built from the launch pose, not the
-        # odometry readback, so it stays a command worth copying.
+        # odometry readback, so it stays a command worth copying. The command
+        # itself is far too long for one row, so only a button is shown (on the
+        # key line at the bottom) and the text goes to the clipboard.
         pending_values = launch_values()
-        put(stdscr, 1, 2, model.launch_command(pending_values), curses.A_DIM)
+        launch_cmd = model.launch_command(pending_values)
 
         # -- parameter list
         desc_h = 5
@@ -1569,6 +1672,15 @@ def control_screen(stdscr, sup, values, link, session):
                 "Enter apply  m arm  r reset  o advanced  "
                 "p preset  k stop  Esc quit")
         put(stdscr, h - 1, 2, keys, curses.A_DIM)
+        # Last item on the key line, after Esc: it reads as one more key rather
+        # than a separate control.
+        copy_label = "C copy launch command"
+        copy_x = 4 + len(keys)
+        copy_button = (h - 1, copy_x, copy_x + len(copy_label))  # for the mouse
+        put(stdscr, h - 1, copy_x, copy_label, curses.A_DIM)
+        if copy_note and time.time() - copy_note_at < COPY_NOTE_S:
+            put(stdscr, h - 1, copy_x + len(copy_label) + 2, copy_note,
+                curses.color_pair(C_OK))
         stdscr.refresh()
 
         # -- input
@@ -1640,16 +1752,16 @@ def control_screen(stdscr, sup, values, link, session):
             idx = (idx - 1) % len(rows)
         elif key == curses.KEY_DOWN:
             idx = (idx + 1) % len(rows)
-        elif cur is None and key in (curses.KEY_LEFT, curses.KEY_RIGHT):
-            # Left/Right only: Enter stays the apply/launch key on every row.
+        elif cur is None and key in NEXT_KEYS + PREV_KEYS:
+            # Left/Right/Space only: Enter stays the apply/launch key.
             if cur_section in collapsed:
                 collapsed.discard(cur_section)
             else:
                 collapsed.add(cur_section)
             values[model.HIDDEN_SECTIONS_KEY] = sorted(collapsed)
             save_config()
-        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT):
-            delta = -1 if key == curses.KEY_LEFT else 1
+        elif key in NEXT_KEYS + PREV_KEYS:
+            delta = -1 if key in PREV_KEYS else 1
             old = values[cur.id]
             if cur.kind == "enum":
                 i = cur.choices.index(values[cur.id])
@@ -1678,6 +1790,19 @@ def control_screen(stdscr, sup, values, link, session):
                         apply_live_change(cur, old)
                 except ValueError:
                     set_status(f"not a valid {cur.kind}: {raw}", C_ERR)
+        elif key in (ord("c"), ord("C")) or (
+                key == curses.KEY_MOUSE and _clicked(copy_button)):
+            via = copy_to_clipboard(launch_cmd)
+            if via:
+                copy_note = f"copied ({via})"
+                copy_note_at = time.time()
+                set_status("launch command copied to the clipboard", C_OK)
+            else:
+                set_status("no clipboard tool found (wl-copy/xclip/xsel)", C_ERR)
+        elif key == curses.KEY_MOUSE:
+            # Any other click is ignored rather than falling through to a
+            # keyboard branch that would read the mouse code as a character.
+            pass
         elif key in (ord("p"), ord("P")):
             preset_idx = (preset_idx + 1) % len(model.PRESETS)
             values.clear()

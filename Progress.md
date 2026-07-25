@@ -1907,3 +1907,75 @@ mapper:=tsdf tsdf_octomap:=true` lists `/tsdf/octomap_binary` and no
 four touched packages build clean. Not yet live-run: the drift line label and
 the ground-truth point overlay have not been watched against a moving robot
 under `slam:=slam`.
+
+## Phase 48 — D-optimality on the drifting DoF, an allowable-covariance trigger, and consistency metrics
+
+The revisit trigger was reading a signal that could not mean what it was being
+asked to mean. `/slam/dopt` was `det(Σ)^(1/3)` over the translation block
+`[x, y, z]`, but Suresh et al. (2020) eq. 4 scores **XYH** — x, y and heading —
+because depth, pitch and roll are directly observed by the pressure sensor and
+IMU and do not accumulate drift. Folding the centimetre-scale depth variance
+into a geometric mean deflates the result, which is the low-variance-term
+failure the criterion is documented to have (Placed et al. 2023, §V-C).
+`pose_graph.dopt_xyh()` now scores rows/cols `[3, 4, 2]` of the GTSAM
+`[rot|trans]` marginal.
+
+The threshold was a bare determinant, `dopt_trigger: 0.02`, with no
+interpretable scale — and sat roughly 6x above anything the estimator ever
+reported, which is why revisit never fired in the 2026-07-24 ablation. It is
+replaced by eq. 5's ratio, `U_r = D(Σ)/D(Σ_allow)`, with `Σ_allow` stated as
+per-axis sigmas (`sigma_allow_xy_m`, `sigma_allow_yaw_rad`) and the trigger at
+`U_r > 1` — "revisit exactly when the estimate is less certain than the mission
+allows". Equal sigmas make `D(Σ_allow)` exactly `σ²`, which is what the unit
+tests use to state thresholds directly. Published on
+`/frontier_slam/uncertainty_ratio`.
+
+Neither of those says whether the covariance is *right*, so the run now
+measures it. `eval_tools/consistency.py` scores NEES over the same XYH DoF the
+trigger consumes, and `benchmark.py` accumulates ANEES with a chi-square
+acceptance region and logs a verdict at shutdown. NEES needs ground truth, so
+it can never be an online trigger input; the GT-free counterparts are
+`/slam/nis` (per-closure normalised innovation against the scan-matching noise
+model, chi-square 6 DoF) and `/slam/chi2_normalized` (whole-graph chi-square
+per DoF, ~1.0 when the assumed sigmas match the residuals). All four land in
+`metrics.csv` alongside the existing columns. `session_log` gained
+per-column precision, because its 2-decimal default had been rounding
+every logged D-optimality to `0.00` — the column was empty in every
+revisit log written to date, including the 2026-07-24 ablation's.
+
+NIS omits the estimate's own covariance from its denominator, so a single high
+reading is not evidence against the noise model — a correct closure after real
+drift carries that drift in its innovation. Only the distribution over a run is
+diagnostic. A 300 s realistic run gives median NIS 1.4 against an expectation of
+6 and a normalised graph chi-square of 0.17 against 1.0: the *relative* sigmas
+are looser than the residuals need. ANEES over the same run is 17 against an
+expectation of 3, i.e. the *absolute* marginal is far too tight. Internally
+consistent and globally wrong at once is the signature of unmodelled bias, not
+of noise.
+
+Launcher: the option list gained `Space` as a Right-arrow synonym, so ascend
+moved off Space to the key left of X (`Z` on QWERTY, `W` on AZERTY, the same
+physical key). The value list is pinned to the bottom of the side panel under a
+rule instead of sliding with the content above it, and is capped at half the
+panel so a long enum cannot push the pose table off. The pose table gained a
+fourth column, the per-axis GT-minus-belief gap, grey below 0.25 m and
+coloured past 0.25 / 1.0 m. The `ros2 launch` preview row is a
+`copy launch command` button (click, or `C`) rather than a line far too long to
+read, copying via `wl-copy`/`xclip`/`xsel` with an OSC 52 fallback that works
+over SSH.
+
+**Verified**: NEES validated by Monte Carlo against a known covariance —
+2.98 for a calibrated estimator (95% band [2.93, 3.08]), 26.6 when sigma is 3x
+too small, 0.34 when 3x too large. NIS validated against chi-square 6 DoF —
+exactly 1.0 at a one-sigma offset, 9.0 at three sigma, mean 5.98 over 20k
+model-matched draws, 24.0 when sigma is assumed 2x too tight. 25 revisit-planner
+unit tests pass; the 3 pre-existing `test_tsdf_tf_queue` failures are unrelated
+(confirmed against a clean tree). Side-panel layout rendered headlessly at 24
+and 45 rows, including the empty-selection and short-panel cases. A 300 s
+`slam:=slam mode:=frontier revisit:=true` run publishes all four signals into
+`metrics.csv`; the `sigma_allow` defaults were then set from that run's measured
+XYH D-opt range (0.0002-0.0022, median 0.0010) rather than guessed, and a 240 s
+confirmation run fired 2 revisits with `U_r` median 1.02 / max 1.52 — the trigger
+that never fired in the 2026-07-24 ablation now engages. That run also reports
+ANEES 19.7 against an expectation of 3, so the overconfidence is now a measured
+number rather than an inference.

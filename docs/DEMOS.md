@@ -169,9 +169,15 @@ ros2 launch bringup demo.launch.py slam:=slam mode:=frontier mapper:=tsdf \
 `revisit:=true` is the default for `slam:=slam mode:=frontier`. It suspends
 exploration, selects a previously mapped keyframe likely to form a loop, and
 uses the normal A* path planner to return to it when pose uncertainty
-(D-optimality) exceeds the threshold. It resumes only after a loop closure,
+exceeds what the mission allows. The trigger is the ratio
+`U_r = D(Σ)/D(Σ_allow)` of Suresh et al. (2020) eq. 5, so the threshold is
+stated as an allowable covariance in metres and radians
+(`sigma_allow_xy_m`, `sigma_allow_yaw_rad`) rather than as a bare determinant.
+`D(Σ)` is scored over the drifting DoF only — x, y and heading — since depth,
+pitch and roll are directly observed. It resumes only after a loop closure,
 reduced uncertainty, timeout, or sterile arrival; use `revisit:=false` to
-disable it. Force it early: `ros2 param set /revisit_planner dopt_trigger 0.002`.
+disable it. Force it early by tightening the allowance:
+`ros2 param set /revisit_planner sigma_allow_xy_m 0.02`.
 
 ## 10. Belief-map rebuild after large closures
 

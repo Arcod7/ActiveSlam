@@ -10,8 +10,10 @@ declared arguments without a terminal. Pure standard library.
 # change can be pushed with `ros2 param set` instead of restarting the group.
 # (node basename, node parameter name)
 LIVE = {
-    "dopt_trigger":               ("revisit_planner", "dopt_trigger"),
-    "dopt_resume":                ("revisit_planner", "dopt_resume"),
+    "sigma_allow_xy_m":           ("revisit_planner", "sigma_allow_xy_m"),
+    "sigma_allow_yaw_rad":        ("revisit_planner", "sigma_allow_yaw_rad"),
+    "ratio_trigger":              ("revisit_planner", "ratio_trigger"),
+    "ratio_resume":               ("revisit_planner", "ratio_resume"),
     "wall_standoff":             ("wall_looking", "standoff_m"),
     "wall_switch_goal_distance": ("wall_looking", "switch_goal_distance_m"),
     "wall_switch_scan_angle":    ("wall_looking", "switch_scan_angle_rad"),
@@ -331,19 +333,32 @@ PARAMS = [
           "revisit interrupts the run to the target point and the launcher "
           "resends the point once the detour finishes.",
           visible=lambda v: _slam(v) and _planner(v)),
-    Param("dopt_trigger", "D-opt trigger threshold", "float", 0.02, "slam",
-          "D-optimality [det(cov_pos)^(1/3)] level that suspends the current "
-          "goal and drives back to close a loop. Lower triggers revisit sooner "
-          "(more cautious); higher lets more drift accumulate before "
-          "correcting. Shown next to the live d-opt reading on the right. "
+    Param("sigma_allow_xy_m", "Allowable XY sigma", "float", 0.045, "slam",
+          "Largest horizontal position uncertainty the mission tolerates, in "
+          "metres. With the yaw sigma it defines D(Sigma_allow), the level the "
+          "live D-optimality is divided by to get the trigger ratio. Set it "
+          "from what the mission actually needs, not from the raw D-opt scale. "
           "Live-tunable while running.",
-          advanced=True, step=0.005, lo=0.0, hi=1.0,
+          advanced=True, step=0.01, lo=0.001, hi=5.0,
           visible=lambda v: _slam(v) and _planner(v) and v["revisit"]),
-    Param("dopt_resume", "D-opt resume threshold", "float", 0.01, "slam",
-          "D-optimality level below which the run resumes after a revisit. "
-          "Must stay below the trigger threshold or revisit will not exit. "
+    Param("sigma_allow_yaw_rad", "Allowable yaw sigma", "float", 0.045, "slam",
+          "Largest heading uncertainty the mission tolerates, in radians. "
           "Live-tunable while running.",
-          advanced=True, step=0.005, lo=0.0, hi=1.0,
+          advanced=True, step=0.01, lo=0.001, hi=3.0,
+          visible=lambda v: _slam(v) and _planner(v) and v["revisit"]),
+    Param("ratio_trigger", "Revisit trigger ratio", "float", 1.0, "slam",
+          "Uncertainty ratio U_r = D(Sigma)/D(Sigma_allow) that suspends the "
+          "current goal and drives back to close a loop. 1.0 means revisit "
+          "exactly when the estimate is less certain than the mission allows; "
+          "lower is more cautious. Shown next to the live ratio on the right. "
+          "Live-tunable while running.",
+          advanced=True, step=0.1, lo=0.0, hi=20.0,
+          visible=lambda v: _slam(v) and _planner(v) and v["revisit"]),
+    Param("ratio_resume", "Revisit resume ratio", "float", 0.5, "slam",
+          "Uncertainty ratio below which the run resumes after a revisit. "
+          "Must stay below the trigger ratio or revisit will not exit. "
+          "Live-tunable while running.",
+          advanced=True, step=0.1, lo=0.0, hi=20.0,
           visible=lambda v: _slam(v) and _planner(v) and v["revisit"]),
     Param("map_rebuild", "Rebuild map on closure", "bool", False, "slam",
           "After a large loop closure, reset the TSDF and re-integrate every "
@@ -499,8 +514,8 @@ PRESETS = [
 ]
 
 TELEOP_KEYS = {
-    "qwerty": "W/S fwd/back  Q/E strafe  A/D yaw  Space/X up/down  F stop",
-    "azerty": "Z/S fwd/back  A/E strafe  Q/D yaw  Space/X up/down  F stop",
+    "qwerty": "W/S fwd/back  Q/E strafe  A/D yaw  Z/X up/down  F stop",
+    "azerty": "Z/S fwd/back  A/E strafe  Q/D yaw  W/X up/down  F stop",
 }
 # goto mode: the same cluster moves the target point instead of the vehicle,
 # but along world axes (a point has no heading).

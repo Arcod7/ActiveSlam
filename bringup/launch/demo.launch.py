@@ -279,17 +279,29 @@ def generate_launch_description():
         "SLAM frontier run; suspends exploration to revisit mapped areas when "
         "D-optimality exceeds a threshold (set false to disable).",
     )
-    dopt_trigger_arg = DeclareLaunchArgument(
-        "dopt_trigger",
-        default_value="0.02",
-        description="revisit:=true: D-optimality [det(cov_pos)^(1/3)] threshold that "
-        "suspends exploration and drives back to close a loop.",
+    sigma_allow_xy_arg = DeclareLaunchArgument(
+        "sigma_allow_xy_m",
+        default_value="0.045",
+        description="revisit:=true: largest horizontal position sigma the mission "
+        "tolerates, in metres. With sigma_allow_yaw_rad it sets D(Sigma_allow), the "
+        "denominator of the revisit trigger ratio.",
     )
-    dopt_resume_arg = DeclareLaunchArgument(
-        "dopt_resume",
-        default_value="0.01",
-        description="revisit:=true: D-optimality threshold below which exploration "
-        "resumes after a revisit.",
+    sigma_allow_yaw_arg = DeclareLaunchArgument(
+        "sigma_allow_yaw_rad",
+        default_value="0.045",
+        description="revisit:=true: largest heading sigma the mission tolerates, in radians.",
+    )
+    ratio_trigger_arg = DeclareLaunchArgument(
+        "ratio_trigger",
+        default_value="1.0",
+        description="revisit:=true: uncertainty ratio U_r = D(Sigma)/D(Sigma_allow) above "
+        "which exploration is suspended to drive back and close a loop.",
+    )
+    ratio_resume_arg = DeclareLaunchArgument(
+        "ratio_resume",
+        default_value="0.5",
+        description="revisit:=true: uncertainty ratio below which exploration resumes "
+        "after a revisit.",
     )
     scenario_arg = DeclareLaunchArgument(
         "scenario",
@@ -561,8 +573,10 @@ def generate_launch_description():
                     "' == 'slam' else 'false'",
                 ]
             ),
-            "dopt_trigger": LaunchConfiguration("dopt_trigger"),
-            "dopt_resume": LaunchConfiguration("dopt_resume"),
+            "sigma_allow_xy_m": LaunchConfiguration("sigma_allow_xy_m"),
+            "sigma_allow_yaw_rad": LaunchConfiguration("sigma_allow_yaw_rad"),
+            "ratio_trigger": LaunchConfiguration("ratio_trigger"),
+            "ratio_resume": LaunchConfiguration("ratio_resume"),
             "scenario": LaunchConfiguration("scenario"),
             "scenario_out_dx": LaunchConfiguration("scenario_out_dx"),
             "scenario_out_dy": LaunchConfiguration("scenario_out_dy"),
@@ -806,8 +820,10 @@ def generate_launch_description():
             carve_no_return_arg,
             output_dir_arg,
             revisit_arg,
-            dopt_trigger_arg,
-            dopt_resume_arg,
+            sigma_allow_xy_arg,
+            sigma_allow_yaw_arg,
+            ratio_trigger_arg,
+            ratio_resume_arg,
             scenario_arg,
             scenario_out_dx_arg,
             scenario_out_dy_arg,

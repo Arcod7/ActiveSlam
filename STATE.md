@@ -210,8 +210,10 @@ published used `ideal`, so no quoted numbers are affected. Override with `noise_
 every tick, so `ros2 param set` takes effect without a restart)
 | Parameter | Value | Purpose |
 |---|---|---|
-| `dopt_trigger` * | 0.02 | D-optimality above this → suspend + revisit (~p95 of the Phase 19 baseline; median 0.009) |
-| `dopt_resume` * | 0.01 | D-optimality below this while revisiting → cooldown |
+| `sigma_allow_xy_m` * | 0.045 | Largest horizontal position sigma the mission tolerates |
+| `sigma_allow_yaw_rad` * | 0.045 | Largest heading sigma the mission tolerates |
+| `ratio_trigger` * | 1.0 | `U_r = D(Σ)/D(Σ_allow)` above this → suspend + revisit (Suresh et al. 2020 eq. 5) |
+| `ratio_resume` * | 0.5 | `U_r` below this while revisiting → cooldown |
 | `min_keyframes` | 15 | Minimum keyframe count before a revisit can trigger |
 | `min_index_gap` | 10 | Candidate keyframes must be at least this many indices old |
 | `candidate_radius_m` | 5.0 | Neighbourhood radius used to score candidate density |
