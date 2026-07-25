@@ -3,9 +3,8 @@
 
 #include "motion_safety_rviz/motion_safety_panel.hpp"
 
-#include <QFont>
+#include <QHBoxLayout>
 #include <QMessageBox>
-#include <QVBoxLayout>
 
 #include <pluginlib/class_list_macros.hpp>
 #include <rviz_common/display_context.hpp>
@@ -26,48 +25,38 @@ MotionSafetyPanel::MotionSafetyPanel(QWidget * parent)
   enable_button_(new QPushButton("ENABLE MOTION", this)),
   disable_button_(new QPushButton("DISABLE NOW", this))
 {
-  auto * title = new QLabel("ROS Motion Safety Gate", this);
-  QFont title_font = title->font();
-  title_font.setBold(true);
-  title->setFont(title_font);
-
   status_label_->setAlignment(Qt::AlignCenter);
   status_label_->setObjectName("motion_status_label");
+  status_label_->setMinimumHeight(28);
   status_label_->setWordWrap(true);
-  status_label_->setMinimumHeight(48);
+  status_label_->setMinimumWidth(210);  // keeps the longest status on one line
+  status_label_->setToolTip("Status: /motion/safety_status");
   status_label_->setStyleSheet(
-    "QLabel { background: #555; color: white; padding: 8px; font-weight: bold; }");
+    "QLabel { background: #555; color: white; padding: 4px 8px; font-weight: bold; }");
 
   enable_button_->setObjectName("enable_motion_button");
   enable_button_->setEnabled(false);
-  enable_button_->setMinimumHeight(42);
+  enable_button_->setMinimumHeight(28);
+  // Safety wording lives in the enable confirmation dialog, not on the panel.
+  enable_button_->setToolTip(
+    "Opens the ROS command gate (publishes /motion/enable). Does not arm ArduSub — "
+    "keep the hardware kill switch and a manual pilot ready.");
   enable_button_->setStyleSheet(
-    "QPushButton { background: #287a38; color: white; font-weight: bold; }"
+    "QPushButton { background: #287a38; color: white; font-weight: bold; padding: 4px 10px; }"
     "QPushButton:disabled { background: #555; color: #aaa; }");
 
   disable_button_->setObjectName("disable_motion_button");
-  disable_button_->setMinimumHeight(42);
+  disable_button_->setMinimumHeight(28);
+  disable_button_->setToolTip("Closes the ROS command gate. Does not disarm ArduSub.");
   disable_button_->setStyleSheet(
-    "QPushButton { background: #a62222; color: white; font-weight: bold; }");
+    "QPushButton { background: #a62222; color: white; font-weight: bold; padding: 4px 10px; }");
 
-  auto * warning = new QLabel(
-    "This controls only the ROS command gate. It does not arm or disarm ArduSub. "
-    "Keep the hardware kill switch and a manual pilot ready.", this);
-  warning->setWordWrap(true);
-
-  auto * topics = new QLabel(
-    "Enable: /motion/enable\nStatus: /motion/safety_status", this);
-  topics->setWordWrap(true);
-  topics->setStyleSheet("QLabel { color: #888; font-size: 9pt; }");
-
-  auto * layout = new QVBoxLayout;
-  layout->addWidget(title);
-  layout->addWidget(status_label_);
+  auto * layout = new QHBoxLayout;
+  layout->setContentsMargins(4, 4, 4, 4);
+  layout->setSpacing(4);
+  layout->addWidget(status_label_, 1);
   layout->addWidget(enable_button_);
   layout->addWidget(disable_button_);
-  layout->addWidget(warning);
-  layout->addWidget(topics);
-  layout->addStretch();
   setLayout(layout);
 
   connect(enable_button_, &QPushButton::clicked, this, &MotionSafetyPanel::requestEnable);
@@ -129,7 +118,7 @@ void MotionSafetyPanel::requestEnable()
   enable_button_->setEnabled(false);
   status_label_->setText("ENABLE REQUESTED — WAITING FOR GATE");
   status_label_->setStyleSheet(
-    "QLabel { background: #9a6800; color: white; padding: 8px; font-weight: bold; }");
+    "QLabel { background: #9a6800; color: white; padding: 4px 8px; font-weight: bold; }");
 }
 
 void MotionSafetyPanel::requestDisable()
@@ -140,7 +129,7 @@ void MotionSafetyPanel::requestDisable()
   enable_button_->setEnabled(false);
   status_label_->setText("DISABLE REQUESTED");
   status_label_->setStyleSheet(
-    "QLabel { background: #a62222; color: white; padding: 8px; font-weight: bold; }");
+    "QLabel { background: #a62222; color: white; padding: 4px 8px; font-weight: bold; }");
 }
 
 void MotionSafetyPanel::updateStatus(const QString & status)
@@ -150,14 +139,14 @@ void MotionSafetyPanel::updateStatus(const QString & status)
   if (status == "ACTIVE") {
     enable_button_->setEnabled(false);
     status_label_->setStyleSheet(
-      "QLabel { background: #287a38; color: white; padding: 8px; font-weight: bold; }");
+      "QLabel { background: #287a38; color: white; padding: 4px 8px; font-weight: bold; }");
     return;
   }
 
   if (status == "DISABLED") {
     enable_button_->setEnabled(enable_publisher_ != nullptr);
     status_label_->setStyleSheet(
-      "QLabel { background: #555; color: white; padding: 8px; font-weight: bold; }");
+      "QLabel { background: #555; color: white; padding: 4px 8px; font-weight: bold; }");
     return;
   }
 
@@ -165,7 +154,7 @@ void MotionSafetyPanel::updateStatus(const QString & status)
   // first and wait for DISABLED before another enable attempt.
   enable_button_->setEnabled(false);
   status_label_->setStyleSheet(
-    "QLabel { background: #9a6800; color: white; padding: 8px; font-weight: bold; }");
+    "QLabel { background: #9a6800; color: white; padding: 4px 8px; font-weight: bold; }");
 }
 
 bool MotionSafetyPanel::publishEnable(bool enabled)
@@ -186,7 +175,7 @@ void MotionSafetyPanel::showUnavailable(const QString & reason)
   enable_button_->setEnabled(false);
   status_label_->setText(reason);
   status_label_->setStyleSheet(
-    "QLabel { background: #a62222; color: white; padding: 8px; font-weight: bold; }");
+    "QLabel { background: #a62222; color: white; padding: 4px 8px; font-weight: bold; }");
 }
 
 }  // namespace motion_safety_rviz
