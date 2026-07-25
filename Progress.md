@@ -2097,3 +2097,68 @@ One coupling this introduces: a 1.0 m hard radius means a frontier goal placed
 1.0 m off a surface lands exactly on the blocked boundary and A* can never
 reach it. `tsdf_frontier_standoff_m` must now be >= 2.0; batches that pin it
 lower will stall.
+
+## Phase 51 — What loop closure and revisit are each worth on the shipwreck
+
+Three arms — `nolc` (open loop), `lc` (passive loop closure), `lc_revisit`
+(closure plus uncertainty-triggered revisit) — 4 seeds each, 20 min per run, on
+the shipwreck scene, under the corrected yaw prior of Phase 49 and the safety
+margins of Phase 50.
+
+**Raw ATE is not comparable across these runs.** Path lengths differ by 4x
+(171 m to 710 m), because a run that spends its time in emergency stop near
+structure both travels less and drifts less. Scoring ATE per metre travelled is
+what makes the arms comparable; the raw figures are kept alongside.
+
+```
+arm             seed   path m   ATE m  drift %/m    ANEES     LCs
+nolc             101      710   2.335      0.329    219.7       0
+nolc             102      608   1.194      0.197     69.0       0
+nolc             103      264   0.335      0.127      4.5       0
+nolc             104      171   0.989      0.579     34.6       0
+lc               101      499   0.235      0.047     31.6   16678
+lc               102      432   0.119      0.028     12.1   17091
+lc               103      408   0.645      0.158    226.1    7822
+lc               104      218   0.676      0.310     15.4     141
+lc_revisit       101      479   0.261      0.054     15.1   21478
+lc_revisit       102      489   0.247      0.051     13.0    4797
+lc_revisit       103      272   0.164      0.060     10.2    6783
+lc_revisit       104      436   0.905      0.208     47.7    1946
+```
+
+**Loop closure is worth a median 66% of the drift rate** (mean 48%), 0.308 ->
+0.136 %/m, improving 3 of 4 seeds. That is consistent with the ~64% measured on
+the 2026-07-24 off-shore-station ablation, on a different and larger scene.
+
+**Revisit adds no measurable drift reduction on top of it.** `lc -> lc_revisit`
+is a median +8.7% / mean -1.1% on drift rate and a median -22.5% on raw ATE,
+improving 2 of 4 seeds. With n=4 and this much seed variance the difference is
+not distinguishable from zero in either direction, and it should not be reported
+as a benefit.
+
+Two things survive that null result and are worth keeping.
+
+*It fires now, and it fires selectively.* Revisit triggered 3-5 times per run
+with `U_r` median 0.21-0.70 and max 1.45-2.05 against a threshold of 1. In the
+2026-07-24 ablation it never fired at all because `dopt_trigger` sat ~6x above
+anything the estimator reported. The Phase 48 ratio formulation plus a
+`sigma_allow` set from this scene's measured D-opt p75 is what changed that.
+
+*It repairs the failure case.* Seed 103 is where passive closure went wrong —
+ATE 0.645 m with ANEES 226, the signature of bad closures warping the graph
+rather than of closures not firing. Revisit took that seed to ATE 0.164 m and
+ANEES 10.2, a 74.6% improvement, the one seed where it clearly helped. Across
+the arm, ANEES improves 71.3 -> 21.5 on average. And `lc_revisit` is the only
+arm that beat the open-loop baseline on *every* seed (4/4, median 69.2%), where
+plain closure lost on one.
+
+So the defensible claim is that revisit buys covariance calibration and
+worst-case robustness, not average accuracy. Establishing whether the
+worst-case effect is real needs more seeds than four.
+
+**Consistency, unresolved.** NIS medians sit at 0.9-1.7 against a chi-square
+expectation of 6, and normalised graph chi-square at 0.06-0.22 against 1. The
+relative noise models are too loose while the absolute marginal is still
+optimistic on the high-drift seeds (ANEES tracks ATE across all 12 runs). Phase
+49 removed the yaw component of that; what remains is the odometry sigma, a
+hand-set constant that cannot represent accumulating DVL scale and bias error.
