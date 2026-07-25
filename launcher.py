@@ -1281,6 +1281,13 @@ def control_screen(stdscr, sup, values, link, session):
         """
         merged = dict(values)
         merged.update(saved_robot_pose)
+        # The SLAM group is the exception: its dead reckoning integrates X/Y
+        # from wherever it is told to start, so a mid-run restart has to be
+        # seeded from the live pose or it re-anchors the world frame at spawn.
+        # Not in any group's `depends`, so it never reads as a pending restart.
+        live = link.robot_pose or saved_robot_pose
+        merged["slam_seed_x"] = live["robot_x"]
+        merged["slam_seed_y"] = live["robot_y"]
         return merged
 
     def save_config():
@@ -1848,8 +1855,12 @@ def control_screen(stdscr, sup, values, link, session):
                 ok, msg = link.respawn(name, xyz, rpy)
                 time.sleep(1.0)   # let the physics settle before mapping resumes
                 draw_busy(stdscr, "Reset: restarting mapper/SLAM/planner...")
+                # Snapshot the launch pose, not the odometry readback: the
+                # settled pose is never exactly the commanded one, and a
+                # snapshot that misses it reads as a pending restart forever.
+                restart_values = launch_values()
                 for gid in [g for g in core.GROUP_ORDER if g in stateful]:
-                    sup.start(gid, values)
+                    sup.start(gid, restart_values)
                 if was_armed:
                     draw_busy(stdscr, "Reset: re-arming motion...")
                     link.set_enabled(True, timeout=8.0)
@@ -1905,9 +1916,15 @@ def control_screen(stdscr, sup, values, link, session):
             if was_armed and regated:
                 draw_busy(stdscr, "Re-arming motion...")
                 link.set_enabled(True, timeout=8.0)
+            # Re-seeding from ground truth zeroes the drift the run had already
+            # accumulated, so ATE either side of this is not one trajectory.
+            reseeded = "slam" in restarted
             set_status("Applied" + (f" — (re)started: {', '.join(changed)}" if changed
                                     else " — no changes")
-                       + (" — motion re-armed" if was_armed and regated else ""), C_OK)
+                       + (" — motion re-armed" if was_armed and regated else "")
+                       + (" — SLAM re-seeded at the live pose, drift reset"
+                          if reseeded else ""),
+                       C_WARN if reseeded else C_OK)
         elif key == 27:
             # Esc peels off one layer at a time: the frontier takeover first,
             # then the screen itself. (q/Q is a drive key.)

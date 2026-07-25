@@ -30,7 +30,9 @@ GROUP_ORDER = ["core", "tf", "cloud", "mapper", "gt_map", "slam", "eval",
 
 # Groups that accumulate state across a run (maps, pose graph, eval output,
 # planner blacklists). A reset restarts exactly these; the simulator, TF, point
-# cloud and RViz are stateless in this sense and stay up.
+# cloud and RViz are stateless in this sense and stay up. A SLAM restart drags
+# the whole set with it too — it re-seeds the world frame the others hold state
+# in (see plan()).
 STATEFUL_GROUPS = ["mapper", "gt_map", "slam", "eval", "planner"]
 
 DEFAULT_SPAWN = ("bluerov2", (0.0, 0.0, 8.0), (0.0, 0.0, 0.0))
@@ -204,8 +206,10 @@ def build_groups(bringup_share=""):
                  f"loop_closure:={'true' if v['loop_closure'] else 'false'}",
                  f"noise_seed:={v['noise_seed']}",
                  f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}",
-                 f"initial_x:={v['robot_x']}",
-                 f"initial_y:={v['robot_y']}"]]
+                 # Seeded where the vehicle is now, not at the spawn pose — a
+                 # restart mid-run would otherwise re-anchor X/Y at the origin.
+                 f"initial_x:={v.get('slam_seed_x', v['robot_x'])}",
+                 f"initial_y:={v.get('slam_seed_y', v['robot_y'])}"]]
 
     def evaluation(v):
         cmd = ["ros2", "launch", "eval_tools", "eval.launch.py",
@@ -759,6 +763,11 @@ class Supervisor:
             if (group and gid in running and old is not None
                     and pid in group.depends and old.get(pid) != values.get(pid)):
                 actions[gid] = "restart"
+        # Mirror plan()'s cascade so the row hint promises what apply() does.
+        if actions.get("slam") == "restart":
+            for gid in STATEFUL_GROUPS:
+                if gid in running:
+                    actions[gid] = "restart"
         # Visibility: compare against the same values with this one parameter put
         # back to what the stack was started with, so only its own effect shows.
         base = self.applied.get("core")
@@ -785,6 +794,12 @@ class Supervisor:
         to_stop = [g for g in GROUP_ORDER if g in running and g not in wanted]
         to_start = [g for g in wanted if g not in running]
         to_restart = [g for g in wanted if g in running and self.needs_restart(g, values)]
+        # A re-seeded SLAM moves the world frame, so nothing may keep state in
+        # the old one — the map would be stitched across two origins.
+        if "slam" in to_restart:
+            to_restart = [g for g in GROUP_ORDER
+                          if g in to_restart or (g in STATEFUL_GROUPS
+                                                 and g in wanted and g in running)]
         return to_stop, to_start, to_restart
 
     def apply(self, values, on_event=None):
