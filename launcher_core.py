@@ -671,6 +671,38 @@ class Supervisor:
             return False
         return any(old.get(k) != values.get(k) for k in self.groups[gid].depends)
 
+    def pending_for(self, pid, values):
+        """Groups a single edited parameter would restart, start or stop.
+
+        Returns [(gid, action)] so the change can be flagged on the option's own
+        row instead of only in a footer summary.
+        """
+        actions = {}
+        running = set(self.running_ids())
+        for gid in GROUP_ORDER:
+            group = self.groups.get(gid)
+            old = self.applied.get(gid)
+            if (group and gid in running and old is not None
+                    and pid in group.depends and old.get(pid) != values.get(pid)):
+                actions[gid] = "restart"
+        # Visibility: compare against the same values with this one parameter put
+        # back to what the stack was started with, so only its own effect shows.
+        base = self.applied.get("core")
+        if base is not None and pid in base and base[pid] != values.get(pid):
+            reverted = dict(values)
+            reverted[pid] = base[pid]
+            for gid in GROUP_ORDER:
+                group = self.groups.get(gid)
+                if not group:
+                    continue
+                # A group appearing or disappearing outranks a restart — that is
+                # what apply() would do with it.
+                if group.visible(values) and not group.visible(reverted) and gid not in running:
+                    actions[gid] = "start"
+                elif group.visible(reverted) and not group.visible(values) and gid in running:
+                    actions[gid] = "stop"
+        return [(gid, actions[gid]) for gid in GROUP_ORDER if gid in actions]
+
     def plan(self, values):
         """(to_stop, to_start, to_restart) for the requested configuration."""
         wanted = [gid for gid in GROUP_ORDER
