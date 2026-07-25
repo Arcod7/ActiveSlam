@@ -295,7 +295,7 @@ PARAMS = [
           advanced=True, step=0.05, lo=0.0,
           visible=_frontier),
 
-    Param("noise_profile", "Noise profile", "enum", "realistic", "slam",
+    Param("noise_profile", "Noise profile (all sensors)", "enum", "realistic", "slam",
           "Which sensor error model feeds the pose graph and the sonar. Also "
           "drives the noise applied to /cloud_in.",
           ["realistic", "ideal", "sonar_only", "odom_pos_only", "odom_only", "degraded"],
@@ -306,6 +306,51 @@ PARAMS = [
            "odom_only": "Ground-truth sonar, realistic nav sensors.",
            "degraded": "Worst case — stresses loop closure and revisit."},
           visible=_slam),
+    Param("noise_profile_sonar", "  Sonar profile", "enum", "inherit", "slam",
+          "Override the noise profile for the sonar sensor alone — this is the "
+          "map/range error knob. Each sim node reads only its own YAML section, so "
+          "isolating one error source needs no merged profile. "
+          "inherit = follow the master profile above.",
+          ["inherit", "realistic", "ideal", "sonar_only", "odom_pos_only",
+           "odom_only", "degraded"],
+          {"inherit": "Follow the master Noise profile."},
+          advanced=True, visible=_slam),
+    Param("noise_profile_dvl", "  DVL profile", "enum", "inherit", "slam",
+          "Override the noise profile for the dvl sensor alone — this is the "
+          "position drift knob. Each sim node reads only its own YAML section, so "
+          "isolating one error source needs no merged profile. "
+          "inherit = follow the master profile above.",
+          ["inherit", "realistic", "ideal", "sonar_only", "odom_pos_only",
+           "odom_only", "degraded"],
+          {"inherit": "Follow the master Noise profile."},
+          advanced=True, visible=_slam),
+    Param("noise_profile_imu", "  IMU profile", "enum", "inherit", "slam",
+          "Override the noise profile for the imu sensor alone — this is the "
+          "angular error (roll/pitch/yaw rate) knob. Each sim node reads only its own YAML section, so "
+          "isolating one error source needs no merged profile. "
+          "inherit = follow the master profile above.",
+          ["inherit", "realistic", "ideal", "sonar_only", "odom_pos_only",
+           "odom_only", "degraded"],
+          {"inherit": "Follow the master Noise profile."},
+          advanced=True, visible=_slam),
+    Param("noise_profile_compass", "  Compass profile", "enum", "inherit", "slam",
+          "Override the noise profile for the compass sensor alone — this is the "
+          "angular error (absolute heading) knob. Each sim node reads only its own YAML section, so "
+          "isolating one error source needs no merged profile. "
+          "inherit = follow the master profile above.",
+          ["inherit", "realistic", "ideal", "sonar_only", "odom_pos_only",
+           "odom_only", "degraded"],
+          {"inherit": "Follow the master Noise profile."},
+          advanced=True, visible=_slam),
+    Param("noise_profile_pressure", "  Pressure profile", "enum", "inherit", "slam",
+          "Override the noise profile for the pressure sensor alone — this is the "
+          "depth error knob. Each sim node reads only its own YAML section, so "
+          "isolating one error source needs no merged profile. "
+          "inherit = follow the master profile above.",
+          ["inherit", "realistic", "ideal", "sonar_only", "odom_pos_only",
+           "odom_only", "degraded"],
+          {"inherit": "Follow the master Noise profile."},
+          advanced=True, visible=_slam),
     Param("noise_attenuation", "Noise Attenuation", "enum", "none", "slam",
           "Post-filter applied over any noise profile. cut_close drops sonar "
           "returns nearer than ~1.6 m, clearing the near-field volume-"

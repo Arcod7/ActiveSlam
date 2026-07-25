@@ -46,6 +46,14 @@ def generate_launch_description():
     )
 
     pkg_share = FindPackageShare('slam_backend')
+    per_sensor_args = [
+        DeclareLaunchArgument(
+            f'noise_profile_{name}',
+            default_value=LaunchConfiguration('noise_profile'),
+            description=f'Noise profile for {name} only (default: noise_profile)')
+        for name in ('pressure', 'imu', 'compass', 'dvl')
+    ]
+
     noise_file = PathJoinSubstitution([
         pkg_share, 'config',
         ['noise_', LaunchConfiguration('noise_profile'), '.yaml']
@@ -58,6 +66,8 @@ def generate_launch_description():
         ),
         launch_arguments={
             'noise_profile': LaunchConfiguration('noise_profile'),
+            **{f'noise_profile_{n}': LaunchConfiguration(f'noise_profile_{n}')
+               for n in ('pressure', 'imu', 'compass', 'dvl')},
             'noise_seed': LaunchConfiguration('noise_seed'),
             'initial_x': LaunchConfiguration('initial_x'),
             'initial_y': LaunchConfiguration('initial_y'),
@@ -78,6 +88,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         noise_profile_arg, loop_closure_arg, noise_seed_arg, map_rebuild_arg,
+        *per_sensor_args,
         initial_x_arg, initial_y_arg,
         sensors,
         pose_graph_node,

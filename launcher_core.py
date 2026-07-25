@@ -138,6 +138,7 @@ def build_groups(bringup_share=""):
                  "pointcloud_only.launch.py",
                  f"sonar_noise:={noise}",
                  f"noise_profile:={v['noise_profile']}",
+                 *_sensor_profiles(v, ("sonar",)),
                  f"noise_seed:={v['noise_seed']}",
                  f"near_cutoff:={cut}"]]
 
@@ -162,9 +163,16 @@ def build_groups(bringup_share=""):
         return [["ros2", "launch", "stonefish_groundtruth_mapping",
                  "gt_map.launch.py", f"mapper:={v['mapper']}"]]
 
+    def _sensor_profiles(v, names):
+        """Only pass an override that is actually set; 'inherit' means the
+        launch file's own default, which is the master profile."""
+        return [f"noise_profile_{n}:={v[f'noise_profile_{n}']}" for n in names
+                if v.get(f"noise_profile_{n}", "inherit") != "inherit"]
+
     def slam(v):
         return [["ros2", "launch", "slam_backend", "slam.launch.py",
                  f"noise_profile:={v['noise_profile']}",
+                 *_sensor_profiles(v, ("pressure", "imu", "compass", "dvl")),
                  f"loop_closure:={'true' if v['loop_closure'] else 'false'}",
                  f"noise_seed:={v['noise_seed']}",
                  f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}",
@@ -246,8 +254,9 @@ def build_groups(bringup_share=""):
               "depth_image_proc turns the depth image into /cloud_in. Under "
               "slam:=slam a datasheet-grounded WaterLinked Sonar 3D-15 noise "
               "model is spliced in ahead of every consumer.",
-              cloud, depends=["slam", "noise_profile", "noise_seed",
-                              "noise_attenuation", "near_cutoff_m"]),
+              cloud, depends=["slam", "noise_profile", "noise_profile_sonar",
+                              "noise_seed", "noise_attenuation",
+                              "near_cutoff_m"]),
         Group("mapper", "Map backend",
               "OctoMap occupancy grid or VDBFusion TSDF. Consumes /cloud_in "
               "only, so the backend can be swapped without touching the sim.",
@@ -260,7 +269,9 @@ def build_groups(bringup_share=""):
         Group("slam", "SLAM backend (GTSAM)",
               "Simulated pressure/IMU/DVL sensors, dead-reckoning fusion and a "
               "GTSAM iSAM2 pose graph with loop closure.",
-              slam, depends=["noise_profile", "loop_closure", "noise_seed",
+              slam, depends=["noise_profile", "noise_profile_pressure",
+                             "noise_profile_imu", "noise_profile_compass",
+                             "noise_profile_dvl", "loop_closure", "noise_seed",
                              "map_rebuild", "robot_x", "robot_y"], visible=is_slam),
         Group("eval", "Benchmark + eval",
               "ATE/RPE against ground truth, TUM trajectory export and map "

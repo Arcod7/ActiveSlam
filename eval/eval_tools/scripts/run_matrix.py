@@ -48,6 +48,8 @@ DEFAULT_BATCH_ROOT = os.path.join(REPO_ROOT, 'eval', 'runs')
 # demo.launch.py arguments the matrix is allowed to set (bringup/launch/demo.launch.py).
 VALID_KEYS = {
     'slam', 'mode', 'motion', 'mapper', 'noise_profile', 'loop_closure',
+    'noise_profile_pressure', 'noise_profile_imu', 'noise_profile_compass',
+    'noise_profile_dvl', 'noise_profile_sonar',
     'map_rebuild', 'rviz', 'revisit', 'scenario', 'scenario_out_dx', 'scenario_out_dy',
     'mission_waypoints', 'mission_loop',
     # The motion gate is fail-closed (safety_gate.py start_enabled=False) and
@@ -59,7 +61,8 @@ VALID_KEYS = {
     'robot_x', 'robot_y', 'robot_z', 'robot_roll', 'robot_pitch', 'robot_yaw', 'depth',
     # Motion tuning and the revisit trigger, so a batch can pin the same demo
     # config an interactive session was tuned to.
-    'speed_factor', 'turn_factor', 'sigma_allow_xy_m', 'sigma_allow_yaw_rad',
+    'speed_factor', 'turn_factor', 'thrust_boost',
+    'sigma_allow_xy_m', 'sigma_allow_yaw_rad',
     'ratio_trigger', 'ratio_resume',
     'wall_orientation_offset_deg', 'wall_orientation_lookahead_m',
     'tsdf_frontier_standoff_m',

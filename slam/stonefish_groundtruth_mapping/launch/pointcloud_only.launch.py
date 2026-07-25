@@ -48,6 +48,11 @@ def generate_launch_description():
         'noise_profile', default_value='realistic',
         description='Noise profile for sonar_noise (ideal, sonar_only, odom_pos_only, odom_only, realistic, degraded)',
     )
+    noise_profile_sonar_arg = DeclareLaunchArgument(
+        'noise_profile_sonar',
+        default_value=LaunchConfiguration('noise_profile'),
+        description='Noise profile for the sonar only (default: noise_profile)',
+    )
     noise_seed_arg = DeclareLaunchArgument(
         'noise_seed', default_value='-1',
         description='Override the noise profile seed (-1 = use the profile default)',
@@ -96,9 +101,10 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Sonar reads only the `sonar:` section, so it can follow its own profile.
     noise_file = PathJoinSubstitution([
         FindPackageShare('slam_backend'), 'config',
-        ['noise_', LaunchConfiguration('noise_profile'), '.yaml'],
+        ['noise_', LaunchConfiguration('noise_profile_sonar'), '.yaml'],
     ])
 
     sonar_noise_node = Node(
@@ -128,6 +134,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        sonar_noise_arg, noise_profile_arg, noise_seed_arg, near_cutoff_arg,
+        sonar_noise_arg, noise_profile_arg, noise_profile_sonar_arg,
+        noise_seed_arg, near_cutoff_arg,
         depth_to_cloud, sonar_noise_node, range_image_slam, range_image_raw,
     ])

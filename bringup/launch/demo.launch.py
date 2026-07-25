@@ -187,6 +187,24 @@ def generate_launch_description():
         choices=["octomap", "tsdf"],
         description="Map backend: OctoMap occupancy grid or VDBFusion TSDF",
     )
+    per_sensor_noise_args = [
+        DeclareLaunchArgument(
+            f"noise_profile_{name}",
+            default_value=LaunchConfiguration("noise_profile"),
+            description=f"Noise profile for {name} only. Each sim node reads only "
+            "its own YAML section, so this isolates one error source without "
+            "merging files. Defaults to noise_profile.",
+        )
+        for name in ("pressure", "imu", "compass", "dvl", "sonar")
+    ]
+
+    thrust_boost_arg = DeclareLaunchArgument(
+        "thrust_boost",
+        default_value="false",
+        choices=["true", "false"],
+        description="Raise the thruster max_setpoint ceiling 2.5x. Propagates to "
+        "core.launch.py, which re-renders the robot scene.",
+    )
     hard_inflation_arg = DeclareLaunchArgument(
         "hard_inflation_m",
         default_value="1.00",
@@ -628,6 +646,8 @@ def generate_launch_description():
         ),
         launch_arguments={
             "noise_profile": LaunchConfiguration("noise_profile"),
+            **{f"noise_profile_{n}": LaunchConfiguration(f"noise_profile_{n}")
+               for n in ("pressure", "imu", "compass", "dvl")},
             "loop_closure": LaunchConfiguration("loop_closure"),
             "noise_seed": LaunchConfiguration("noise_seed"),
             "map_rebuild": LaunchConfiguration("map_rebuild"),
@@ -806,6 +826,8 @@ def generate_launch_description():
             wall_normal_offset_arg,
             wall_path_heading_weight_arg,
             mapper_arg,
+            *per_sensor_noise_args,
+            thrust_boost_arg,
             hard_inflation_arg,
             inflation_arg,
             plan_inflation_arg,
