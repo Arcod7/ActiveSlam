@@ -228,10 +228,13 @@ rewrote the tracked view — that is why a display ticked on in one session
 came back off in the next. Copy the scratch file back over
 `bringup/rviz/demo.rviz` to keep a change made in a session.
 
-- every mode: `RobotState` (`/motion/robot_marker`) is the vehicle arrow —
-  green while the motion gate is enabled, purple while it is disabled. It
-  comes from `motion_safety_gate`, so it follows the pose the controller acts
-  on. In goto mode the target sphere is purple under the same condition.
+- every mode: `RobotState` (`/motion/robot_marker`) is the vehicle arrow, with
+  the state spelled out on a label above it and on the top row of the Eval HUD
+  panel in the same colour — purple `MOTION DISABLED`, cyan `REVISITING`
+  (`revisit:=true`), white `INITIAL SCAN`, green with the current activity
+  otherwise (`DRIVING TO WAYPOINT`, `SCANNING FOR FRONTIERS`, …). It comes from
+  `motion_safety_gate`, so it follows the pose the controller acts on. In goto
+  mode the target sphere is purple while the gate is disabled.
 
 - default (`mapper:=octomap slam:=none`): `Sonar PointCloud` (`/cloud_in`)
   building the 3-D `Octomap` voxels (`/occupied_cells_vis_array`), plus the
@@ -248,7 +251,7 @@ came back off in the next. Copy the scratch file back over
   paths, a live drift line labelled with the current error in metres
   (`/eval/markers_live`), pose-graph edges, and covariance ellipsoids;
   ATE/RPE/keyframes/loop closures/D-optimality are in the docked Eval HUD
-  panel. A second map built from the exact simulator pose is overlaid against
+  panel, below its state row. A second map built from the exact simulator pose is overlaid against
   the belief map, in a representation that does not hide it:
   `Octopoints_GroundTruth` (green points, `/gt/octomap_point_cloud_centers`)
   against the belief `Octomap` voxels, and `TSDFSurface_GroundTruth` (green,

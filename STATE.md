@@ -42,13 +42,20 @@ other. Enabled by default:
   `TSDFVoxels`. The marker-based `TSDFVoxels_GroundTruth` is present but off.
   Both GT topics only publish under `slam:=slam` — see "Ground-truth
   reference map".
-- `RobotState` (`/motion/robot_marker`) — the vehicle arrow, green while the
-  motion gate is enabled and purple while it is disabled, published by
-  `motion_safety_gate` at its tick rate from the pose it already watches
-  (ground truth under `slam:=none`, `/slam/odometry` under `slam:=slam`). An
-  RViz Odometry display carries a fixed colour, so the old `GroundTruth`
-  arrow could not show gate state and is now off; the launcher's goto-mode
-  target sphere follows the same green/purple rule.
+- `RobotState` (`/motion/robot_marker`) — the vehicle arrow plus a text label
+  above it, both published by `motion_safety_gate` at its tick rate from the
+  pose it already watches (ground truth under `slam:=none`, `/slam/odometry`
+  under `slam:=slam`). One `_marker_state()` resolves label and colour
+  together so they cannot disagree: purple `MOTION DISABLED` (gate state
+  wins), cyan `REVISITING` when `revisit_planner` reports `revisiting` on
+  `/frontier_slam/revisit_state`, white `INITIAL SCAN`, otherwise green with
+  the current `/frontier_slam/activity` spelled out (`DRIVING TO WAYPOINT`,
+  `SCANNING FOR FRONTIERS`, …). Both inputs publish at 1 Hz and are ignored
+  past `marker_state_timeout_s` (3 s), so a stopped planner or executor falls
+  back to green `MOTION ENABLED` instead of latching. An RViz Odometry display
+  carries a fixed colour, so the old `GroundTruth` arrow could not show gate
+  state and is now off; the launcher's goto-mode target sphere follows the
+  same green/purple rule.
 - Ground truth (green) vs SLAM (blue) vs raw dead-reckoning (red) paths,
   pose-graph edges, covariance ellipsoids, and `LiveDrift` — a GT→estimate
   line labelled `error x.xx m`, at 10 Hz off `/slam/odometry`
@@ -56,7 +63,8 @@ other. Enabled by default:
   arrowhead swallowed the shaft. All from `slam:=slam`. The scalar metrics
   (`err`/`ATE`/`RPE` translation+rotation/keyframe count/loop-closure
   count/D-optimality) come from `eval_tools/benchmark.py`'s `/eval/markers`
-  and render in the Eval HUD panel docked at the bottom.
+  and render in the Eval HUD panel docked at the bottom, under a state row
+  that mirrors the `RobotState` label and its colour.
 - One image view, `Sonar DepthMap` (`/cloud_in/range_image`, published in
   every mode), enabled and docked in the saved window state — a second image
   display would tab into the same dock slot where only the front tab renders.
@@ -431,6 +439,9 @@ one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.3
   The blob now carries `Eval HUD` in that slot (the name is a length-prefixed UTF-16BE string
   inside the hex blob, so it is patchable without re-saving from the GUI). Confirmed live: the
   panel docks along the bottom, full width, and shows its placeholder outside `slam:=slam`.
+  The panel now carries two rows: the vehicle state on top — text and colour taken straight off
+  the `motion_state_text` marker on `/motion/robot_marker`, so it cannot drift from the arrow,
+  and it works in every mode, not just `slam:=slam` — over the metrics row.
 - ✅ **Benchmarking switches** (Phase 16): `loop_closure:=false` keeps
   `/slam/loop_closure_count` at 0 (default still closes loops); `noise_seed:=7` reaches all
   four sensor nodes; a forced-threshold live run fired 4 map-rebuild cycles cleanly

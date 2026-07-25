@@ -254,6 +254,7 @@ Visualization Manager:
       Name: RobotState
       Namespaces:
         motion_state: true
+        motion_state_text: true
       Topic:
         Depth: 5
         Durability Policy: Volatile

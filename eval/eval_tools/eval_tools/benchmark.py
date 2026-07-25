@@ -293,15 +293,17 @@ class BenchmarkNode(Node):
         text.pose.position.z = est.pos[2] - 2.0   # NED: -z is up, so this floats above the robot
         text.scale.z = 0.4
         text.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
-        rpe_t_str = f'{rpe_trans:.2f}m' if rpe_trans is not None else 'n/a'
-        rpe_r_str = f'{rpe_rot_deg:.1f}deg' if rpe_rot_deg is not None else 'n/a'
+        rpe_t_str = f'{rpe_trans:.2f} m' if rpe_trans is not None else 'n/a'
+        rpe_r_str = f'{rpe_rot_deg:.1f} deg' if rpe_rot_deg is not None else 'n/a'
         dopt_str = f'{self._latest_dopt:.4f}' if self._latest_dopt is not None else 'n/a'
         anees_str = (f'{np.mean(self._nees_samples):.1f}'
                      if self._nees_samples else 'n/a')
+        # Spaced pipes and spaced units: the HUD panel renders this monospaced.
         text.text = (
-            f'err {abs_error:.2f}m | ATE {ate:.2f}m | RPE {rpe_t_str}/{rpe_r_str}\n'
-            f'KF {self._latest_kf_count} | LC {self._latest_lc_count} | D-opt {dopt_str}'
-            f' | ANEES {anees_str}'
+            f'err {abs_error:.2f} m  |  ATE {ate:.2f} m  |  '
+            f'RPE {rpe_t_str} / {rpe_r_str}\n'
+            f'KF {self._latest_kf_count}  |  LC {self._latest_lc_count}  |  '
+            f'D-opt {dopt_str}  |  ANEES {anees_str}'
         )
         markers.markers.append(text)
 

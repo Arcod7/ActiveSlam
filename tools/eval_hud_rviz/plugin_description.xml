@@ -4,7 +4,8 @@
     type="eval_hud_rviz::EvalHudPanel"
     base_class_type="rviz_common::Panel">
     <description>
-      Live ATE/RPE/D-opt evaluation metrics, docked at the bottom of the window.
+      Vehicle state, colour-matched to the robot arrow, over live ATE/RPE/D-opt
+      evaluation metrics — docked at the bottom of the window.
     </description>
   </class>
 </library>
