@@ -79,7 +79,7 @@ class TimestampBuffer:
 
 
 class BenchmarkNode(Node):
-    LIVE_ARROW_HZ = 10.0   # /slam/odometry updates every dead-reckoning tick, not just per keyframe
+    LIVE_DRIFT_HZ = 10.0   # /slam/odometry updates every dead-reckoning tick, not just per keyframe
 
     def __init__(self, **kwargs):
         super().__init__('benchmark', **kwargs)
@@ -134,7 +134,7 @@ class BenchmarkNode(Node):
         self.pub_markers = self.create_publisher(MarkerArray, '/eval/markers', 10)
         self.pub_markers_live = self.create_publisher(MarkerArray, '/eval/markers_live', 10)
 
-        self.create_timer(1.0 / self.LIVE_ARROW_HZ, self._publish_live_arrow)
+        self.create_timer(1.0 / self.LIVE_DRIFT_HZ, self._publish_live_drift)
 
         self.get_logger().info(f'Benchmark node started. Writing to {out_dir}')
 
@@ -247,13 +247,15 @@ class BenchmarkNode(Node):
 
         self.pub_markers.publish(markers)
 
-    def _publish_live_arrow(self):
-        """Continuously-updating GT-vs-SLAM-belief arrow, sourced from
+    def _publish_live_drift(self):
+        """Continuously-updating GT-vs-SLAM-belief line, sourced from
         /slam/odometry (published on every dead-reckoning tick, already
         loop-closure-corrected) rather than /slam/pose (only published per
         keyframe, i.e. roughly every keyframe_dist_m of travel) — the
         eval_drift arrow above is precise but visibly jumps in steps; this
-        one is for watching the correction happen in real time.
+        one is for watching the correction happen in real time. A plain
+        segment, not an arrow: at small drift the head dominated the shaft
+        and read as a blob rather than a distance.
 
         GT is looked up by nearest-timestamp to the estimate sample (like
         _slam_cb does), not just "whatever GT sample is freshest right now"
@@ -268,22 +270,38 @@ class BenchmarkNode(Node):
         if gt is None:
             return
 
-        arrow = Marker()
-        arrow.header.frame_id = 'world_ned'
-        arrow.header.stamp = self.get_clock().now().to_msg()
-        arrow.ns = 'eval_drift_live'
-        arrow.id = 0
-        arrow.type = Marker.ARROW
-        arrow.action = Marker.ADD
-        arrow.points = [Point(x=gt.pos[0], y=gt.pos[1], z=gt.pos[2]),
-                        Point(x=est.pos[0], y=est.pos[1], z=est.pos[2])]
-        arrow.scale.x = 0.08   # shaft diameter
-        arrow.scale.y = 0.16   # head diameter
-        arrow.scale.z = 0.20   # head length
-        arrow.color = ColorRGBA(r=1.0, g=0.85, b=0.0, a=0.9)
+        line = Marker()
+        line.header.frame_id = 'world_ned'
+        line.header.stamp = self.get_clock().now().to_msg()
+        line.ns = 'eval_drift_live'
+        line.id = 0
+        line.type = Marker.LINE_LIST
+        line.action = Marker.ADD
+        line.points = [Point(x=gt.pos[0], y=gt.pos[1], z=gt.pos[2]),
+                       Point(x=est.pos[0], y=est.pos[1], z=est.pos[2])]
+        line.scale.x = 0.08   # line width
+        line.color = ColorRGBA(r=1.0, g=0.85, b=0.0, a=0.9)
+
+        # Same number the line length shows, in metres, so the segment is
+        # readable without measuring it against the grid.
+        label = Marker()
+        label.header.frame_id = 'world_ned'
+        label.header.stamp = line.header.stamp
+        label.ns = 'eval_drift_live'
+        label.id = 1
+        label.type = Marker.TEXT_VIEW_FACING
+        label.action = Marker.ADD
+        mid = 0.5 * (gt.pos + est.pos)
+        label.pose.position.x = float(mid[0])
+        label.pose.position.y = float(mid[1])
+        label.pose.position.z = float(mid[2]) - 0.4   # NED: -z is up
+        label.scale.z = 0.35
+        label.color = line.color
+        label.text = f'error {float(np.linalg.norm(est.pos - gt.pos)):.2f} m'
 
         markers = MarkerArray()
-        markers.markers.append(arrow)
+        markers.markers.append(line)
+        markers.markers.append(label)
         self.pub_markers_live.publish(markers)
 
     def _update_rpe(self, gt_sample: PoseSample, est_sample: PoseSample):

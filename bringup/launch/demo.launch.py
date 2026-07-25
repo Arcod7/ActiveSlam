@@ -46,7 +46,9 @@ another terminal — the standard pattern for ROS2 keyboard teleop.
 """
 
 import os
+import shutil
 import sysconfig
+import tempfile
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -76,6 +78,26 @@ def _octomap_preload_path():
     candidates = [os.path.join(prefix, "lib", triplet, "liboctomap.so")] if triplet else []
     candidates.append(os.path.join(prefix, "lib", "liboctomap.so"))
     return next((c for c in candidates if os.path.isfile(c)), "")
+
+
+def session_rviz_config(share_dir):
+    """Hand RViz a scratch copy of demo.rviz, not the installed file.
+
+    RViz rewrites its whole config when a session ends — display toggles,
+    marker namespace lists, window geometry. Under --symlink-install the
+    installed path is a symlink into the source tree, so every run silently
+    edited the tracked config, and whichever session exited last decided what
+    the next run started from (a display ticked on in one session came back
+    off from another). The copy absorbs that writeback; the tracked file stays
+    the one definition of the view. To keep a session's tweaks, copy the
+    scratch file back over bringup/rviz/demo.rviz. Mirrored in
+    launcher_core.py's _rviz_config.
+    """
+    session_dir = os.path.join(tempfile.gettempdir(), "activeslam_rviz")
+    os.makedirs(session_dir, exist_ok=True)
+    dst = os.path.join(session_dir, f"demo_{os.getpid()}.rviz")
+    shutil.copyfile(os.path.join(share_dir, "rviz", "demo.rviz"), dst)
+    return dst
 
 
 def generate_launch_description():
@@ -184,7 +206,7 @@ def generate_launch_description():
         "tsdf_octomap",
         default_value="true",
         description="mapper:=tsdf only: also rebuild the TSDF grid into an "
-        "octomap::OcTree on /octomap_binary (tsdf_to_octomap)",
+        "octomap::OcTree on /tsdf/octomap_binary (tsdf_to_octomap)",
     )
     rviz_arg = DeclareLaunchArgument(
         "rviz",
@@ -726,7 +748,17 @@ def generate_launch_description():
     # One view for every mode: displays whose topic has no publisher in the
     # current mode draw nothing, so branching here only bought drift between
     # three near-identical 700-line configs.
-    rviz_config = os.path.join(bringup_share, "rviz", "demo.rviz")
+    rviz_config = session_rviz_config(bringup_share)
+
+    rviz_config_hint = LogInfo(
+        msg=[
+            "RViz session config: ", rviz_config,
+            " — a copy, so RViz's save-on-exit no longer rewrites "
+            "bringup/rviz/demo.rviz. Copy it back over that file to keep "
+            "changes made in this session.",
+        ],
+        condition=IfCondition(LaunchConfiguration("rviz")),
+    )
 
     # liboctomap lives under a Debian multiarch triplet directory, so derive the
     # triplet instead of naming one architecture. Falls back to the unsuffixed
@@ -824,6 +856,7 @@ def generate_launch_description():
             walloriented_hint,
             walllooking_hint,
             map_rebuild_octomap_warning,
+            rviz_config_hint,
             rviz,
         ]
     )

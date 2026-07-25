@@ -661,7 +661,13 @@ class RosLink:
             self.pub.publish(self.Twist())
 
     def publish_target_marker(self, point):
-        """Draw the follow-point target in RViz (world_ned sphere)."""
+        """Draw the follow-point target in RViz (world_ned sphere).
+
+        Purple while the motion gate is disabled: the point can be driven
+        around with the gate closed, and a green target that the vehicle is
+        never going to move toward reads as a stuck planner. Same colours as
+        the gate's robot arrow (safety_gate.py).
+        """
         if self.marker_pub is None:
             return
         m = self.Marker()
@@ -674,7 +680,9 @@ class RosLink:
         (m.pose.position.x, m.pose.position.y, m.pose.position.z) = point
         m.pose.orientation.w = 1.0
         m.scale.x = m.scale.y = m.scale.z = 0.4
-        m.color.r, m.color.g, m.color.b, m.color.a = 0.1, 1.0, 0.3, 0.9
+        disabled = self.gate_state == "DISABLED"
+        m.color.r, m.color.g, m.color.b, m.color.a = (
+            (0.7, 0.2, 0.9, 0.9) if disabled else (0.16, 0.86, 0.16, 0.9))
         self.marker_pub.publish(m)
 
     def publish_point_goal(self, point):
@@ -943,31 +951,35 @@ def fmt_value(p, v):
 
 
 def robot_state_text(link, values, running, driving, drive_active):
-    """One sentence for what the vehicle is doing right now."""
+    """One sentence for what the vehicle is doing right now.
+
+    The clause after the dash goes on its own line (draw_side_panel keeps
+    newlines) so the qualifier never wraps mid-phrase.
+    """
     if not running:
         return "stack stopped"
     if link.gate_state == "DISABLED":
-        return "motion disabled — holding position"
+        return "motion disabled\n— holding position"
     if driving:
         return ("driven from the keyboard" if drive_active
-                else "teleop ready — holding position")
+                else "teleop ready\n— holding position")
     if values["mode"] == "teleop":
         return "waiting for a drive key"
     # A stale activity means the executor stopped publishing, not that it is
     # repeating its last state.
     if time.time() - link.activity_at >= ACTIVITY_STALE_S:
-        return "planner is starting up — holding position"
+        return "planner is starting up\n— holding position"
     doing = ACTIVITY_TEXT.get(link.activity,
                               str(link.activity).lower().replace("_", " "))
     if values["mode"] == "goto":
-        return f"heading for the target point — {doing}"
+        return f"heading for the target point\n— {doing}"
     if link.revisit_state == "revisiting":
         return ("at the revisit site, holding until d-opt drops"
                 if link.activity in HOLDING_ACTIVITIES
                 else "driving to the revisit site")
     if link.revisit_state == "cooldown":
-        return f"exploring (revisit cooldown) — {doing}"
-    return f"exploring — {doing}"
+        return f"exploring (revisit cooldown)\n— {doing}"
+    return f"exploring\n— {doing}"
 
 
 def _metric(metrics, key, spec, unit=""):
@@ -1007,7 +1019,10 @@ def draw_side_panel(stdscr, link, values, running, driving, drive_active,
 
     def note(message, attr=curses.A_DIM):
         nonlocal row
-        for line in textwrap.wrap(message, width - 2)[:max(0, end - row)]:
+        # Newlines in the message are kept as breaks; each segment wraps on its own.
+        lines = [w for seg in message.split("\n")
+                 for w in textwrap.wrap(seg, width - 2)]
+        for line in lines[:max(0, end - row)]:
             put(stdscr, row, x + 1, line, attr, maxx=right)
             row += 1
 

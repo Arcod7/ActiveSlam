@@ -15,10 +15,12 @@ import contextlib
 import datetime
 import math
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import threading
 import time
 
@@ -69,8 +71,18 @@ def _odom_topic(v):
 
 
 def _rviz_config(v, bringup_share):
-    """One view for every mode — mirrors demo.launch.py."""
-    return os.path.join(bringup_share, "rviz", "demo.rviz")
+    """One view for every mode — mirrors demo.launch.py.
+
+    RViz is handed a scratch copy: it rewrites its whole config on exit, and
+    the installed path is a symlink into the source tree under
+    --symlink-install, so pointing it at the real file let each session edit
+    the tracked view. See session_rviz_config in demo.launch.py.
+    """
+    session_dir = os.path.join(tempfile.gettempdir(), "activeslam_rviz")
+    os.makedirs(session_dir, exist_ok=True)
+    dst = os.path.join(session_dir, f"demo_{os.getpid()}.rviz")
+    shutil.copyfile(os.path.join(bringup_share, "rviz", "demo.rviz"), dst)
+    return dst
 
 
 class Group:
@@ -285,8 +297,8 @@ def build_groups(bringup_share=""):
         Group("rqt", "rqt",
               "Introspection GUI: node graph, topic monitor, plots and "
               "parameter reconfigure. Restores whatever perspective was left "
-              "open last time.",
-              rqt, visible=lambda v: bool(v["rqt"]),
+              "open last time. Offered under frontier mode only.",
+              rqt, visible=lambda v: bool(v["rqt"]) and v["mode"] == "frontier",
               graceful=False),
     ]
 

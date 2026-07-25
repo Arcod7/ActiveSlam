@@ -1,4 +1,9 @@
-"""Fail-closed ROS 2 gate for normalized vehicle body commands."""
+"""Fail-closed ROS 2 gate for normalized vehicle body commands.
+
+Also publishes the vehicle as a state-coloured arrow on /motion/robot_marker
+(green = motion enabled, purple = disabled) — the gate is the only node that
+knows both the pose it watches and whether motion is armed.
+"""
 
 import time
 
@@ -8,9 +13,15 @@ from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, ColorRGBA, String
+from visualization_msgs.msg import Marker
 
 from frontier_slam.safety_logic import MotionSafetyState
+
+# Green when the gate passes motion, purple when it is disabled — the same
+# reading as the launcher's target-point sphere.
+ENABLED_COLOR = ColorRGBA(r=0.16, g=0.86, b=0.16, a=0.95)
+DISABLED_COLOR = ColorRGBA(r=0.70, g=0.20, b=0.90, a=0.95)
 
 
 class MotionSafetyGate(Node):
@@ -29,6 +40,8 @@ class MotionSafetyGate(Node):
         self.declare_parameter('publish_hz', 20.0)
         self.declare_parameter('require_odom', True)
         self.declare_parameter('start_enabled', False)
+        self.declare_parameter('marker_topic', '/motion/robot_marker')
+        self.declare_parameter('marker_frame', 'world_ned')
 
         command_topic = str(self.get_parameter('command_topic').value)
         output_topic = str(self.get_parameter('output_topic').value)
@@ -51,9 +64,13 @@ class MotionSafetyGate(Node):
             bool(self.get_parameter('start_enabled').value))
         self._command_topic = command_topic
         self._last_status: str | None = None
+        self._marker_frame = str(self.get_parameter('marker_frame').value)
+        self._last_pose = None
 
         self._output_pub = self.create_publisher(Twist, output_topic, 10)
         self._status_pub = self.create_publisher(String, status_topic, 10)
+        self._marker_pub = self.create_publisher(
+            Marker, str(self.get_parameter('marker_topic').value), 1)
         self.create_subscription(
             Twist, command_topic, self._command_cb, 10)
         self.create_subscription(Bool, enable_topic, self._enable_cb, 10)
@@ -100,8 +117,34 @@ class MotionSafetyGate(Node):
         if not self._state.enabled:
             self.publish_zero()
 
-    def _odom_cb(self, _msg: Odometry) -> None:
+    def _odom_cb(self, msg: Odometry) -> None:
         self._state.update_odometry(self._now())
+        self._last_pose = msg.pose.pose
+
+    def _publish_robot_marker(self) -> None:
+        """The vehicle as an arrow coloured by whether motion is enabled.
+
+        An RViz Odometry display carries a fixed colour, so the state has to
+        come from the marker: this replaces the ground-truth arrow in
+        demo.rviz. It follows the pose the gate itself watches — ground truth
+        under slam:=none, /slam/odometry under slam:=slam — i.e. the pose the
+        controller is acting on.
+        """
+        if self._last_pose is None:
+            return
+        marker = Marker()
+        marker.header.frame_id = self._marker_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'motion_state'
+        marker.id = 0
+        marker.type = Marker.ARROW
+        marker.action = Marker.ADD
+        marker.pose = self._last_pose
+        marker.scale.x = 1.0    # shaft length, along the vehicle's +X
+        marker.scale.y = 0.16   # shaft diameter
+        marker.scale.z = 0.16   # head diameter
+        marker.color = ENABLED_COLOR if self._state.enabled else DISABLED_COLOR
+        self._marker_pub.publish(marker)
 
     def _has_multiple_command_sources(self) -> bool:
         return len(self.get_publishers_info_by_topic(self._command_topic)) > 1
@@ -113,6 +156,7 @@ class MotionSafetyGate(Node):
         status = String()
         status.data = decision.state
         self._status_pub.publish(status)
+        self._publish_robot_marker()
         if decision.state != self._last_status:
             if decision.state == self._state.ACTIVE:
                 self.get_logger().info(
