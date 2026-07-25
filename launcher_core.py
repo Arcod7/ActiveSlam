@@ -138,6 +138,10 @@ def build_groups(bringup_share=""):
                  "mapper_only.launch.py",
                  f"mapper:={v['mapper']}",
                  f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}",
+                 # octomap_server bands its own /projected_map around this depth
+                 # (z_band.py); the TSDF mapper bands its projection through
+                 # target_depth_m. Same cruise depth, one knob.
+                 f"depth:={v['robot_depth_target']}",
                  f"publish_projected_map:={'true' if publish_projected else 'false'}",
                  f"target_depth_m:={v['robot_depth_target']}",
                  f"tsdf_octomap:={'true' if v['tsdf_octomap'] else 'false'}"]]
@@ -165,6 +169,9 @@ def build_groups(bringup_share=""):
     def planner(v):
         revisit = "true" if (v["revisit"] and v["slam"] == "slam") else "false"
         return [["ros2", "launch", "frontier_slam", "frontier_slam.launch.py",
+                 f"hard_inflation_m:={v['hard_inflation_m']}",
+                 f"inflation_m:={v['inflation_m']}",
+                 f"plan_inflation_m:={v['plan_inflation_m']}",
                  f"odom_topic:={_odom_topic(v)}",
                  f"revisit:={revisit}",
                  f"scenario:={v['scenario']}",
@@ -226,7 +233,8 @@ def build_groups(bringup_share=""):
         Group("mapper", "Map backend",
               "OctoMap occupancy grid or VDBFusion TSDF. Consumes /cloud_in "
               "only, so the backend can be swapped without touching the sim.",
-              mapper, depends=["mapper", "map_rebuild", "mode", "tsdf_octomap"]),
+              mapper, depends=["mapper", "map_rebuild", "mode", "tsdf_octomap",
+                               "robot_depth_target"]),
         Group("gt_map", "Ground-truth reference map",
               "A second map built from the exact simulator pose, overlaid "
               "against the belief map so map drift is visible directly.",
@@ -254,7 +262,8 @@ def build_groups(bringup_share=""):
                                 "wall_switch_goal_distance",
                                 "wall_switch_scan_angle", "wall_switch_scan_yaw",
                                 "wall_path_influence", "wall_path_look_offset_deg",
-                                "wall_normal_offset_deg", "wall_path_heading_weight"],
+                                "wall_normal_offset_deg", "wall_path_heading_weight",
+                                "hard_inflation_m", "inflation_m", "plan_inflation_m"],
               visible=lambda v: v["mode"] == "frontier"),
         Group("teleop_support", "Safety gate + thruster mixer",
               "Fail-closed motion safety gate and the thruster mixer that "

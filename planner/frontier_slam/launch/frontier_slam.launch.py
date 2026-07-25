@@ -54,6 +54,10 @@ Optional arguments:
               scan_style:=sweep total sweep width in degrees, mirrored left/
               right about the heading captured when each scan starts.
               Default: 180.0.
+  hard_inflation_m/inflation_m/plan_inflation_m
+              A* three-zone inflation radii around occupied cells (hard
+              block / soft high-cost / planning-margin cost), see
+              path_planner.py. Defaults: 0.20 / 0.75 / 1.50 m.
 
 Examples:
   ros2 launch frontier_slam frontier_slam.launch.py
@@ -64,7 +68,7 @@ Examples:
 
 Visualise in RViz2:
   - MarkerArray  /frontier_slam/frontiers  (cyan = candidates, red = active goal)
-  - Image        /frontier_slam/debug_image
+  - Image        /frontier_slam/planning_dashboard
   - OccupancyGrid /frontier_slam/inflated_map
 """
 import os
@@ -271,11 +275,26 @@ def generate_launch_description():
         'wall_path_heading_weight', default_value='0.35',
         description='Orientation blend: 0=wall-derived look heading, 1=path-derived look heading.',
     )
+    hard_inflation_arg = DeclareLaunchArgument(
+        'hard_inflation_m', default_value='0.20',
+        description='A* hard-wall radius around occupied cells (cost = inf).',
+    )
+    inflation_arg = DeclareLaunchArgument(
+        'inflation_m', default_value='0.75',
+        description='A* soft-zone radius around occupied cells (high cost, last-resort passage).',
+    )
+    plan_inflation_arg = DeclareLaunchArgument(
+        'plan_inflation_m', default_value='1.50',
+        description='A* planning-margin radius around occupied cells (moderate cost, steers paths away).',
+    )
     depth = LaunchConfiguration('depth')
     odom_topic = LaunchConfiguration('odom_topic')
 
     return LaunchDescription([
         depth_arg,
+        hard_inflation_arg,
+        inflation_arg,
+        plan_inflation_arg,
         odom_topic_arg,
         safety_start_enabled_arg,
         actuator_backend_arg,
@@ -366,6 +385,9 @@ def generate_launch_description():
                 # to, so goal.point.z is a real depth target either way.
                 'depth_setpoint': depth,
                 'tsdf_frontier_standoff_m': _float_parameter('tsdf_frontier_standoff_m'),
+                'hard_inflation_m': _float_parameter('hard_inflation_m'),
+                'inflation_m': _float_parameter('inflation_m'),
+                'plan_inflation_m': _float_parameter('plan_inflation_m'),
             }],
         ),
         Node(

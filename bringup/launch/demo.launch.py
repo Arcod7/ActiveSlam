@@ -165,6 +165,21 @@ def generate_launch_description():
         choices=["octomap", "tsdf"],
         description="Map backend: OctoMap occupancy grid or VDBFusion TSDF",
     )
+    hard_inflation_arg = DeclareLaunchArgument(
+        "hard_inflation_m",
+        default_value="0.20",
+        description="A* hard-wall radius around occupied cells (cost = inf)",
+    )
+    inflation_arg = DeclareLaunchArgument(
+        "inflation_m",
+        default_value="0.75",
+        description="A* soft-zone radius around occupied cells (high cost, last-resort passage)",
+    )
+    plan_inflation_arg = DeclareLaunchArgument(
+        "plan_inflation_m",
+        default_value="1.50",
+        description="A* planning-margin radius around occupied cells (moderate cost, steers paths away)",
+    )
     tsdf_octomap_arg = DeclareLaunchArgument(
         "tsdf_octomap",
         default_value="true",
@@ -355,7 +370,9 @@ def generate_launch_description():
                                           description="robot yaw (degrees)")
     depth_arg = DeclareLaunchArgument(
         "depth", default_value="8.0",
-        description="fixed autonomous depth target in NED metres (positive = below surface)",
+        description="fixed autonomous depth target in NED metres (positive = below surface). "
+        "Also centres the /projected_map Z band — octomap_server's through "
+        "z_band.py, the TSDF mapper's through target_depth_m",
     )
     speed_factor_arg = DeclareLaunchArgument(
         "speed_factor", default_value="1.0",
@@ -403,6 +420,7 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(stonefish_gt_mapping_share, "launch", "octomap.launch.py")
         ),
+        launch_arguments={"depth": LaunchConfiguration("depth")}.items(),
         condition=LaunchConfigurationEquals("mapper", "octomap"),
     )
 
@@ -501,6 +519,10 @@ def generate_launch_description():
             os.path.join(frontier_slam_share, "launch", "frontier_slam.launch.py")
         ),
         launch_arguments={
+            "depth": LaunchConfiguration("depth"),
+            "hard_inflation_m": LaunchConfiguration("hard_inflation_m"),
+            "inflation_m": LaunchConfiguration("inflation_m"),
+            "plan_inflation_m": LaunchConfiguration("plan_inflation_m"),
             "odom_topic": PythonExpression(
                 [
                     "'/slam/odometry' if '",
@@ -738,6 +760,9 @@ def generate_launch_description():
             wall_normal_offset_arg,
             wall_path_heading_weight_arg,
             mapper_arg,
+            hard_inflation_arg,
+            inflation_arg,
+            plan_inflation_arg,
             tsdf_octomap_arg,
             rviz_arg,
             slam_arg,

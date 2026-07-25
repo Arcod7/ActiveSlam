@@ -23,13 +23,42 @@ frontier detection and 3-D A* would consume from octomap_server.
 map_rebuild:=true (slam:=slam, mapper:=tsdf only; see pose_graph.py,
 tsdf_mapper.py) makes the belief-map instance reset+re-integrate from
 corrected keyframe poses after a big loop closure.
+
+`depth` (NED metres, default -1.0 = auto-lock) narrows /projected_map's Z
+range to a band centred on that depth (see z_band.py) instead of the
+stock full-column projection — skipped when depth is auto-locked, since
+the actual depth is unknown at launch time in that case.
 """
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition, LaunchConfigurationEquals
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+from stonefish_groundtruth_mapping.z_band import octomap_z_band_params
+
+
+def _octomap_node(context, *args, **kwargs):
+    depth = float(LaunchConfiguration('depth').perform(context))
+    params = {
+        'frame_id':               'world_ned',
+        'resolution':             0.2,        # 20 cm voxels
+        'sensor_model/max_range': 15.0,       # matches Dcam depth_max in .scn
+        'latch':                  True,
+    }
+    params.update(octomap_z_band_params(depth))
+    return [Node(
+        package='octomap_server',
+        executable='octomap_server_node',
+        name='octomap_server',
+        output='screen',
+        parameters=[params],
+        remappings=[
+            ('cloud_in', '/cloud_in'),
+        ],
+        condition=LaunchConfigurationEquals('mapper', 'octomap'),
+    )]
 
 
 def generate_launch_description():
@@ -40,6 +69,14 @@ def generate_launch_description():
     map_rebuild_arg = DeclareLaunchArgument(
         'map_rebuild', default_value='false',
         description='Reset+re-integrate this TSDF instance after a big loop closure',
+    )
+    depth_arg = DeclareLaunchArgument(
+        'depth', default_value='-1.0',
+        description=(
+            'Target depth in NED metres, used to centre octomap_server\'s '
+            '/projected_map Z-band (mapper:=octomap; the TSDF backend bands its '
+            'own projection through target_depth_m). '
+            '-1 = auto-lock (unknown at launch time, so the map stays full-column).'),
     )
     carve_no_return_arg = DeclareLaunchArgument(
         'carve_no_return', default_value='false',
@@ -70,22 +107,9 @@ def generate_launch_description():
         'and publish it on /octomap_binary (tsdf_to_octomap)',
     )
 
-    octomap = Node(
-        package='octomap_server',
-        executable='octomap_server_node',
-        name='octomap_server',
-        output='screen',
-        parameters=[{
-            'frame_id':               'world_ned',
-            'resolution':             0.2,        # 20 cm voxels
-            'sensor_model/max_range': 15.0,       # matches Dcam depth_max in .scn
-            'latch':                  True,
-        }],
-        remappings=[
-            ('cloud_in', '/cloud_in'),
-        ],
-        condition=LaunchConfigurationEquals('mapper', 'octomap'),
-    )
+    # Built through an OpaqueFunction so the Z band can be resolved from `depth`
+    # at launch time — see _octomap_node above.
+    octomap = OpaqueFunction(function=_octomap_node)
 
     tsdf_mapper = Node(
         package='frontier_slam',
@@ -125,7 +149,8 @@ def generate_launch_description():
             LaunchConfiguration('tsdf_octomap'), "'.lower() == 'true'"])),
     )
 
-    return LaunchDescription([mapper_arg, map_rebuild_arg, carve_no_return_arg,
+    return LaunchDescription([mapper_arg, map_rebuild_arg, depth_arg,
+                              carve_no_return_arg,
                               publish_projected_map_arg, target_depth_m_arg,
                               projected_map_band_m_arg, projected_map_margin_cells_arg,
                               tsdf_octomap_arg,
