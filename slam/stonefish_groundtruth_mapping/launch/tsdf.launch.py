@@ -11,8 +11,9 @@ Full TSDF mapping stack: Stonefish + TF + point cloud + tsdf_mapper.
                                   → /tsdf/voxels                 (weight/sign-coded MarkerArray)
 
 tsdf_octomap:=true additionally rebuilds the grid into an octomap::OcTree on
-/octomap_binary (tsdf_to_octomap) — the octree interface for 3-D frontier
-detection and 3-D A*.
+/tsdf/octomap_binary (tsdf_to_octomap) — the octree interface for 3-D frontier
+detection and 3-D A*. Kept off /octomap_binary so RViz's OcTree displays stay
+octomap_server's alone (see mapper_only.launch.py).
 
 Thin composition of pointcloud.launch.py and mapper_only.launch.py
 (mapper:=tsdf) — parallel structure to octomap.launch.py, same core, different
@@ -58,7 +59,7 @@ def generate_launch_description():
     tsdf_octomap_arg = DeclareLaunchArgument(
         'tsdf_octomap', default_value='false',
         description='Rebuild an octomap::OcTree from this TSDF grid and publish '
-        'it on /octomap_binary (tsdf_to_octomap)',
+        'it on /tsdf/octomap_binary (tsdf_to_octomap)',
     )
 
     pointcloud = IncludeLaunchDescription(

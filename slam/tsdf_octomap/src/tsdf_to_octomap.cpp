@@ -87,8 +87,9 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "tsdf_to_octomap ready — %s + %s -> /octomap_binary at %.2f m, every %.1fs",
-      occupied_topic.c_str(), free_topic.c_str(), resolution_, period_s);
+      "tsdf_to_octomap ready — %s + %s -> %s at %.2f m, every %.1fs",
+      occupied_topic.c_str(), free_topic.c_str(), binary_pub_->get_topic_name(),
+      resolution_, period_s);
   }
 
 private:

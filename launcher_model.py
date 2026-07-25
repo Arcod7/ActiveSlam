@@ -118,11 +118,11 @@ PARAMS = [
           {"octomap": "octomap_server, /projected_map + occupancy voxels.",
            "tsdf": "VDBFusion/OpenVDB surface reconstruction with normals."}),
     Param("tsdf_octomap", "TSDF → OcTree", "bool", True, "primary",
-          "Rebuild the TSDF grid into an octomap::OcTree on /octomap_binary "
+          "Rebuild the TSDF grid into an octomap::OcTree on /tsdf/octomap_binary "
           "(tsdf_to_octomap), from its occupied and free voxels. Gives the TSDF "
           "backend the octree interface 3-D frontier detection and 3-D A* "
-          "expect, and makes the belief map visible under RViz's OctoMap "
-          "displays.",
+          "expect. Its own topic, not /octomap_binary, so RViz's OcTree displays "
+          "stay empty under TSDF and only TSDFVoxels draws the belief map.",
           visible=lambda v: v["mapper"] == "tsdf"),
     Param("slam", "Pose source", "enum", "none", "primary",
           "Where the vehicle pose comes from. none uses the simulator's exact "
@@ -139,7 +139,8 @@ PARAMS = [
     Param("rqt", "rqt", "bool", False, "primary",
           "Start rqt alongside RViz for introspection — node graph, topic "
           "monitor, live plots and parameter reconfigure. Off by default: it "
-          "is a debugging tool, not part of the demo view."),
+          "is a debugging tool, not part of the demo view.",
+          visible=_frontier),
     Param("keyboard", "Keyboard layout", "enum", "qwerty", "primary",
           "Physical-key mapping for the drive cluster, so the same finger "
           "positions drive on either layout. qwerty uses W/S/Q/E/A/D; azerty "

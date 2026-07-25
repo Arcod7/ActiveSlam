@@ -17,8 +17,11 @@ here, so the original cascading entry points are unchanged.
 
 tsdf_octomap:=true adds tsdf_to_octomap alongside tsdf_mapper: the TSDF's
 occupied and free voxels are rebuilt into an octomap::OcTree and published on
-/octomap_binary, giving the TSDF backend the same octree interface 3-D
-frontier detection and 3-D A* would consume from octomap_server.
+/tsdf/octomap_binary, giving the TSDF backend the same octree interface 3-D
+frontier detection and 3-D A* would consume from octomap_server. It is
+deliberately NOT /octomap_binary — that topic is octomap_server's, and RViz's
+OcTree displays subscribe to it, so publishing both there overlaid octree
+voxels on the TSDF voxels under mapper:=tsdf.
 
 map_rebuild:=true (slam:=slam, mapper:=tsdf only; see pose_graph.py,
 tsdf_mapper.py) makes the belief-map instance reset+re-integrate from
@@ -104,7 +107,7 @@ def generate_launch_description():
     tsdf_octomap_arg = DeclareLaunchArgument(
         'tsdf_octomap', default_value='false',
         description='TSDF only: rebuild an octomap::OcTree from this TSDF grid '
-        'and publish it on /octomap_binary (tsdf_to_octomap)',
+        'and publish it on /tsdf/octomap_binary (tsdf_to_octomap)',
     )
 
     # Built through an OpaqueFunction so the Z band can be resolved from `depth`
@@ -144,6 +147,14 @@ def generate_launch_description():
             'resolution': 0.2,
             'world_frame': 'world_ned',
         }],
+        # /octomap_binary belongs to octomap_server (mapper:=octomap) and to
+        # RViz's OcTree displays bound to it. Publishing the TSDF-derived tree
+        # there too drew octree voxels on top of /tsdf/voxels under
+        # mapper:=tsdf, so the planning-facing tree gets its own name.
+        remappings=[
+            ('/octomap_binary', '/tsdf/octomap_binary'),
+            ('/octomap_full', '/tsdf/octomap_full'),
+        ],
         condition=IfCondition(PythonExpression([
             "'", LaunchConfiguration('mapper'), "' == 'tsdf' and '",
             LaunchConfiguration('tsdf_octomap'), "'.lower() == 'true'"])),
