@@ -1804,3 +1804,59 @@ work overlapped what landed on `dev` in the meantime:
   feeds both bands — `octomap_server`'s through `z_band.py` and the TSDF
   mapper's through `target_depth_m`. The duplicate `depth_m` launcher param
   and the second `depth:=` the auto-merge left in the planner group are gone.
+
+## Phase 46 — `goto` as a mode, live telemetry on the side panel, one-row safety gate
+
+**Date**: 2026-07-25
+**Files**: `launcher.py`, `launcher_core.py`, `launcher_model.py`,
+`planner/frontier_slam/frontier_slam/waypoint_controller.py`,
+`planner/frontier_slam/frontier_slam/wall_oriented_controller.py`,
+`planner/frontier_slam/frontier_slam/wall_looking.py`,
+`eval/eval_tools/eval_tools/map_metrics.py`,
+`tools/motion_safety_rviz/src/motion_safety_panel.cpp`, `docs/RUN.md`,
+`bootstrap.sh`, `STATE.md`
+
+Phase 41's follow-the-point was a `y` toggle layered on top of whatever mode
+was already selected — a second, hidden piece of mode state that the Mode
+option did not describe and the planner group's visibility did not account
+for. It becomes `goto`, a third value of `mode` alongside `teleop` and
+`frontier`, so who picks the goal is one decision read from one place. The
+drive keys stay always-live in every mode; what they move is what changes.
+
+`goto` is not a new controller. The launcher publishes the operator's point
+on `/frontier_slam/goal` with frontier goal picking suspended, so A* and the
+path executor reach it exactly as they would reach a frontier — the mode is
+a goal *source*, which is why the planner layer and every wall-following
+parameter are now shared by both planner modes (`_frontier` becomes
+`_planner`, true for frontier or goto; the `frontier` section title drops to
+`Planner`). It runs without `revisit` so nothing preempts the operator's
+goal. `demo.launch.py` has no `goto` argument and does not need one: the mode
+is the launcher publishing a goal, not a different launch graph.
+
+The side panel showed configuration but not consequence — the run's own
+numbers were only on disk. It now reads three topics, none of which required
+new computation, only publishing values the nodes already had in hand for
+their CSV logs: `/frontier_slam/activity` (the `event` label, from all three
+executors) and `/eval/map_coverage` + `/eval/map_accuracy` (from
+`map_metrics.py`, already computed per tick). Map accuracy has no
+backend-independent definition — IoU under octomap, belief->GT RMSE under
+TSDF — so the panel labels it from the selected mapper instead of showing a
+bare number that means different things in different runs.
+
+The motion safety gate panel was a tall vertical stack whose height pushed
+the eval metrics panel docked in Phase 44 out of the bottom strip. Status and
+both buttons now sit on one 28 px row; the ROS-gate-not-ArduSub warning and
+the topic names move to tooltips, and the warning also stays in the enable
+confirmation dialog where it is read at the moment it matters.
+
+Also: `POINT_KEYS` gains an AZERTY variant (it was one QWERTY string, so
+AZERTY users saw wrong key hints while moving the point), and `bootstrap.sh`
+stops printing the two `source` lines it told the user to run — `launcher.py`
+resolves the virtualenv and workspace itself.
+
+Verified: `launcher_model.py` and `launcher_core.py` import clean, every
+`Group.depends` key resolves to a real `Param`, and the planner group's
+visibility evaluates to true under `goto`/`frontier` and false under
+`teleop`. Not yet live-run in simulation — the side panel's telemetry has
+not been observed against a moving robot, so the activity labels and the
+coverage/accuracy feeds are unconfirmed end-to-end.

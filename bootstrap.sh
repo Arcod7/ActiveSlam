@@ -600,7 +600,6 @@ echo "==> 8/8 colcon build"
 ( cd "$WS_ROOT" && PATH="$VENV_DIR/bin:$PATH" \
     colcon build --symlink-install --cmake-args -Wno-dev )
 
-echo "==> Done. Activate the virtualenv, source the workspace, then launch:"
-echo "      source $VENV_DIR/bin/activate"
-echo "      source $WS_ROOT/install/setup.zsh"
+echo "======> Done. Run with the following command. <======"
 echo "      python3 launcher.py"
+echo ""
