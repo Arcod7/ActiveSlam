@@ -8,9 +8,12 @@ On each tick it:
   3. Publishes the goal on /frontier_slam/goal and the A*-planned path on
      /frontier_slam/path.  Visualisation is delegated to FrontierVisualizer.
 
-The goal's Z is set to the robot's current Z — but only for marker placement.
-The waypoint controller maintains its own fixed depth setpoint and ignores
-goal.point.z.
+The goal's Z is the cruise depth (`depth_setpoint` launch arg, locked from
+the first odom reading if unset) — never the robot's own live Z (Change 12:
+that was a feedback loop that let the robot sink undetected). waypoint_
+controller drives depth off whichever goal is active, this one included, so
+that value has to be a real, externally-anchored target, not a moving copy
+of the robot's own position.
 
 /frontier_slam/suspend (std_msgs/Bool) lets an external planner (see
 revisit_planner.py) take over goal publication temporarily: while suspended,
@@ -70,6 +73,7 @@ class FrontierExtractor(Node):
         super().__init__('frontier_extractor')
 
         self.declare_parameter('odom_topic', '/StoneFish/Odometry')
+        self.declare_parameter('depth_setpoint', -1.0)
         self.declare_parameter('motion_status_topic', '/motion/status')
         self.declare_parameter('tsdf_solid_points_topic', '/tsdf/occupied_voxels')
         self.declare_parameter('tsdf_solid_containment_radius_m', 0.20)
@@ -77,6 +81,17 @@ class FrontierExtractor(Node):
         self.declare_parameter('tsdf_frontier_standoff_m', 1.0)
         self.declare_parameter('tsdf_surface_normal_max_distance_m', 1.0)
         odom_topic = str(self.get_parameter('odom_topic').value)
+        depth_arg = float(self.get_parameter('depth_setpoint').value)
+        # Same value, same launch arg, as waypoint_controller's own
+        # depth_setpoint (frontier_slam.launch.py passes both from a single
+        # `depth` argument) — the goal Z this node publishes for its own
+        # picks, so waypoint_controller's depth control (goal.point.z) has a
+        # real, non-self-referential target to drive to instead of the
+        # robot's own live Z (Change 12: that was a feedback loop that let
+        # the robot sink undetected). -1 (unset) locks to the first odom
+        # reading here, independently of waypoint_controller's own lock —
+        # both start from the same odom stream, so they converge regardless.
+        self._cruise_z: float | None = None if depth_arg < 0 else depth_arg
         motion_status_topic = str(self.get_parameter('motion_status_topic').value)
         tsdf_solid_points_topic = str(
             self.get_parameter('tsdf_solid_points_topic').value)
@@ -152,6 +167,8 @@ class FrontierExtractor(Node):
         self._robot_yaw   = yaw_from_quat(msg.pose.pose.orientation)
         v = msg.twist.twist.linear
         self._robot_speed = math.hypot(v.x, v.y)
+        if self._cruise_z is None:   # first odom, no depth_setpoint launch arg
+            self._cruise_z = float(p.z)
 
     def _tsdf_solid_cb(self, msg: PointCloud2) -> None:
         points = _parse_xyz_cloud(msg)
@@ -349,10 +366,14 @@ class FrontierExtractor(Node):
     # Publishing
     def _publish_goal(self, gx: float, gy: float, clusters: list) -> None:
         self._current_goal_xy = np.array([gx, gy])
+        # _cruise_z, not self._robot_pos[2]: waypoint_controller drives depth
+        # off this goal's Z now, and the robot's own live Z is exactly the
+        # self-referential value Change 12 stopped using for that.
+        gz = self._cruise_z if self._cruise_z is not None else float(self._robot_pos[2])
         goal = PointStamped()
         goal.header.stamp    = self.get_clock().now().to_msg()
         goal.header.frame_id = 'world_ned'
-        goal.point.x, goal.point.y, goal.point.z = gx, gy, float(self._robot_pos[2])
+        goal.point.x, goal.point.y, goal.point.z = gx, gy, gz
         self._goal_pub.publish(goal)
         self._viz.publish_markers(clusters, gx, gy, self._robot_pos)
 

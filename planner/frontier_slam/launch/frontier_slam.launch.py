@@ -102,8 +102,10 @@ def generate_launch_description():
         'depth',
         default_value='-1.0',
         description=(
-            'Target depth in NED metres (e.g. depth:=8.0). '
-            'Omit (or pass depth:=-1) to lock depth automatically from the first odometry reading.'
+            'Target/cruise depth in NED metres (e.g. depth:=8.0), shared by '
+            'frontier_extractor (the Z it anchors its own picks to) and '
+            'waypoint_controller (the Z it holds with no active goal). '
+            'Omit (or pass depth:=-1) to lock it from the first odometry reading instead.'
         ),
     )
     odom_topic_arg = DeclareLaunchArgument(
@@ -359,6 +361,10 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'odom_topic': odom_topic,
+                # Same value as waypoint_controller's depth_setpoint below —
+                # the cruise depth frontier_extractor anchors its own picks
+                # to, so goal.point.z is a real depth target either way.
+                'depth_setpoint': depth,
                 'tsdf_frontier_standoff_m': _float_parameter('tsdf_frontier_standoff_m'),
             }],
         ),
