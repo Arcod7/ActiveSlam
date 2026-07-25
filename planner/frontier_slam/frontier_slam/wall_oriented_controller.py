@@ -15,7 +15,8 @@ import math
 import os
 
 from frontier_slam.control_utils import (
-    depth_hold_effort, LowPassRate, wrap_angle, yaw_from_quat)
+    depth_hold_effort, LowPassRate, wrap_angle, yaw_from_quat,
+    yaw_rate_command)
 from frontier_slam.session_log import open_session_log
 from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry, Path
@@ -36,7 +37,7 @@ CSV_COLUMNS = [
     't_ros', 'rx', 'ry', 'rz', 'gx', 'gy', 'gz',
     'dist_m', 'route_hdg_deg', 'look_hdg_deg', 'hdg_err_deg',
     'wall_side', 'wall_dist_m', 'depth_err_m',
-    'surge', 'sway', 'yaw_cmd', 'heave',
+    'surge', 'sway', 'yaw_cmd', 'yaw_rate', 'heave',
     'obs_m', 'path_len', 'wp_idx', 'event',
 ]
 
@@ -174,7 +175,20 @@ def parse_xyz_cloud(msg: PointCloud2) -> 'np.ndarray | None':
 
 
 class WallOrientedController(Node):
-    KP_YAW = 0.07
+    # Heading is held through a rate loop. A direct heading->thrust law capped
+    # yaw at 0.07*pi = 0.22 of authority (under-turning); raising that gain
+    # produced 400 deg/s spins under thrust boost. MAX_YAW_RATE bounds the
+    # achieved rate instead, so it holds at any thrust ceiling.
+    MAX_YAW_RATE = 0.50      # rad/s (~29 deg/s); no-boost runs peaked near 56
+    KP_HEADING = 0.70        # heading error -> desired yaw rate
+    KP_YAW_RATE = 1.20       # rate error -> thrust command
+    # Measured yaw acceleration at full thrust is ~27 rad/s2. With the old
+    # 0.20 s rate filter the vehicle gained ~5 rad/s before the loop saw it,
+    # so it overshot to 400 deg/s and then braked -- correctly, but far too
+    # late. Sense fast, and cap the effort so the acceleration it must catch
+    # is bounded in the first place.
+    YAW_RATE_TAU = 0.05
+    YAW_EFFORT_LIMIT = 0.30
     KP_SPEED = 0.25
     KP_HEAVE = 0.35
     KD_HEAVE = 0.50          # damps the 6.1 s depth limit cycle P alone sustains
@@ -183,13 +197,13 @@ class WallOrientedController(Node):
     MAX_SPEED = 0.25
     GOAL_RADIUS = 2.0
     GOAL_REACHED_TIMEOUT = 10.0
-    SCAN_YAW = 0.08
+    SCAN_YAW_RATE = 0.25     # rad/s (~14 deg/s) sweep, thrust-independent
     INIT_SCAN_DURATION = 10.0
     WAYPOINT_ADVANCE_DIST = 1.5
     OBS_SLOW_DIST = 1.5
     EMERGENCY_STOP_DIST = 0.4
     BACK_SURGE_SPEED = 0.12
-    ESCAPE_YAW = 0.20
+    ESCAPE_YAW_RATE = 0.50   # rad/s
     ESCAPE_DURATION = 4.0
     STUCK_SPEED_MIN = 0.15
     STUCK_WINDOW = 5.0
@@ -232,6 +246,7 @@ class WallOrientedController(Node):
         self._goal: np.ndarray | None = None
         self._pose: np.ndarray | None = None
         self._depth_rate = LowPassRate(self.DEPTH_RATE_TAU)
+        self._yaw_rate = LowPassRate(self.YAW_RATE_TAU, wrap=True)
         self._yaw = 0.0
         self._path: list[tuple[float, float]] = []
         self._wp_idx = 0
@@ -314,6 +329,7 @@ class WallOrientedController(Node):
         self._pose = np.array([p.x, p.y, p.z])
         self._yaw = yaw_from_quat(msg.pose.pose.orientation)
         self._depth_rate.update(float(p.z), self._t_ros())
+        self._yaw_rate.update(self._yaw, self._t_ros())
         if self._init_scan_end is None:
             if self._depth_setpoint is None:
                 self._depth_setpoint = float(p.z)
@@ -322,6 +338,18 @@ class WallOrientedController(Node):
             self._init_scan_end = self._t_ros() + self.INIT_SCAN_DURATION
             self.get_logger().info(
                 f'initial {self.INIT_SCAN_DURATION:.0f}s scan starting')
+
+    def _yaw_for_rate(self, target_rate: float) -> float:
+        """Thrust command that drives the measured yaw rate to target_rate.
+
+        Scan and escape used to send a fixed thrust fraction open-loop. With no
+        translation to share the horizontal budget and a boosted thrust ceiling
+        that produced >400 deg/s spins, so every yaw command now goes through
+        the rate loop and is bounded by what was actually asked for.
+        """
+        return float(np.clip(
+            self.KP_YAW_RATE * (target_rate - self._yaw_rate.value),
+            -self.YAW_EFFORT_LIMIT, self.YAW_EFFORT_LIMIT))
 
     def _heave_cmd(self) -> float:
         if self._depth_setpoint is None:
@@ -355,7 +383,10 @@ class WallOrientedController(Node):
         look_heading = offset_heading(
             look_path_heading, self._wall_side, self._look_offset_deg)
         heading_error = wrap_angle(look_heading - self._yaw)
-        yaw_cmd = float(np.clip(self.KP_YAW * heading_error, -1.0, 1.0))
+        yaw_cmd = yaw_rate_command(
+            heading_error, self._yaw_rate.value,
+            self.KP_HEADING, self.KP_YAW_RATE, self.MAX_YAW_RATE,
+            limit=self.YAW_EFFORT_LIMIT)
 
         # Reduce travel while the requested viewing heading is far away, then
         # project the unchanged route velocity onto the current body axes.
@@ -377,14 +408,14 @@ class WallOrientedController(Node):
         now = self._t_ros()
         heave = self._heave_cmd()
         if self._init_scan_end is not None and now < self._init_scan_end:
-            self._send_thrust(0.0, 0.0, self.SCAN_YAW, heave)
+            self._send_thrust(0.0, 0.0, self._yaw_for_rate(self.SCAN_YAW_RATE), heave)
             if write_csv:
-                self._write_csv(0.0, 0.0, self.SCAN_YAW, heave, 'INIT_SCAN')
+                self._write_csv(0.0, 0.0, self._yaw_for_rate(self.SCAN_YAW_RATE), heave, 'INIT_SCAN')
             return
         if self._goal is None:
-            self._send_thrust(0.0, 0.0, self.SCAN_YAW, heave)
+            self._send_thrust(0.0, 0.0, self._yaw_for_rate(self.SCAN_YAW_RATE), heave)
             if write_csv:
-                self._write_csv(0.0, 0.0, self.SCAN_YAW, heave, 'SCAN')
+                self._write_csv(0.0, 0.0, self._yaw_for_rate(self.SCAN_YAW_RATE), heave, 'SCAN')
             return
 
         goal_dist = float(np.hypot(*(self._goal[:2] - self._pose[:2])))
@@ -394,9 +425,9 @@ class WallOrientedController(Node):
             elif now - self._goal_reached_at > self.GOAL_REACHED_TIMEOUT:
                 self._goal = None
                 self._goal_reached_at = None
-            self._send_thrust(0.0, 0.0, self.SCAN_YAW, heave)
+            self._send_thrust(0.0, 0.0, self._yaw_for_rate(self.SCAN_YAW_RATE), heave)
             if write_csv:
-                self._write_csv(0.0, 0.0, self.SCAN_YAW, heave,
+                self._write_csv(0.0, 0.0, self._yaw_for_rate(self.SCAN_YAW_RATE), heave,
                                 'GOAL_REACHED', distance=goal_dist)
             return
 
@@ -424,9 +455,9 @@ class WallOrientedController(Node):
 
         if self._escape_until is not None:
             if now < self._escape_until:
-                self._send_thrust(0.0, 0.0, self.ESCAPE_YAW, heave)
+                self._send_thrust(0.0, 0.0, self._yaw_for_rate(self.ESCAPE_YAW_RATE), heave)
                 if write_csv:
-                    self._write_csv(0.0, 0.0, self.ESCAPE_YAW, heave,
+                    self._write_csv(0.0, 0.0, self._yaw_for_rate(self.ESCAPE_YAW_RATE), heave,
                                     'CTRL_STUCK_ESCAPE', goal_dist,
                                     route_heading, look_heading, heading_error)
                 return
@@ -448,7 +479,7 @@ class WallOrientedController(Node):
                     self._escape_until = now + self.ESCAPE_DURATION
                     self._stuck_ref_pos = None
                     self._stuck_ref_t = None
-                    self._send_thrust(0.0, 0.0, self.ESCAPE_YAW, heave)
+                    self._send_thrust(0.0, 0.0, self._yaw_for_rate(self.ESCAPE_YAW_RATE), heave)
                     event = 'CTRL_STUCK'
                     return
         else:
@@ -504,7 +535,8 @@ class WallOrientedController(Node):
             float(g[2]) if g is not None else float('nan'),
             distance, math.degrees(route_heading), math.degrees(look_heading),
             math.degrees(heading_error), self._wall_side, self._wall_distance,
-            depth_error, surge, sway, yaw_cmd, heave, self._min_front_dist,
+            depth_error, surge, sway, yaw_cmd, self._yaw_rate.value, heave,
+            self._min_front_dist,
             len(self._path), self._wp_idx, event,
         ])
 

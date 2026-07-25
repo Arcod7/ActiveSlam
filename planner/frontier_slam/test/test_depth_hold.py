@@ -1,4 +1,6 @@
 """Pure tests for rate-damped depth hold."""
+import math
+
 import pytest
 
 from frontier_slam.control_utils import depth_hold_effort, LowPassRate
@@ -55,3 +57,102 @@ def test_reset_clears_history():
     r.update(1.0, 1.0)
     r.reset()
     assert r.value == 0.0 and r.update(9.0, 2.0) == 0.0
+
+
+# --- yaw authority -------------------------------------------------------
+
+from frontier_slam.control_utils import (
+    allocate_horizontal, mix_thrusters, yaw_rate_command)
+
+
+def test_yaw_survives_a_saturating_surge():
+    """The bug: at speed_factor 4 surge reached ~1.0 and whole-group
+    normalisation scaled yaw down exactly when heading error was largest."""
+    surge, sway, yaw = allocate_horizontal(1.0, 0.0, 0.5)
+    assert yaw == pytest.approx(0.5)
+    assert surge < 1.0
+
+
+def test_translation_is_untouched_when_it_already_fits():
+    assert allocate_horizontal(0.3, 0.1, 0.2) == pytest.approx((0.3, 0.1, 0.2))
+
+
+def test_pure_rotation_keeps_full_authority():
+    """Nothing to starve when translation is zero -- and scan/escape rely on
+    this, with the rate loop bounding how fast it actually turns."""
+    assert allocate_horizontal(0.0, 0.0, 1.0) == pytest.approx((0.0, 0.0, 1.0))
+
+
+def test_yaw_cannot_claim_the_whole_budget():
+    """Letting yaw take everything zeroed translation, tripped the stuck
+    detector, and the escape manoeuvre span the vehicle in place."""
+    surge, sway, yaw = allocate_horizontal(1.0, 1.0, 1.0)
+    assert yaw == pytest.approx(0.6)
+    assert surge > 0.0 and sway > 0.0
+
+
+def test_translation_always_keeps_some_authority():
+    for yaw in (0.5, 0.9, 1.0, -1.0):
+        surge, sway, _ = allocate_horizontal(1.0, 0.0, yaw)
+        assert surge > 0.0
+
+
+def test_allocated_commands_never_saturate_the_horizontal_mixer():
+    """If allocation is right, no horizontal thruster is clipped, so the
+    normaliser never rescales and yaw is delivered as commanded."""
+    for surge, sway, yaw in [(1.0, 0.0, 0.5), (0.8, 0.8, 0.3), (1.0, 1.0, 0.9)]:
+        s, w, y = allocate_horizontal(surge, sway, yaw)
+        for v in (s - w - y, s + w + y, -s - w + y, -s + w - y):
+            assert abs(v) <= 1.0 + 1e-9
+
+
+def test_mixer_still_returns_eight_setpoints():
+    assert len(mix_thrusters(1.0, 0.5, 0.2, sway=0.3)) == 8
+
+
+def test_wrapped_rate_does_not_spike_across_pi():
+    """A naive difference reads ~-2pi when yaw crosses +pi, which would slam
+    the damping term hard over."""
+    r = LowPassRate(0.0, wrap=True)
+    r.update(math.pi - 0.05, 0.0)
+    assert r.update(-math.pi + 0.05, 1.0) == pytest.approx(0.1, abs=1e-6)
+
+
+# --- yaw rate limiting ---------------------------------------------------
+
+RATE_GAINS = dict(kp_heading=0.7, kp_rate=1.2, max_rate=0.5)
+
+
+def test_large_heading_error_is_capped_at_the_rate_limit():
+    """The 400 deg/s spin: a big heading error must not ask for unbounded rate.
+    At the cap and already turning at it, no further command is needed."""
+    assert yaw_rate_command(math.pi, 0.5, **RATE_GAINS) == pytest.approx(0.0)
+
+
+def test_command_opposes_overspeed_rotation():
+    """Turning faster than requested must brake, not keep pushing."""
+    assert yaw_rate_command(0.0, 1.5, **RATE_GAINS) < 0.0
+
+
+def test_small_error_still_produces_a_correction():
+    """The old failure was under-turning: modest error must still command."""
+    assert yaw_rate_command(0.3, 0.0, **RATE_GAINS) > 0.2
+
+
+def test_rate_cap_is_independent_of_heading_error_size():
+    """Doubling an already-saturating error changes nothing -- that is what
+    makes the limit hold regardless of thrust ceiling."""
+    a = yaw_rate_command(1.5, 0.0, **RATE_GAINS)
+    b = yaw_rate_command(3.0, 0.0, **RATE_GAINS)
+    assert a == pytest.approx(b)
+
+
+def test_output_is_bounded():
+    assert abs(yaw_rate_command(math.pi, -9.0, **RATE_GAINS)) <= 1.0
+
+
+@pytest.mark.parametrize('bad', [dict(kp_heading=-1.0), dict(kp_rate=-1.0),
+                                 dict(max_rate=0.0)])
+def test_invalid_yaw_gains_rejected(bad):
+    with pytest.raises(ValueError):
+        yaw_rate_command(0.0, 0.0, **{**RATE_GAINS, **bad})
