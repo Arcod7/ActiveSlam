@@ -32,6 +32,7 @@ from slam_backend.sensor_models.noise_profiles import load_noise_profile, NoiseP
 from slam_backend.geometry_utils import (
     odom_to_matrix, matrix_to_odom, matrix_to_transform_stamped,
     matrix_to_pose_stamped, transform_msg_to_matrix, orthonormalize)
+from slam_backend.odom_noise import odom_trans_sigma
 from slam_backend.scan_matcher import ScanMatcher
 
 
@@ -43,6 +44,11 @@ YAW_COV_INDEX = 35
 
 # Index of yaw in the GTSAM [rot|trans] prior sigma vector.
 PRIOR_YAW_INDEX = 2
+
+
+def _stamp_seconds(stamp) -> float:
+    """builtin_interfaces/Time message -> float seconds."""
+    return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
 
 def prior_sigmas_with_yaw(base_sigmas: np.ndarray, yaw_var: float) -> np.ndarray:
@@ -100,8 +106,10 @@ class PoseGraphNode(Node):
         # registration, so they get separate noise models. One shared (tight)
         # sigma let noisy scan matches override good odometry -- dragging the
         # estimate via sequential factors and warping it via loop closures.
+        # odom_sigma_trans is a FLOOR for near-stationary edges; the real
+        # per-edge value is derived from the DVL profile in odom_noise.py.
         self.declare_parameter('odom_sigma_rot', 0.02)
-        self.declare_parameter('odom_sigma_trans', 0.02)
+        self.declare_parameter('odom_sigma_trans', 0.002)
         self.declare_parameter('scan_sigma_rot', 0.08)
         self.declare_parameter('scan_sigma_trans', 0.12)
         self.declare_parameter('scan_voxel_size', 0.1)
@@ -225,7 +233,13 @@ class PoseGraphNode(Node):
         # down-weight it; sonar scan-matching is decimeter-level and robustified
         # so outlier registrations are suppressed. GTSAM Pose3 tangent order:
         # [rot_x, rot_y, rot_z, trans_x, trans_y, trans_z].
+        # odom_trans is now a FLOOR, not the sigma: the per-edge value comes
+        # from the DVL profile via odom_trans_sigma(), because a constant cannot
+        # scale with edge length or respond to the noise profile at all. The
+        # static model below is kept for the anchor prior on keyframe 0.
         odom_rot, odom_trans = odom_sigmas
+        self._odom_rot = odom_rot
+        self._odom_trans_floor = odom_trans
         self._odom_noise = gtsam.noiseModel.Diagonal.Sigmas(
             np.array([odom_rot] * 3 + [odom_trans] * 3))
         scan_rot, scan_trans = scan_sigmas
@@ -253,6 +267,17 @@ class PoseGraphNode(Node):
         # inserted into iSAM2, so they cannot collide with keyframe symbols.
         self._sym_a = gtsam.symbol('n', 0)
         self._sym_b = gtsam.symbol('n', 1)
+
+    def _odom_noise_for(self, T_delta: np.ndarray, prev_stamp, stamp):
+        """Dead-reckoning noise for one edge, scaled by how far and how long
+        the vehicle travelled. Rotation keeps its constant: relative attitude
+        between two keyframes does not accumulate the way position does."""
+        sigma = odom_trans_sigma(
+            float(np.linalg.norm(T_delta[:3, 3])),
+            _stamp_seconds(stamp) - _stamp_seconds(prev_stamp),
+            self._profile.dvl, self._odom_trans_floor)
+        return gtsam.noiseModel.Diagonal.Sigmas(
+            np.array([self._odom_rot] * 3 + [sigma] * 3))
 
     def _att_depth_noise_for(self, yaw_var: float):
         """Per-keyframe attitude+depth prior; rebuilt because yaw varies."""
@@ -337,7 +362,8 @@ class PoseGraphNode(Node):
             # 1) Dead-reckoning odometry BetweenFactor (tight, non-robust)
             T_delta = np.linalg.inv(prev.T_odom) @ T_odom
             graph.add(gtsam.BetweenFactorPose3(
-                prev.symbol, sym, gtsam.Pose3(T_delta), self._odom_noise))
+                prev.symbol, sym, gtsam.Pose3(T_delta),
+                self._odom_noise_for(T_delta, prev.stamp, stamp)))
 
             # 2) Sequential scan-matching BetweenFactor (looser, robustified)
             result = self._scanner.align(cloud_body, prev.cloud, T_delta)
