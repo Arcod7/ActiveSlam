@@ -9,12 +9,12 @@
 #   lc          loop closure alone (repeats the earlier baseline for direct comparison)
 #   lc_revisit  + uncertainty-triggered revisit, dopt_trigger:0.004 (below the ~0.006 ceiling)
 #
-# 2 configs x 3 seeds = 6 runs x 25 min ~= 2.6 h.
+# 2 configs x 3 seeds = 6 runs x 12.5 min ~= 1.4 h.
 #
 #   python3 eval/eval_tools/scripts/run_matrix.py \
 #       eval/eval_tools/config/matrix_revisit_dopt004.yaml
 batch_name: revisit_dopt004
-duration_s: 1500
+duration_s: 750
 settle_s: 15
 seeds: [101, 102, 103]
 
