@@ -55,6 +55,9 @@ BLOCKED_DRIVE_FLASH_S = 1.5
 # the option rows readable.
 PANEL_W = 32
 PANEL_MIN_TERM_WIDTH = 100
+# Below this the selected row has no room for a value list worth reading, so it
+# is dropped rather than shown as ellipses.
+CHOICE_MIN_W = 14
 # Space cycles a value forward, so it reads as a Right arrow everywhere on the
 # option list. Ascend gave the key up for it (launcher_core.DRIVE_KEYS).
 PREV_KEYS = (curses.KEY_LEFT,)
@@ -1008,7 +1011,7 @@ def pending_tag(pend, limit=2):
 
 def fmt_value(p, v):
     if p.kind == "bool":
-        return "[x] on" if v else "[ ] off"
+        return "[x]" if v else "[ ]"
     if p.kind == "enum":
         return f"< {v} >"
     if p.kind == "text":
@@ -1093,15 +1096,16 @@ def metric_rows(metrics, mapper, values=None):
 
 
 def choice_lines(p, value):
-    """What else the selected option can be set to, as (text, is_current) rows.
+    """What else the selected option can be set to, as (text, is_current) entries.
 
     Enums list their values; the numeric kinds have no list, so they show the
-    bounds and the arrow-key step instead.
+    bounds and the arrow-key step instead. Bools have none at all — [x]/[ ] on
+    the row already says both states.
     """
     if p.kind == "enum":
         return [(c, c == value) for c in p.choices]
     if p.kind == "bool":
-        return [("on", bool(value)), ("off", not value)]
+        return []
     if p.kind == "text":
         return [("free text — i to edit", False)]
     lo = "-inf" if p.lo is None else f"{p.lo:g}"
@@ -1110,15 +1114,11 @@ def choice_lines(p, value):
 
 
 def draw_side_panel(stdscr, link, values, running, driving, drive_active,
-                    top, height, x, width, cur=None):
-    """Robot state, error metrics, the GT/belief pose table and the selected
-    option's other values, right of the option list."""
+                    top, height, x, width):
+    """Robot state, error metrics and the GT/belief pose table, right of the
+    option list."""
     right = x + width
-    # The value list is placed first and the flowing sections above are given
-    # what is left, so it stays anchored to the bottom of the panel.
-    block_top = draw_choice_block(stdscr, cur, values[cur.id] if cur else None,
-                                  x, width, top, top + height)
-    end = block_top
+    end = top + height
     row = top
 
     def note(message, attr=curses.A_DIM):
@@ -1193,34 +1193,50 @@ def draw_side_panel(stdscr, link, values, running, driving, drive_active,
         row += 1
 
 
-def draw_choice_block(stdscr, cur, value, x, width, top, end):
-    """The selected option's other values, pinned to the bottom of the panel so
-    it stays in one place instead of sliding with the content above it.
-    Returns the first row it occupies, or `end` when there is nothing to show."""
-    if cur is None:
-        return end
-    lines = choice_lines(cur, value)
-    if not lines:
-        return end
-    right = x + width
-    # divider + heading + one row per value. Capped at half the panel so a long
-    # enum on a short terminal cannot push the pose table off the top.
-    budget = max(3, (end - top) // 2)
-    block_top = max(top, end - min(len(lines) + 2, budget))
-    lines = lines[:max(0, end - block_top - 2)]
-    if not lines:
-        return end
-    try:
-        stdscr.hline(block_top, x, curses.ACS_HLINE, width)
-    except curses.error:
-        pass
-    put(stdscr, block_top + 1, x, cur.label[:width - 1],
-        curses.A_BOLD | curses.color_pair(C_HEAD), maxx=right)
-    for offset, (text, current) in enumerate(lines):
-        put(stdscr, block_top + 2 + offset, x + 1, f"{'*' if current else ' '} {text}",
+def draw_choice_inline(stdscr, p, value, row, col, maxx):
+    """The selected option's values along its own row, the current one in < >.
+
+    A list too long for the row scrolls under the cursor instead of sliding it:
+    the current value is held near the middle and the others move past it, so
+    the eye keeps one place to look. Near either end the list stops and the
+    cursor travels the last stretch itself. `...` marks a cut side."""
+    entries = choice_lines(p, value)
+    width = maxx - col - 1
+    if not entries or width < CHOICE_MIN_W:
+        return
+    segments, total = [], 0
+    for text, current in entries:
+        if total:
+            total += 2
+        label = f"< {text} >" if current else text
+        segments.append((total, label, current))
+        total += len(label)
+    offset = 0
+    if total > width:
+        # Numeric and text options mark nothing current, so they scroll from the
+        # head; there is no cursor to centre on.
+        cursor = next((s for s in segments if s[2]), None)
+        if cursor is not None:
+            offset = max(0, min(cursor[0] - (width - len(cursor[1])) // 2,
+                                total - width))
+    for start, label, current in segments:
+        clip_lo = max(start, offset)
+        clip_hi = min(start + len(label), offset + width)
+        if clip_hi <= clip_lo:
+            continue
+        # A value cut by the edge is left out — half of one reads as a value of
+        # its own. The current one is drawn cut rather than dropped, so the
+        # cursor is on the row even when it alone is wider than the space.
+        if (clip_lo, clip_hi) != (start, start + len(label)) and not current:
+            continue
+        put(stdscr, row, col + clip_lo - offset,
+            label[clip_lo - start:clip_hi - start],
             (curses.color_pair(C_OK) | curses.A_BOLD) if current
-            else curses.A_DIM, maxx=right)
-    return block_top
+            else curses.A_DIM, maxx=maxx)
+    if offset:
+        put(stdscr, row, col, "...", curses.A_DIM, maxx=maxx)
+    if offset + width < total:
+        put(stdscr, row, col + width - 3, "...", curses.A_DIM, maxx=maxx)
 
 
 def control_screen(stdscr, sup, values, link, session):
@@ -1562,23 +1578,37 @@ def control_screen(stdscr, sup, values, link, session):
                     maxx=list_right)
                 continue
             marker = "> " if sel else "  "
-            text = f"{marker}{p.label}: {fmt_value(p, values[p.id])}"
-            put(stdscr, row, 4, text,
-                curses.A_REVERSE if sel else curses.A_NORMAL, maxx=list_right)
+            label = f"{marker}{p.label}:"
             # What applying this option costs sits on the option's own row. A
             # live push doesn't update the group's launch snapshot, so an option
-            # can be both live and still due a restart — say both.
+            # can be both live and still due a restart — say both. Measured
+            # before anything is drawn: where the value list starts decides
+            # whether it fits, and that decides what the row itself says.
+            tags = []
             if running:
-                tag_col = 5 + len(text)
                 if p.live:
-                    put(stdscr, row, tag_col, "(live)",
-                        curses.color_pair(C_OK), maxx=list_right)
-                    tag_col += 7
+                    tags.append(("(live)", curses.color_pair(C_OK)))
                 pend = sup.pending_for(p.id, pending_values)
                 if pend:
-                    put(stdscr, row, tag_col, pending_tag(pend),
-                        curses.color_pair(C_WARN) | curses.A_BOLD,
-                        maxx=list_right)
+                    tags.append((pending_tag(pend),
+                                 curses.color_pair(C_WARN) | curses.A_BOLD))
+            choice_col = 6 + len(label) + sum(len(t) + 1 for t, _ in tags)
+            # The value list carries the current value in < >, so the row does
+            # not repeat it — unless the pane is too narrow to draw the list.
+            inline = (sel and p.kind == "enum"
+                      and list_right - choice_col - 1 >= CHOICE_MIN_W)
+            text = label if inline else f"{label} {fmt_value(p, values[p.id])}"
+            put(stdscr, row, 4, text,
+                curses.A_REVERSE if sel else curses.A_NORMAL, maxx=list_right)
+            tag_col = 5 + len(text)
+            for tag, attr in tags:
+                put(stdscr, row, tag_col, tag, attr, maxx=list_right)
+                tag_col += len(tag) + 1
+            # The values this option can take, after the tags on its own row —
+            # only for the selection, so there is one such list on screen.
+            if sel:
+                draw_choice_inline(stdscr, p, values[p.id], row, tag_col + 1,
+                                   list_right)
 
         if panel:
             # The panel runs the full column height, past the description pane:
@@ -1591,7 +1621,7 @@ def control_screen(stdscr, sup, values, link, session):
                 pass
             draw_side_panel(stdscr, link, values, running, driving,
                             driving and time.time() - last_drive_at < 0.6,
-                            list_top, panel_h, panel_x, PANEL_W - 1, cur)
+                            list_top, panel_h, panel_x, PANEL_W - 1)
 
         # -- description pane for the selected option
         # The value-specific line is rendered first and on its own, so cycling a
