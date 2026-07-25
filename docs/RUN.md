@@ -201,21 +201,41 @@ traceback/process death); it is not an accuracy pass/fail threshold.
 
 ## RViz views
 
-The view switches automatically with `mapper`/`slam` (`slam:=slam` wins if both
-apply — see [`bringup/rviz/`](../bringup/rviz)):
+One config for every mode — [`bringup/rviz/demo.rviz`](../bringup/rviz/demo.rviz).
+A display whose topic has no publisher in the current mode draws nothing, so
+what each mode shows falls out of what it publishes.
 
-- default (`mapper:=octomap slam:=none`): the base view.
-- `mapper:=tsdf`: the TSDF surface plus `OcTree (occupied)`. `octomap_server`
-  is not launched in this mode — `/octomap_binary` comes from
-  `tsdf_to_octomap`, which rebuilds an `octomap::OcTree` out of the TSDF's
-  occupied and free voxels (`tsdf_octomap:=true`, the default). With the
-  bridge off, enable the marker-based `TSDFVoxels` display instead.
+RViz is started on a scratch **copy** of that file (the path is printed at
+launch): RViz saves its whole config when a session ends, which otherwise
+rewrote the tracked view — that is why a display ticked on in one session
+came back off in the next. Copy the scratch file back over
+`bringup/rviz/demo.rviz` to keep a change made in a session.
+
+- every mode: `RobotState` (`/motion/robot_marker`) is the vehicle arrow —
+  green while the motion gate is enabled, purple while it is disabled. It
+  comes from `motion_safety_gate`, so it follows the pose the controller acts
+  on. In goto mode the target sphere is purple under the same condition.
+
+- default (`mapper:=octomap slam:=none`): `Sonar PointCloud` (`/cloud_in`)
+  building the 3-D `Octomap` voxels (`/occupied_cells_vis_array`), plus the
+  `Sonar DepthMap` image (`/cloud_in/range_image`). `ProjectedMapSlice`
+  (`/projected_map`) shows the 2-D band the planner and rqt see; it is off by
+  default because it draws a flat plane through the scene.
+- `mapper:=tsdf`: `TSDFVoxels` (`/tsdf/voxels`); `TSDFSurface`
+  (`/tsdf/surface_cloud`) is present but off. `octomap_server` is not launched
+  in this mode, and the `OcTree` displays stay empty: `tsdf_to_octomap`
+  publishes on `/tsdf/octomap_binary`, not `/octomap_binary`, so its octree —
+  the interface for 3-D frontier detection and 3-D A* (`tsdf_octomap:=true`,
+  the default) — no longer draws octree voxels on top of the TSDF voxels.
 - `slam:=slam`: ground truth (green) vs SLAM (blue) vs raw dead-reckoning (red)
-  paths, a live drift arrow + text HUD (error/ATE/RPE/keyframes/loop
-  closures/D-optimality, from `/eval/markers`), pose-graph edges, and covariance
-  ellipsoids — plus a second map built from the exact simulator pose (`/gt/...`
-  topics) overlaid against the SLAM-estimate map, so you can see where the
-  belief map diverges from reality, not just how far the path has drifted.
+  paths, a live drift line labelled with the current error in metres
+  (`/eval/markers_live`), pose-graph edges, and covariance ellipsoids;
+  ATE/RPE/keyframes/loop closures/D-optimality are in the docked Eval HUD
+  panel. A second map built from the exact simulator pose is overlaid against
+  the belief map, in a representation that does not hide it:
+  `Octopoints_GroundTruth` (green points, `/gt/octomap_point_cloud_centers`)
+  against the belief `Octomap` voxels, and `TSDFSurface_GroundTruth` (green,
+  `/gt/tsdf/surface_cloud`) against the belief `TSDFVoxels`.
 
 ## Running pieces individually
 

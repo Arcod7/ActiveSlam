@@ -1860,3 +1860,50 @@ visibility evaluates to true under `goto`/`frontier` and false under
 `teleop`. Not yet live-run in simulation — the side panel's telemetry has
 not been observed against a moving robot, so the activity labels and the
 coverage/accuracy feeds are unconfirmed end-to-end.
+
+---
+
+## Phase 47 — One octree topic per backend, and an RViz view that reads at a glance
+
+**Date**: 2026-07-25
+**Files**: `bringup/rviz/demo.rviz`,
+`slam/stonefish_groundtruth_mapping/launch/mapper_only.launch.py`,
+`slam/stonefish_groundtruth_mapping/launch/tsdf.launch.py`,
+`slam/tsdf_octomap/src/tsdf_to_octomap.cpp`, `bringup/launch/demo.launch.py`,
+`eval/eval_tools/eval_tools/benchmark.py`, `launcher_model.py`, `docs/RUN.md`,
+`planner/frontier_slam/FutureWork.md`, `STATE.md`
+
+Phase 42 gave the TSDF backend an octree by publishing it on `/octomap_binary`
+— the topic `octomap_server` owns and the two RViz `OcTree` displays are bound
+to. Under `mapper:=tsdf` that put octree voxels on top of `/tsdf/voxels`: two
+renderings of the same cells, from two different reconstructions, fighting for
+the same pixels. The octree is a planning interface (3-D frontier detection,
+3-D A*), not a view, and nothing subscribes to it yet, so it moves to
+`/tsdf/octomap_binary` via a node remap. `mapper:=octomap` is untouched, the
+`OcTree` displays simply draw nothing under TSDF, and `eval_tools/map_saver`
+already blanked its octomap service under TSDF so no consumer changes.
+
+Ground truth is now always shown in a representation that does not occlude the
+belief map it is being compared against: `Octopoints_GroundTruth` (green
+points, `/gt/octomap_point_cloud_centers`) against the belief `Octomap`
+voxels, alongside the existing `TSDFSurface_GroundTruth` against `TSDFVoxels`.
+A solid GT voxel map hid exactly the divergence it was there to show.
+
+`Sonar DepthMap` is enabled and its dock marked visible in the saved
+`QMainWindow State` — the display was on a topic published in every mode but
+was saved disabled, so it "disappeared" depending on which session last wrote
+the config. `ProjectedMapSlice` (`/projected_map`) is added, off by default:
+the same 2-D band rqt shows, available without a second tool.
+
+The live drift marker becomes a `LINE_LIST` labelled `error x.xx m` at its
+midpoint. As an `ARROW` the head and shaft are scaled independently of the
+length, so at the sub-metre drift that matters it rendered as a blob rather
+than a distance, and the number was only readable in the HUD panel.
+
+**Verified**: `ros2 launch stonefish_groundtruth_mapping mapper_only.launch.py
+mapper:=tsdf tsdf_octomap:=true` lists `/tsdf/octomap_binary` and no
+`/octomap_binary`, with `tsdf_to_octomap` logging the resolved topic name.
+`demo.rviz` parses as YAML with every display's topic as listed above; the
+four touched packages build clean. Not yet live-run: the drift line label and
+the ground-truth point overlay have not been watched against a moving robot
+under `slam:=slam`.

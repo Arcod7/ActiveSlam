@@ -12,27 +12,54 @@ current mode draws nothing, so nothing has to be picked — and there is no
 second copy left to drift out of sync (three hand-edited configs were merged
 into this one; the `mapper`/`slam` branch in both launch paths is gone).
 
-Enabled by default:
-- `OcTree (occupied)` on `/octomap_binary` — published by `octomap_server`
-  under `mapper:=octomap`, by `tsdf_to_octomap` under `mapper:=tsdf`. With
-  `tsdf_octomap:=false` there is no `/octomap_binary` at all; enable
-  `TSDFVoxels` instead. `OcTree (free)` is present but off.
-- `TSDFSurface` (orange, `/tsdf/surface_cloud`) and
-  `TSDFSurface_GroundTruth` (green, `/gt/tsdf/surface_cloud`) together, so
-  `slam:=slam mapper:=tsdf` shows belief vs. truth in the same
-  representation. The marker-based `TSDFVoxels`/`TSDFVoxels_GroundTruth`
-  views of the same cells are present but off.
-- `GroundTruthMap` (`/gt/octomap_binary`) — see "Ground-truth reference map".
+Both launch paths hand RViz a **scratch copy** under
+`$TMPDIR/activeslam_rviz/` (`session_rviz_config` in `demo.launch.py`,
+`_rviz_config` in `launcher_core.py`). RViz rewrites its entire config when a
+session ends, and the installed path is a symlink into the source tree under
+`--symlink-install`, so every run used to edit this tracked file: a display
+ticked on in one session came back off from another, and marker namespace
+lists and window geometry churned the diff. The copy absorbs that. To keep a
+change made inside a session, copy its scratch file back over
+`bringup/rviz/demo.rviz` — the launch prints the path.
+
+One representation per map backend, so the two backends never draw over each
+other. Enabled by default:
+- `Sonar PointCloud` (`/cloud_in`) and `Octomap` (`/occupied_cells_vis_array`)
+  — the default `mapper:=octomap` view: the cloud building the 3-D octomap.
+  `ProjectedMapSlice` (`/projected_map`, the 2-D planning/rqt band) is present
+  but off; it draws a flat plane through the scene.
+- `TSDFVoxels` (`/tsdf/voxels`) for `mapper:=tsdf`. `TSDFSurface` (orange,
+  `/tsdf/surface_cloud`) is present but off.
+- `OcTree (free)`/`OcTree (occupied)` on `/octomap_binary` — `octomap_server`
+  only, i.e. `mapper:=octomap`. `tsdf_to_octomap` publishes its octree on
+  `/tsdf/octomap_binary` instead (see "TSDF → OcTree"), so these stay empty
+  under `mapper:=tsdf` rather than overlaying octree voxels on `TSDFVoxels`.
+  `OcTree (occupied)` is off — `Octomap` already shows the same cells.
+- Ground truth vs. belief, always in a representation that does not hide the
+  belief map: `Octopoints_GroundTruth` (green points,
+  `/gt/octomap_point_cloud_centers`) against `Octomap`, and
+  `TSDFSurface_GroundTruth` (green, `/gt/tsdf/surface_cloud`) against
+  `TSDFVoxels`. The marker-based `TSDFVoxels_GroundTruth` is present but off.
+  Both GT topics only publish under `slam:=slam` — see "Ground-truth
+  reference map".
+- `RobotState` (`/motion/robot_marker`) — the vehicle arrow, green while the
+  motion gate is enabled and purple while it is disabled, published by
+  `motion_safety_gate` at its tick rate from the pose it already watches
+  (ground truth under `slam:=none`, `/slam/odometry` under `slam:=slam`). An
+  RViz Odometry display carries a fixed colour, so the old `GroundTruth`
+  arrow could not show gate state and is now off; the launcher's goto-mode
+  target sphere follows the same green/purple rule.
 - Ground truth (green) vs SLAM (blue) vs raw dead-reckoning (red) paths,
-  pose-graph edges, covariance ellipsoids, and a drift arrow, all from
-  `slam:=slam`. Metrics — `err`/`ATE`/`RPE` translation+rotation/keyframe
-  count/loop-closure count/D-optimality, refreshed on every `/slam/pose`
-  update — come from `eval_tools/benchmark.py`'s `/eval/markers` and render
-  in the Eval HUD panel docked at the bottom.
-- Exactly one image view, `SLAM input (noised range)`
-  (`/cloud_in/range_image`, published in every mode). `DepthCamera` and
-  `Clean cloud (range)` are present but off: enabling several tabs them into
-  one dock slot where only the front tab renders.
+  pose-graph edges, covariance ellipsoids, and `LiveDrift` — a GT→estimate
+  line labelled `error x.xx m`, at 10 Hz off `/slam/odometry`
+  (`/eval/markers_live`); a line, not an arrow, because at small drift the
+  arrowhead swallowed the shaft. All from `slam:=slam`. The scalar metrics
+  (`err`/`ATE`/`RPE` translation+rotation/keyframe count/loop-closure
+  count/D-optimality) come from `eval_tools/benchmark.py`'s `/eval/markers`
+  and render in the Eval HUD panel docked at the bottom.
+- One image view, `Sonar DepthMap` (`/cloud_in/range_image`, published in
+  every mode), enabled and docked in the saved window state — a second image
+  display would tab into the same dock slot where only the front tab renders.
 
 ## Ground-truth reference map (`slam:=slam` only)
 
@@ -115,7 +142,7 @@ disagree:
 | `/tsdf/surface_cloud`, `/tsdf/voxels` | cloud, MarkerArray | RViz |
 | `/tsdf/occupied_voxels`, `/tsdf/free_voxels` | PointCloud2 | frontier solid rejection; `tsdf_to_octomap` |
 | `/projected_map` | OccupancyGrid | 2-D frontier detection + A* (`publish_projected_map:=true`) |
-| `/octomap_binary` | octomap_msgs/Octomap | RViz OctoMap displays; the octree interface for future 3-D frontier/A* (`tsdf_octomap:=true`, default) |
+| `/tsdf/octomap_binary` | octomap_msgs/Octomap | the octree interface for future 3-D frontier/A* (`tsdf_octomap:=true`, default). Deliberately not `/octomap_binary` — that is `octomap_server`'s, and RViz's OcTree displays subscribe to it |
 
 `slam/tsdf_octomap/` (`tsdf_to_octomap`, C++) rebuilds an `octomap::OcTree`
 from the occupied + free clouds once a second — from scratch each cycle, since
@@ -129,7 +156,7 @@ it is missing.
 ## Packages
 
 - `slam/slam_backend/` — sensor sims (incl. `sonar_noise`), dead-reckoning fusion, pose graph, scan matcher
-- `slam/tsdf_octomap/` — `tsdf_to_octomap`: TSDF grid → `octomap::OcTree` → `/octomap_binary`
+- `slam/tsdf_octomap/` — `tsdf_to_octomap`: TSDF grid → `octomap::OcTree` → `/tsdf/octomap_binary`
 - `eval/eval_tools/` — benchmark node, map_metrics node, TUM writer, offline plotting, batch orchestrator (`scripts/run_matrix.py`)
 - `slam/stonefish_groundtruth_mapping/launch/` — layered: `core` (Stonefish
   alone) / `tf_only` / `pointcloud_only` / `mapper_only`, with
