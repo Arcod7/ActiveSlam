@@ -6,15 +6,12 @@ Panels:
       Expanded:
         - /Global Options1
         - /Status1
-        - /Sonar3D1/Topic1
+        - /Sonar PointCloud1/Topic1
         - /Octomap1/Topic1
         - /Octomap1/Namespaces1
         - /Frontiers1/Namespaces1
-        - /Path1
-        - /OccupancyGrid1
-        - /OccupancyGrid2
       Splitter Ratio: 0.5346534848213196
-    Tree Height: 316
+    Tree Height: 1469
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -53,62 +50,6 @@ Visualization Manager:
       Plane Cell Count: 10
       Reference Frame: <Fixed Frame>
       Value: true
-    - Class: rviz_default_plugins/Marker
-      Enabled: true
-      Name: TargetPoint
-      Namespaces:
-        {}
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /activeslam/target_point
-      Value: true
-    - Class: rviz_default_plugins/Camera
-      Enabled: false
-      Far Plane Distance: 100
-      Image Rendering: background and overlay
-      Name: Camera
-      Overlay Alpha: 0.5
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /sensor_msgs/image_depth
-      Value: false
-      Visibility:
-        Clean cloud (range): true
-        Covariance: true
-        DeadReckoningPath: true
-        DepthCamera: true
-        ErrorHUD: true
-        Frontiers: true
-        GraphEdges: true
-        Grid: true
-        GroundTruth: true
-        GroundTruthMap: true
-        LiveDriftArrow: true
-        OcTree (free): true
-        OcTree (occupied): true
-        Octomap: true
-        OctomapPoints: true
-        Path: true
-        PointStamped: true
-        Pose: true
-        SLAM input (noised range): true
-        SLAMPath: true
-        SLAMPoseCovariance: true
-        Sonar3D: true
-        TSDFSurface: true
-        TSDFSurface_GroundTruth: true
-        TSDFVoxels: true
-        TSDFVoxels_GroundTruth: true
-        TargetPoint: true
-        Value: true
-      Zoom Factor: 1
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -127,7 +68,7 @@ Visualization Manager:
       Max Intensity: 4096
       Min Color: 0; 0; 0
       Min Intensity: 0
-      Name: Sonar3D
+      Name: Sonar PointCloud
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 3
@@ -147,21 +88,7 @@ Visualization Manager:
       Max Value: 1
       Median window: 5
       Min Value: 0
-      Name: DepthCamera
-      Normalize Range: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /sensor_msgs/image_depth
-      Value: false
-    - Class: rviz_default_plugins/Image
-      Enabled: true
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
-      Name: SLAM input (noised range)
+      Name: Sonar DepthMap
       Normalize Range: true
       Topic:
         Depth: 5
@@ -169,23 +96,9 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /cloud_in/range_image
-      Value: true
-    - Class: rviz_default_plugins/Image
-      Enabled: false
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
-      Name: Clean cloud (range)
-      Normalize Range: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /cloud_in_raw/range_image
       Value: false
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: false
+      Enabled: true
       Name: Octomap
       Namespaces:
         {}
@@ -195,40 +108,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /occupied_cells_vis_array
-      Value: false
-    - Alpha: 1
-      Autocompute Intensity Bounds: true
-      Autocompute Value Bounds:
-        Max Value: 10
-        Min Value: -10
-        Value: true
-      Axis: Z
-      Channel Name: intensity
-      Class: rviz_default_plugins/PointCloud2
-      Color: 16; 65; 158
-      Color Transformer: FlatColor
-      Decay Time: 0
-      Enabled: false
-      Invert Rainbow: false
-      Max Color: 255; 255; 255
-      Max Intensity: 4096
-      Min Color: 0; 0; 0
-      Min Intensity: 0
-      Name: OctomapPoints
-      Position Transformer: XYZ
-      Selectable: true
-      Size (Pixels): 3
-      Size (m): 0.10000000149011612
-      Style: Boxes
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /octomap_point_cloud_centers
-      Use Fixed Frame: true
-      Use rainbow: true
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -241,7 +121,7 @@ Visualization Manager:
       Color: 255; 140; 30
       Color Transformer: FlatColor
       Decay Time: 0
-      Enabled: true
+      Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
@@ -261,9 +141,9 @@ Visualization Manager:
         Value: /tsdf/surface_cloud
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: false
+      Enabled: true
       Name: TSDFVoxels
       Namespaces:
         tsdf_voxels: true
@@ -273,7 +153,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /tsdf/voxels
-      Value: false
+      Value: true
     - Angle Tolerance: 0.10000000149011612
       Class: rviz_default_plugins/Odometry
       Covariance:
@@ -400,7 +280,7 @@ Visualization Manager:
       Name: ErrorHUD
       Namespaces:
         eval_drift: true
-        eval_hud: false
+        eval_hud: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -479,8 +359,7 @@ Visualization Manager:
       Enabled: true
       Name: Frontiers
       Namespaces:
-        frontiers: true
-        goal: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -531,8 +410,21 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /frontier_slam/path
       Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: TargetPoint
+      Namespaces:
+        activeslam: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /activeslam/target_point
+      Value: true
     - Class: octomap_rviz_plugins/OccupancyGrid
-      Enabled: false
+      Enabled: true
       Max. Height Display: 3.4028234663852886e+38
       Max. Octree Depth: 14
       Min. Height Display: -3.4028234663852886e+38
@@ -544,12 +436,12 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /octomap_binary
-      Value: false
+      Value: true
       Voxel Alpha: 0.009999999776482582
       Voxel Coloring: Cell Color
       Voxel Rendering: Free Voxels
     - Class: octomap_rviz_plugins/OccupancyGrid
-      Enabled: true
+      Enabled: false
       Max. Height Display: 3.4028234663852886e+38
       Max. Octree Depth: 16
       Min. Height Display: -3.4028234663852886e+38
@@ -561,24 +453,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /octomap_binary
-      Value: true
-      Voxel Alpha: 1
-      Voxel Coloring: Z-Axis
-      Voxel Rendering: Occupied Voxels
-    - Class: octomap_rviz_plugins/OccupancyGrid
-      Enabled: true
-      Max. Height Display: 3.4028234663852886e+38
-      Max. Octree Depth: 16
-      Min. Height Display: -3.4028234663852886e+38
-      Name: GroundTruthMap
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /gt/octomap_binary
-      Value: true
+      Value: false
       Voxel Alpha: 1
       Voxel Coloring: Z-Axis
       Voxel Rendering: Occupied Voxels
@@ -673,33 +548,27 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 21.52227020263672
+      Distance: 26.073223114013672
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 11.397700309753418
-        Y: -4.3763346672058105
-        Z: 6.439944267272949
+        X: 6.783644199371338
+        Y: 2.7556450366973877
+        Z: 6.447781085968018
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: true
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.7397961616516113
+      Pitch: 0.6247953772544861
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 2.983510971069336
+      Yaw: 2.718494415283203
     Saved: ~
 Window Geometry:
-  Camera:
-    collapsed: false
-  Clean cloud (range):
-    collapsed: false
-  DepthCamera:
-    collapsed: false
   Displays:
     collapsed: false
   Eval HUD:
@@ -709,10 +578,10 @@ Window Geometry:
   Hide Right Dock: true
   Motion Safety:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000200000000000002dc000006d4fc0200000006fb0000000c00430061006d0065007200610000000000ffffffff0000002800fffffffb000000320053004c0041004d00200069006e00700075007400200028006e006f0069007300650064002000720061006e0067006500290100000070000001070000002800fffffffb000000100044006900730070006c0061007900730100000183000005c10000018600fffffffb0000001200530065006c0065006300740069006f006e00000004c2000000c8000000b200fffffffb0000001e0054006f006f006c002000500072006f0070006500720074006900650073000000050a000000b2000000b200fffffffb0000000a0056006900650077007300000005570000018e0000013800ffffff000000030000098c0000005efc0100000001fb00000010004500760061006c002000480055004401000000000000098c0000048700ffffff000006a4000006d400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
-  SLAM input (noised range):
-    collapsed: false
+  QMainWindow State: 000000ff00000000fd0000000200000000000002dc000006bafc0200000009fb0000000c00430061006d0065007200610100000070000000ef0000000000000000fb0000001c0053006f006e00610072002000440065007000740068004d006100700000000070000000cc0000002800fffffffb000000100044006900730070006c00610079007301000000700000062f0000018600fffffffb0000001200530065006c0065006300740069006f006e00000004c2000000c8000000b200fffffffb0000001e0054006f006f006c002000500072006f0070006500720074006900650073000000050a000000b2000000b200fffffffb0000000a0056006900650077007300000005570000018e0000013800fffffffb000000160044006500700074006800430061006d0065007200610000000000ffffffff0000000000000000fb000000260043006c00650061006e00200063006c006f007500640020002800720061006e0067006500290000000000ffffffff0000000000000000fb0000001a004d006f00740069006f006e002000530061006600650074007901000006ab0000007f0000004c00ffffff000000030000098c00000078fc0100000001fb00000010004500760061006c002000480055004401000000000000098c000002cb00ffffff000006a4000006ba00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
+    collapsed: false
+  Sonar DepthMap:
     collapsed: false
   Tool Properties:
     collapsed: false
@@ -720,4 +589,4 @@ Window Geometry:
     collapsed: false
   Width: 2444
   X: 1008
-  Y: 96
+  Y: 72
