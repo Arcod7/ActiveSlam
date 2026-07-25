@@ -723,8 +723,8 @@ def fits(stdscr):
 
 def welcome_screen(stdscr, built, values):
     KEYBOARD_ROW = "Keyboard layout"
-    options = ["Launch", "---", KEYBOARD_ROW, "---",
-               "Update", "Rebuild", "---", "Infos", "Exit"]
+    options = ["Launch", "---",
+               "Update", "Rebuild", "---", "Infos", "Exit", "---", KEYBOARD_ROW]
     idx = 0
     while True:
         if not fits(stdscr):

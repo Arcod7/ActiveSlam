@@ -139,10 +139,12 @@ PARAMS = [
           "positions drive on either layout. qwerty uses W/S/Q/E/A/D; azerty "
           "uses the letters those physical keys produce (Z/S/A/E/Q/D), with W "
           "kept as a second forward key. Affects only this launcher's teleop "
-          "and target-point driving, live — the stack is not restarted.",
+          "and target-point driving, live — the stack is not restarted. Set "
+          "from the welcome screen, not listed here.",
           ["qwerty", "azerty"],
           {"qwerty": "W fwd, S back, Q/E strafe, A/D yaw.",
-           "azerty": "Z fwd, S back, A/E strafe, Q/D yaw (same finger positions)."}),
+           "azerty": "Z fwd, S back, A/E strafe, Q/D yaw (same finger positions)."},
+          visible=lambda v: False),
 
     Param("scene", "Scene", "enum", "waterlinked", "scene",
           "Stonefish world to launch. waterlinked is the unchanged baseline; "
