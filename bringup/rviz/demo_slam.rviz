@@ -28,11 +28,8 @@ Panels:
       - /Current View1
     Name: Views
     Splitter Ratio: 0.5
-  - Class: rviz_common/Time
-    Experimental: false
-    Name: Time
-    SyncMode: 0
-    SyncSource: Sonar3D
+  - Class: eval_hud_rviz/EvalHudPanel
+    Name: Eval HUD
   - Class: motion_safety_rviz/MotionSafetyPanel
     Name: Motion Safety
 Visualization Manager:
@@ -145,7 +142,7 @@ Visualization Manager:
       Use rainbow: true
       Value: true
     - Class: rviz_default_plugins/Image
-      Enabled: true
+      Enabled: false
       Max Value: 1
       Median window: 5
       Min Value: 0
@@ -157,7 +154,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /sensor_msgs/image_depth
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/Image
       Enabled: true
       Max Value: 1
@@ -173,7 +170,7 @@ Visualization Manager:
         Value: /cloud_in/range_image
       Value: true
     - Class: rviz_default_plugins/Image
-      Enabled: true
+      Enabled: false
       Max Value: 1
       Median window: 5
       Min Value: 0
@@ -185,7 +182,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /cloud_in_raw/range_image
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/MarkerArray
       Enabled: false
       Name: Octomap
@@ -402,7 +399,7 @@ Visualization Manager:
       Name: ErrorHUD
       Namespaces:
         eval_drift: true
-        eval_hud: true
+        eval_hud: false
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -704,6 +701,8 @@ Window Geometry:
     collapsed: false
   Displays:
     collapsed: false
+  Eval HUD:
+    collapsed: false
   Height: 2014
   Hide Left Dock: false
   Hide Right Dock: true
@@ -713,8 +712,6 @@ Window Geometry:
   SLAM input (noised range):
     collapsed: false
   Selection:
-    collapsed: false
-  Time:
     collapsed: false
   Tool Properties:
     collapsed: false

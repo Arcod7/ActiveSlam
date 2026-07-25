@@ -340,6 +340,22 @@ one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.3
   depth-camera-style Image. `/cloud_in/range_image` (what SLAM gets) and `/cloud_in_raw/range_image`
   (clean) publish from `pointcloud_only.launch.py`; RViz layouts show them as "SLAM input (noised
   range)" and "Clean cloud (range)". Toggling Noise Attenuation changes the SLAM-input image live.
+  **(Phase 43)** All three RViz configs previously had two or three of these Image displays
+  enabled at once, tabbed together in the same dock slot — only the front tab renders, so which
+  view actually appeared on launch depended on the saved (opaque, hand-uneditable) `QMainWindow
+  State` blob, not on anything the launch args controlled. Each config now enables exactly one:
+  `DepthCamera` (ground truth) in `demo.rviz`/`demo_tsdf.rviz`, `SLAM input (noised range)` in
+  `demo_slam.rviz`. The floating 3D `eval_hud` text marker (ATE/RPE/D-opt, `benchmark.py`) is
+  likewise superseded in `demo_slam.rviz` by a real docked panel — see Eval HUD panel below.
+- ✅ **Eval HUD panel** (Phase 43, `tools/eval_hud_rviz`): new RViz panel plugin (mirrors
+  `motion_safety_rviz`'s structure) subscribing to `/eval/markers` and showing the `eval_hud`
+  namespace's text (err/ATE/RPE/KF/LC/D-opt) in a panel docked where the `Time` panel used to
+  be in `demo_slam.rviz` — a fixed on-screen readout instead of a marker that floats above the
+  robot in world space and moves with the camera. `demo_slam.rviz`'s `Time` panel entry is
+  removed. Not yet visually confirmed in a live GUI session (the panel's own gtest passes
+  offscreen; RViz2 needs `QT_QPA_PLATFORM=xcb` on this machine, see Build & run above) — the
+  saved `QMainWindow State` blob has no entry for the new panel name, so it may not dock in
+  exactly the old `Time` slot on first launch and might need dragging into place once.
 - ✅ **Benchmarking switches** (Phase 16): `loop_closure:=false` keeps
   `/slam/loop_closure_count` at 0 (default still closes loops); `noise_seed:=7` reaches all
   four sensor nodes; a forced-threshold live run fired 4 map-rebuild cycles cleanly

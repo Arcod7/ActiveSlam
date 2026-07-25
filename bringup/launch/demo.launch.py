@@ -27,8 +27,9 @@ something useful with mapper:=tsdf (a LogInfo reminds you at launch).
 
 RViz view is picked automatically (see rviz/demo*.rviz), slam:=slam taking priority:
   slam:=slam    -> demo_slam.rviz: GT vs SLAM vs dead-reckoning paths, a drift arrow
-                   + live error/ATE/RPE text HUD, graph edges, covariance ellipsoids,
-                   and a second ground-truth-only map (see gt_map.launch.py) overlaid
+                   + a live error/ATE/RPE/D-opt metrics panel docked at the bottom
+                   (tools/eval_hud_rviz), graph edges, covariance ellipsoids, and a
+                   second ground-truth-only map (see gt_map.launch.py) overlaid
                    against the belief map so map drift/distortion is visible directly
   mapper:=tsdf  -> demo_tsdf.rviz: TSDF surface/voxels instead of OctoMap displays
   otherwise     -> demo.rviz: unchanged base view

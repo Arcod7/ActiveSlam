@@ -1,0 +1,10 @@
+<library path="eval_hud_rviz">
+  <class
+    name="eval_hud_rviz/EvalHudPanel"
+    type="eval_hud_rviz::EvalHudPanel"
+    base_class_type="rviz_common::Panel">
+    <description>
+      Live ATE/RPE/D-opt evaluation metrics, docked at the bottom of the window.
+    </description>
+  </class>
+</library>

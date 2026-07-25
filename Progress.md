@@ -1595,3 +1595,53 @@ monitor, plots, parameter reconfigure. Like the RViz group it is killed
 outright rather than SIGINT-laddered (a viewer has nothing to flush) and has no
 `depends`, so it never restarts on a config change. `rqt` needs no install:
 `ros-jazzy-rqt-common-plugins` is already present in the container.
+
+## Phase 43 — One camera/sonar view per RViz config, and a docked eval metrics panel
+
+**Date**: 2026-07-25
+**Files**: `bringup/rviz/demo.rviz`, `bringup/rviz/demo_tsdf.rviz`,
+`bringup/rviz/demo_slam.rviz`, `bringup/package.xml`,
+`tools/eval_hud_rviz/` (new package), `STATE.md`, `Progress.md`
+
+**Discovery**: all three RViz configs enabled two or three `Image` displays
+at once (`DepthCamera`, `SLAM input (noised range)`, `Clean cloud (range)` in
+`demo_slam.rviz`), each opening its own dock window. Multiple `Image` dock
+windows tab together, and only the front tab renders — which one that is on
+launch is controlled entirely by the saved `QMainWindow State` blob (an
+opaque, hand-uneditable hex-encoded `QMainWindow::saveState()` binary), not by
+anything the launch args select. That is why the visible camera/sonar view
+appeared to change unpredictably between runs.
+
+**Fix**: each config now enables exactly one `Image` display —
+`DepthCamera` (ground truth depth camera) in `demo.rviz`/`demo_tsdf.rviz`
+(no SLAM, so there is no noise model to contrast against), `SLAM input
+(noised range)` in `demo_slam.rviz` (what the pose graph actually consumes).
+The other Image displays are left in the config, disabled, rather than
+deleted, so they stay one click away if needed.
+
+**Eval HUD panel**: the ATE/RPE/D-opt live text (`benchmark.py`'s `eval_hud`
+marker namespace on `/eval/markers`) was a `TEXT_VIEW_FACING` marker floating
+above the robot in world space — legible only when the camera happened to be
+pointed at it. New `tools/eval_hud_rviz` package (mirrors the structure of
+`tools/motion_safety_rviz`: a `pluginlib`-registered `rviz_common::Panel`)
+subscribes to `/eval/markers`, extracts the `eval_hud` namespace marker's
+text, and renders it in a panel docked at the bottom of the window — the slot
+the `Time` panel previously occupied in `demo_slam.rviz`. The `Time` panel
+entry is removed from that config (not from `demo.rviz`/`demo_tsdf.rviz`,
+which have no `ErrorHUD` display and so no metrics to show). The `eval_hud`
+marker namespace itself is disabled in the `ErrorHUD` `MarkerArray` display
+to avoid showing the same numbers twice; the `eval_drift` arrow in the same
+display is untouched.
+
+**Verification**: ✅ `eval_hud_rviz` builds cleanly against the existing
+`ros_ws` install as an overlay (`colcon build --packages-select
+eval_hud_rviz bringup`); its plugin is discoverable via the ament pluginlib
+index (`rviz_common__pluginlib__plugin` resource resolves to the package);
+`test_eval_hud_panel` (gtest, `QT_QPA_PLATFORM=offscreen`) passes — initial
+placeholder text, and the queued-signal update path from a marker callback to
+the label both verified. All three edited `.rviz` files parse as valid YAML.
+**Not yet verified**: live GUI confirmation that the panel actually docks
+where `Time` was — the saved `QMainWindow State` blob has no entry for the
+new panel name (it never existed when that state was saved), so Qt's
+`restoreState` will fall back to a default placement for it; may need
+dragging into place once, after which RViz will save the new geometry.
