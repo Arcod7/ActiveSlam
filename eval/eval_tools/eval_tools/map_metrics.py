@@ -32,6 +32,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import PointCloud2
+from std_msgs.msg import Float64
 from sensor_msgs_py import point_cloud2
 from scipy.spatial import cKDTree
 
@@ -144,6 +145,12 @@ class MapMetricsNode(Node):
             't,backend,coverage,iou_occ,chamfer,rmse_belief_to_gt,rmse_gt_to_belief,'
             'n_belief,n_gt\n')
 
+        # Live feed for the launcher's metrics panel; accuracy is IoU under
+        # octomap and belief->GT RMSE under TSDF, so the reader must know the
+        # backend to label it.
+        self.pub_coverage = self.create_publisher(Float64, '/eval/map_coverage', 10)
+        self.pub_accuracy = self.create_publisher(Float64, '/eval/map_accuracy', 10)
+
         self._latest_belief_grid = None
         self._latest_gt_grid = None
         self._latest_belief_cloud = None
@@ -195,6 +202,8 @@ class MapMetricsNode(Node):
         self._metrics_file.write(
             f'{t:.6f},octomap,{coverage:.6f},{iou_occ:.6f},,,,{n_belief},{n_gt}\n')
         self._metrics_file.flush()
+        self.pub_coverage.publish(Float64(data=float(coverage)))
+        self.pub_accuracy.publish(Float64(data=float(iou_occ)))
 
     def _compute_tsdf_metrics(self):
         if self._latest_belief_cloud is None or self._latest_gt_cloud is None:
@@ -213,6 +222,8 @@ class MapMetricsNode(Node):
             f'{t:.6f},tsdf,{coverage:.6f},,{chamfer:.6f},{rmse_b2g:.6f},{rmse_g2b:.6f},'
             f'{n_belief},{n_gt}\n')
         self._metrics_file.flush()
+        self.pub_coverage.publish(Float64(data=float(coverage)))
+        self.pub_accuracy.publish(Float64(data=float(rmse_b2g)))
 
     def destroy_node(self):
         self._metrics_file.close()

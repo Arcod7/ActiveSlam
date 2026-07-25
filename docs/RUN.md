@@ -43,11 +43,14 @@ control screen that:
   first — the safety gate treats two publishers on `/motion/body_command` as
   `MULTIPLE_COMMAND_SOURCES` and stops all motion — and `Esc` hands control
   back to autonomy.
-- **follows a target point** (press `y` to toggle). While on, the drive keys
-  move a green RViz marker instead of the vehicle, and the vehicle yaws and
-  swims to it on its own (a P-controller in the launcher, through the same
-  safety gate). `F` recalls the point to the vehicle; yaw keys do nothing —
-  a point has no heading.
+- **swims to a target point** — the *Mode* option's third value, `goto`. The
+  same drive keys move a green RViz marker instead of the vehicle, along world
+  axes (`W/S` X, `A/D` Y, `Q/E` Z; `F` recalls the point to the vehicle — a
+  point has no heading, so there are no yaw keys), and the planner paths to it:
+  the point is published on `/frontier_slam/goal` with frontier goal picking
+  suspended, so A* and the path executor drive there exactly as they would to
+  a frontier. `goto` runs the planner layer without `revisit`, so nothing
+  preempts the operator's goal.
 - **retunes wall-following parameters live**, via `ros2 param set`, with no
   restart at all — those parameters are re-read every control cycle. Options
   that support this are marked `(live)`.

@@ -23,6 +23,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Image, PointCloud2, PointField
+from std_msgs.msg import String
 
 
 _LOG_DIR = os.path.join(
@@ -249,6 +250,10 @@ class WallOrientedController(Node):
         self.create_subscription(Image, '/sensor_msgs/image_depth', self._depth_cb, 1)
         self.create_subscription(PointCloud2, map_topic, self._map_cb, 1)
         self._command_pub = self.create_publisher(Twist, command_topic, 1)
+        # Same label the CSV `event` column carries — what the vehicle is
+        # doing, for the launcher's status panel.
+        self._activity_pub = self.create_publisher(
+            String, '/frontier_slam/activity', 1)
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
 
         self.get_logger().info(
@@ -482,6 +487,7 @@ class WallOrientedController(Node):
                    route_heading: float = float('nan'),
                    look_heading: float = float('nan'),
                    heading_error: float = float('nan')) -> None:
+        self._activity_pub.publish(String(data=event or 'FOLLOW_PATH'))
         p, g = self._pose, self._goal
         depth_error = (p[2] - self._depth_setpoint
                        if self._depth_setpoint is not None else float('nan'))

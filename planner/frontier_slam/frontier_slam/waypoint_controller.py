@@ -35,6 +35,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
 
 from frontier_slam.control_utils import wrap_angle, yaw_from_quat
 from frontier_slam.scan_sweep import SweepScan, scan_yaw_command
@@ -127,6 +128,11 @@ class WaypointController(Node):
         self.create_subscription(Odometry,     odom_topic,                   self._odom_cb,  10)
         self.create_subscription(Image,        '/sensor_msgs/image_depth',   self._depth_cb, 1)
         self._command_pub = self.create_publisher(Twist, command_topic, 1)
+
+        # Same label the CSV `event` column carries — what the vehicle is
+        # doing, for the launcher's status panel.
+        self._activity_pub = self.create_publisher(
+            String, '/frontier_slam/activity', 1)
 
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
         self.get_logger().info(
@@ -380,6 +386,7 @@ class WaypointController(Node):
 
     def _write_csv(self, surge, yaw_cmd, heave, event,
                    dist=float('nan'), hdg_err_deg=float('nan')) -> None:
+        self._activity_pub.publish(String(data=event or 'FOLLOW_PATH'))
         p = self._pose
         g = self._goal
         depth_err = ((p[2] - self._depth_setpoint)

@@ -166,6 +166,10 @@ class WallLooking(Node):
         self.create_subscription(Path, path_topic, self._path_cb, 1)
         self._command_pub = self.create_publisher(Twist, command_topic, 1)
         self._status_pub = self.create_publisher(String, status_topic, 1)
+        # Same label the CSV `event` column carries — what the vehicle is
+        # doing, for the launcher's status panel.
+        self._activity_pub = self.create_publisher(
+            String, '/frontier_slam/activity', 1)
 
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
         self.get_logger().info(
@@ -576,6 +580,7 @@ class WallLooking(Node):
     def _write_csv(self, surge, sway, yaw_cmd, heave, event,
                    wall_pt=None, n=None, d=float('nan'),
                    hdg_err_deg=float('nan'), n_pts=0) -> None:
+        self._activity_pub.publish(String(data=event or 'FOLLOW_PATH'))
         p  = self._pose
         depth_err = ((p[2] - self._depth_setpoint)
                      if self._depth_setpoint is not None else float('nan'))

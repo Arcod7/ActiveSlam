@@ -133,7 +133,7 @@ def build_groups(bringup_share=""):
         # Under mode:=frontier mapper:=tsdf the mapper derives /projected_map
         # from its own grid (banded around the cruise depth), so frontier
         # detection + A* share the belief map — no separate octomap_server.
-        publish_projected = v["mode"] == "frontier" and v["mapper"] == "tsdf"
+        publish_projected = v["mode"] in ("frontier", "goto") and v["mapper"] == "tsdf"
         return [["ros2", "launch", "stonefish_groundtruth_mapping",
                  "mapper_only.launch.py",
                  f"mapper:={v['mapper']}",
@@ -167,7 +167,10 @@ def build_groups(bringup_share=""):
         return [cmd]
 
     def planner(v):
-        revisit = "true" if (v["revisit"] and v["slam"] == "slam") else "false"
+        # goto mode: the operator owns the goal, so revisit_planner must not
+        # preempt it with a loop-closure detour.
+        revisit = "true" if (v["revisit"] and v["slam"] == "slam"
+                             and v["mode"] == "frontier") else "false"
         return [["ros2", "launch", "frontier_slam", "frontier_slam.launch.py",
                  f"hard_inflation_m:={v['hard_inflation_m']}",
                  f"inflation_m:={v['inflation_m']}",
@@ -248,9 +251,10 @@ def build_groups(bringup_share=""):
               "ATE/RPE against ground truth, TUM trajectory export and map "
               "metrics, written to eval/runs/<timestamp>/.",
               evaluation, depends=["output_dir", "mapper"], visible=is_slam),
-        Group("planner", "Frontier planner",
-              "Frontier detection, A* planning and the path executor that "
-              "drives autonomous exploration.",
+        Group("planner", "Planner",
+              "Frontier detection, A* planning and the path executor. Runs "
+              "under frontier (it picks its own goals) and under goto (the "
+              "operator's target point is the goal).",
               planner, depends=["mode", "motion", "scan_style", "scenario",
                                 "revisit", "slam", "mapper",
                                 "scenario_out_dx", "scenario_out_dy",
@@ -264,7 +268,7 @@ def build_groups(bringup_share=""):
                                 "wall_path_influence", "wall_path_look_offset_deg",
                                 "wall_normal_offset_deg", "wall_path_heading_weight",
                                 "hard_inflation_m", "inflation_m", "plan_inflation_m"],
-              visible=lambda v: v["mode"] == "frontier"),
+              visible=lambda v: v["mode"] in ("frontier", "goto")),
         Group("teleop_support", "Safety gate + thruster mixer",
               "Fail-closed motion safety gate and the thruster mixer that "
               "teleop drives through.",

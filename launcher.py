@@ -11,10 +11,11 @@ The stack is split into independently restartable groups (see launcher_core),
 so changing the mapper or the pose source only bounces the layers that depend
 on it — the simulator, which is the slow part, keeps running.
 
-Teleop is built in and always live: the drive keys (QWEASD cluster, AZERTY
-supported) move the vehicle directly, and Y toggles a target point the
-vehicle follows on its own. This process already owns a raw terminal, which
-is the only thing keyboard control needed a separate window for.
+The same QWEASD cluster (AZERTY supported) drives in every mode; what it
+moves is the mode: teleop moves the vehicle directly, goto moves a target
+point the planner swims to, frontier explores on its own until a drive key
+takes over. This process already owns a raw terminal, which is the only
+thing keyboard control needed a separate window for.
 """
 
 import atexit
@@ -42,6 +43,49 @@ LEGACY_SELECTION_FILE = os.path.expanduser("~/.activeslam_launcher.json")
 LOG_DIR = os.path.join(REPO_ROOT, "logs", "launcher")
 
 C_HEAD, C_ERR, C_INFO, C_OK, C_WARN = 1, 2, 3, 4, 5
+
+# How long the arm hint stays reversed after a drive key pressed on a
+# disarmed gate. Long enough to catch, short enough not to sit there.
+BLOCKED_DRIVE_FLASH_S = 1.5
+
+# Right-hand panel: robot state, live error metrics and the GT/belief pose
+# table. Dropped whole below PANEL_MIN_TERM_WIDTH so a trimmed terminal keeps
+# the option rows readable.
+PANEL_W = 32
+PANEL_MIN_TERM_WIDTH = 100
+METRICS_STALE_S = 8.0
+ACTIVITY_STALE_S = 3.0
+
+# What the panel subscribes to: (key, topic, integer?).
+EVAL_METRICS = (
+    ("abs_error",    "/eval/abs_error",          False),
+    ("ate",          "/eval/ate",                False),
+    ("rpe_trans",    "/eval/rpe_trans",          False),
+    ("rpe_rot",      "/eval/rpe_rot",            False),
+    ("dopt",         "/slam/dopt",               False),
+    ("keyframes",    "/slam/keyframe_count",     True),
+    ("loops",        "/slam/loop_closure_count", True),
+    ("map_coverage", "/eval/map_coverage",       False),
+    ("map_accuracy", "/eval/map_accuracy",       False),
+)
+
+# Labels the motion executors publish on /frontier_slam/activity.
+ACTIVITY_TEXT = {
+    "INIT_SCAN":         "initial scan of the surroundings",
+    "SCAN":              "scanning in place for frontiers",
+    "GOAL_REACHED":      "at the goal, scanning",
+    "FOLLOW_PATH":       "driving to the next waypoint",
+    "TRACK":             "following the wall",
+    "WALL_SWITCH_SCAN":  "scanning to reacquire the wall",
+    "NO_WALL_SCAN":      "scanning, no wall in view",
+    "NO_PATH_PROGRESS":  "stalled, waiting for a replan",
+    "EMERG_STOP":        "obstacle ahead, backing off",
+    "CTRL_STUCK":        "stuck, spinning to escape",
+    "CTRL_STUCK_ESCAPE": "stuck, spinning to escape",
+}
+# Activities that mean the vehicle is holding station rather than travelling.
+HOLDING_ACTIVITIES = {"INIT_SCAN", "SCAN", "GOAL_REACHED", "WALL_SWITCH_SCAN",
+                      "NO_WALL_SCAN", "NO_PATH_PROGRESS"}
 
 
 # --------------------------------------------------------------------------
@@ -303,11 +347,6 @@ class RosLink:
         self.enabled = None
         self.robot_pose = None
         self.slam_pose = None
-        # revisit_planner's own state ('exploring' when idle, something else
-        # mid-revisit), or None if it isn't running/hasn't published yet.
-        # Point mode yields its goal to an active revisit rather than
-        # fighting it — see control_screen's revisit_active().
-        self.revisit_state = None
         # Which odometry the drive/point controller works in: "slam" when the
         # pose graph owns the TF frame the operator sees, "gt" otherwise.
         # Synced from values["slam"] every control_screen tick.
@@ -317,6 +356,13 @@ class RosLink:
         # /motion/body_command's magnitude elsewhere.
         self.speed_factor = 1.0
         self.turn_factor = 1.0
+        # Right-hand panel feeds: last value per EVAL_METRICS key, and what the
+        # running motion executor says it is doing.
+        self.metrics = {}
+        self.metrics_at = 0.0
+        self.activity = None
+        self.activity_at = 0.0
+        self.revisit_state = None
 
     def start(self):
         if self.node:
@@ -325,7 +371,7 @@ class RosLink:
             import rclpy
             from geometry_msgs.msg import PointStamped, Twist
             from nav_msgs.msg import Odometry
-            from std_msgs.msg import Bool, String
+            from std_msgs.msg import Bool, Float64, Int32, String
             from visualization_msgs.msg import Marker
         except Exception as e:
             self.error = f"rclpy unavailable ({e}). Source the workspace first."
@@ -365,11 +411,16 @@ class RosLink:
             # harmless — the topic simply stays silent otherwise.
             self.node.create_subscription(
                 Odometry, "/slam/odometry", self._slam_odom_cb, 10)
-            # revisit_planner republishes /frontier_slam/suspend at 1 Hz
-            # regardless of whether it wants control — subscribing here is
-            # only for the revisit_state yield check, not for suspend itself.
+            # Feeds for the right-hand panel. Same story: silent when the layer
+            # that publishes them is not running.
+            for key, topic, is_int in EVAL_METRICS:
+                self.node.create_subscription(
+                    Int32 if is_int else Float64, topic,
+                    lambda msg, key=key: self._metric_cb(key, msg), 10)
             self.node.create_subscription(
-                String, "/frontier_slam/revisit_state", self._revisit_state_cb, 10)
+                String, "/frontier_slam/activity", self._activity_cb, 1)
+            self.node.create_subscription(
+                String, "/frontier_slam/revisit_state", self._revisit_cb, 1)
         except Exception as e:
             self.error = f"could not create launcher node: {e}"
             self.node = None
@@ -379,7 +430,15 @@ class RosLink:
     def _status_cb(self, msg):
         self.gate_state = msg.data
 
-    def _revisit_state_cb(self, msg):
+    def _metric_cb(self, key, msg):
+        self.metrics[key] = msg.data
+        self.metrics_at = time.time()
+
+    def _activity_cb(self, msg):
+        self.activity = msg.data
+        self.activity_at = time.time()
+
+    def _revisit_cb(self, msg):
         self.revisit_state = msg.data
 
     @staticmethod
@@ -409,12 +468,19 @@ class RosLink:
             return self.slam_pose or self.robot_pose
         return self.robot_pose or self.slam_pose
 
+    SPIN_BATCH = 32
+
     def spin(self):
-        if self.node:
+        """Drain the callback queue. spin_once handles one item, and a dozen
+        subscriptions at simulator rates would starve the slow ones at one
+        callback per UI tick."""
+        if not self.node:
+            return
+        for _ in range(self.SPIN_BATCH):
             try:
                 self.rclpy.spin_once(self.node, timeout_sec=0)
             except Exception:
-                pass
+                return
 
     def peer_count(self):
         """Nodes this process can see, excluding itself. 0 means discovery is
@@ -693,12 +759,14 @@ def init_colors():
     curses.init_pair(C_WARN, curses.COLOR_MAGENTA, -1)
 
 
-def put(stdscr, y, x, text, attr=0):
+def put(stdscr, y, x, text, attr=0, maxx=None):
+    """Draw clipped to the screen, or to `maxx` when a column is reserved."""
     h, w = stdscr.getmaxyx()
-    if y < 0 or y >= h or x >= w:
+    limit = w if maxx is None else min(w, maxx)
+    if y < 0 or y >= h or x >= limit:
         return
     try:
-        stdscr.addstr(y, x, str(text)[:max(0, w - x - 1)], attr)
+        stdscr.addstr(y, x, str(text)[:max(0, limit - x - 1)], attr)
     except curses.error:
         pass
 
@@ -874,6 +942,124 @@ def fmt_value(p, v):
     return str(v)
 
 
+def robot_state_text(link, values, running, driving, drive_active):
+    """One sentence for what the vehicle is doing right now."""
+    if not running:
+        return "stack stopped"
+    if link.gate_state == "DISABLED":
+        return "motion disabled — holding position"
+    if driving:
+        return ("driven from the keyboard" if drive_active
+                else "teleop ready — holding position")
+    if values["mode"] == "teleop":
+        return "waiting for a drive key"
+    # A stale activity means the executor stopped publishing, not that it is
+    # repeating its last state.
+    if time.time() - link.activity_at >= ACTIVITY_STALE_S:
+        return "planner is starting up — holding position"
+    doing = ACTIVITY_TEXT.get(link.activity,
+                              str(link.activity).lower().replace("_", " "))
+    if values["mode"] == "goto":
+        return f"heading for the target point — {doing}"
+    if link.revisit_state == "revisiting":
+        return ("at the revisit site, holding until d-opt drops"
+                if link.activity in HOLDING_ACTIVITIES
+                else "driving to the revisit site")
+    if link.revisit_state == "cooldown":
+        return f"exploring (revisit cooldown) — {doing}"
+    return f"exploring — {doing}"
+
+
+def _metric(metrics, key, spec, unit=""):
+    value = metrics.get(key)
+    return "-" if value is None else format(value, spec) + unit
+
+
+def metric_rows(metrics, mapper):
+    """(label, value) pairs for the metrics block, in display order."""
+    rpe = ("-" if metrics.get("rpe_trans") is None else
+           f"{_metric(metrics, 'rpe_trans', '.3f')}m "
+           f"{_metric(metrics, 'rpe_rot', '.1f')}deg")
+    # Coverage and accuracy come from map_metrics.py, which scores the belief
+    # map against the ground-truth reference map — so accuracy means belief->GT
+    # RMSE under TSDF and occupied-cell IoU under octomap.
+    accuracy = (("RMSE", _metric(metrics, "map_accuracy", ".3f", " m"))
+                if mapper == "tsdf"
+                else ("IoU", _metric(metrics, "map_accuracy", ".3f")))
+    return [
+        ("err",      _metric(metrics, "abs_error", ".3f", " m")),
+        ("ATE",      _metric(metrics, "ate", ".3f", " m")),
+        ("RPE",      rpe),
+        ("kf",       _metric(metrics, "keyframes", "d")),
+        ("lc",       _metric(metrics, "loops", "d")),
+        ("d-opt",    _metric(metrics, "dopt", ".4f")),
+        ("coverage", _metric(metrics, "map_coverage", ".1%")),
+        accuracy,
+    ]
+
+
+def draw_side_panel(stdscr, link, values, running, driving, drive_active,
+                    top, height, x, width):
+    """Robot state, error metrics and the GT/belief pose table, right of the
+    option list."""
+    end, right = top + height, x + width
+    row = top
+
+    def note(message, attr=curses.A_DIM):
+        nonlocal row
+        for line in textwrap.wrap(message, width - 2)[:max(0, end - row)]:
+            put(stdscr, row, x + 1, line, attr, maxx=right)
+            row += 1
+
+    def heading(text):
+        nonlocal row
+        put(stdscr, row, x, text, curses.A_BOLD | curses.color_pair(C_HEAD),
+            maxx=right)
+        row += 1
+
+    heading("Robot state")
+    note(robot_state_text(link, values, running, driving, drive_active),
+         curses.color_pair(C_OK))
+    row += 1
+    if row >= end:
+        return
+
+    heading("Error metrics")
+    if not running:
+        note("no run in progress")
+    elif values["slam"] != "slam":
+        note("pose source is ground truth — no error to measure")
+    elif not link.metrics:
+        note("waiting for the eval node")
+    else:
+        # The eval layer going down is otherwise invisible: the last numbers
+        # would just sit there looking live.
+        stale = time.time() - link.metrics_at > METRICS_STALE_S
+        attr = curses.A_DIM if stale else curses.color_pair(C_INFO)
+        for label, value in metric_rows(link.metrics, values["mapper"]):
+            if row >= end:
+                return
+            put(stdscr, row, x + 1, f"{label:<9}", curses.A_DIM, maxx=right)
+            put(stdscr, row, x + 10, value, attr, maxx=right)
+            row += 1
+        if stale:
+            note("(stale — is eval running?)", curses.color_pair(C_WARN))
+    row += 1
+    if row >= end:
+        return
+
+    heading("Pos" + f"{'GT':>12}{'belief':>10}")
+    gt, belief = link.robot_pose, link.slam_pose
+    for axis, key in (("x", "robot_x"), ("y", "robot_y"), ("z", "robot_z")):
+        if row >= end:
+            return
+        cell = lambda pose: "-" if pose is None else f"{pose[key]:.2f}"
+        put(stdscr, row, x + 1,
+            f"{axis:<4}{cell(gt):>10}{cell(belief):>10}",
+            curses.color_pair(C_INFO), maxx=right)
+        row += 1
+
+
 def control_screen(stdscr, sup, values, link, session):
     show_advanced = False
     preset_idx = 0
@@ -889,12 +1075,15 @@ def control_screen(stdscr, sup, values, link, session):
     # zeroes all motion.
     driving = False
     planner_suspended = False
-    point_mode = False
-    point = None              # [x, y, z] follow target, control-odom frame
+    point = None              # [x, y, z] goto target, control-odom frame
     point_dist = None         # last controller distance, for the footer
     last_point_pub_at = 0.0   # last /frontier_slam/goal republish
     last_drive_at = 0.0
     last_action = "halt"
+    # When a drive key was last pressed with the gate disarmed. The footer
+    # highlights the arm hint for a moment after, so a dead key press says
+    # why it did nothing instead of looking like a broken teleop.
+    last_blocked_drive_at = 0.0
     robot_pose_fields = ("robot_x", "robot_y", "robot_z",
                          "robot_roll", "robot_pitch", "robot_yaw")
     # This is the deliberately configured launch pose. Odometry updates the
@@ -937,10 +1126,11 @@ def control_screen(stdscr, sup, values, link, session):
                         ("robot_roll", "robot_pitch", "robot_yaw"))
             ok, msg = link.respawn("bluerov2", xyz, rpy)
         elif param.id in model.LIVE_SPEED_TURN:
-            # Teleop reads link.speed_factor/turn_factor straight from `values`
-            # every tick — nothing to push. Only a running frontier motion
-            # executor needs an explicit ros2 param set.
-            if values["mode"] != "frontier" or "planner" not in sup.running_ids():
+            # Teleop and the goto point read link.speed_factor/turn_factor
+            # straight from `values` every tick — nothing to push. Only a
+            # running motion executor needs an explicit ros2 param set.
+            if (values["mode"] not in ("frontier", "goto")
+                    or "planner" not in sup.running_ids()):
                 save_config()
                 return
             node = model.MOTION_EXECUTOR_NODE[values["motion"]]
@@ -996,20 +1186,12 @@ def control_screen(stdscr, sup, values, link, session):
                                 else ""), C_OK)
         return True
 
-    def revisit_active():
-        """True while revisit_planner owns /frontier_slam/goal for a real,
-        uncertainty-triggered revisit — point mode yields its own goal
-        publication rather than fighting it (same precedence trajectory_
-        mission.py gives revisit_planner). None/'exploring' both mean no
-        active revisit (None covers revisit_planner not running at all)."""
-        return link.revisit_state not in (None, "exploring")
-
-    def stop_point_mode():
-        nonlocal point_mode, point, point_dist
-        if point_mode:
+    def drop_point():
+        """Forget the goto target and hand goal picking back to the planner."""
+        nonlocal point, point_dist
+        if point is not None:
             link.clear_target_marker()
             link.set_planner_suspended(False)
-        point_mode = False
         point = None
         point_dist = None
 
@@ -1017,7 +1199,6 @@ def control_screen(stdscr, sup, values, link, session):
         """Stop being a command source; optionally hand control back to the
         planner after a frontier takeover."""
         nonlocal driving, planner_suspended
-        stop_point_mode()
         link.close_teleop()
         driving = False
         if planner_suspended:
@@ -1073,39 +1254,40 @@ def control_screen(stdscr, sup, values, link, session):
             if link.robot_pose and "core" in running:
                 values.update({key: round(value, 4)
                                for key, value in link.robot_pose.items()})
-            if point_mode and "planner" not in running:
-                # The planner stopped/crashed under us — nothing is left to
-                # drive to the point, so drop it rather than leave it stale.
-                stop_point_mode()
-                set_status("Target point off — planner stopped", C_WARN)
         elif driving:
             # The whole stack went away under us (stopped or crashed): stop
             # being a command source. Anything still running gets no fresh
             # command and fails closed on its own.
             release_driving(resume=False)
-        elif point_mode:
-            stop_point_mode()
 
-        # Target-point following runs every tick (the loop wakes at 5 Hz while
-        # the stack is up). Suspend is republished every tick, not throttled:
-        # revisit_planner reasserts it at 1 Hz whenever it's idle (its own
-        # normal behaviour, not a bug — see revisit_active()), and a slower
-        # republish here used to lose that race, letting frontier_extractor
-        # un-suspend and pick its own goal between our sends. The goal point
-        # itself stays throttled (the topic isn't latched, but doesn't need
-        # spamming), and is withheld entirely while yielding to a real revisit.
+        # goto mode runs every tick (the loop wakes at 5 Hz while the stack is
+        # up). Suspend is republished every tick, not throttled: the goal is
+        # ours for as long as the mode lasts, and frontier_extractor picks its
+        # own the moment it stops hearing otherwise. The goal point itself
+        # stays throttled — the topic isn't latched, but doesn't need spamming.
         point_dist = None
-        if point_mode and point is not None:
-            pose = link.control_pose()
-            if pose:
-                pos = (pose["robot_x"], pose["robot_y"], pose["robot_z"])
-                point_dist = math.dist(point, pos)
-            link.publish_target_marker(point)
+        # The mode the planner layer is actually running under, not the one
+        # selected in the list — arrowing the Mode row must not move the keys
+        # out from under the operator before Enter applies it.
+        goto_mode = (running and "planner" in running
+                     and sup.applied.get("planner", {}).get("mode") == "goto")
+        if point is not None and not goto_mode:
+            drop_point()
+        if goto_mode:
             link.set_planner_suspended(True)
-            if (not revisit_active()
-                    and time.time() - last_point_pub_at >= core.POINT_GOAL_REPUBLISH_S):
-                link.publish_point_goal(point)
-                last_point_pub_at = time.time()
+            pose = link.control_pose()
+            if point is None and pose:
+                # Start from the vehicle position, so entering the mode never
+                # commands a jump; the point then travels with the keys.
+                point = [pose["robot_x"], pose["robot_y"], pose["robot_z"]]
+            if point is not None:
+                if pose:
+                    point_dist = math.dist(
+                        point, (pose["robot_x"], pose["robot_y"], pose["robot_z"]))
+                link.publish_target_marker(point)
+                if time.time() - last_point_pub_at >= core.POINT_GOAL_REPUBLISH_S:
+                    link.publish_point_goal(point)
+                    last_point_pub_at = time.time()
         title = "ActiveSlam Control Center"
         put(stdscr, 0, 2, title, curses.A_BOLD)
         # A layer that goes down on its own is named next to the title: nothing
@@ -1130,81 +1312,123 @@ def control_screen(stdscr, sup, values, link, session):
         desc_h = 5
         list_top = 2
         list_h = max(4, h - list_top - desc_h - 4)
-        if idx < scroll:
-            scroll = idx
-        if idx >= scroll + list_h:
-            scroll = idx - list_h + 1
-        scroll = max(0, min(scroll, max(0, len(items) - list_h)))
+        panel = w >= PANEL_MIN_TERM_WIDTH
+        panel_x = w - PANEL_W if panel else w
+        list_right = panel_x - 2 if panel else w
 
+        # Section headings occupy rows too, so scrolling counts them: over the
+        # item index alone the selection can fall past the bottom of the pane
+        # and get edited unseen behind the description.
+        rows = []
         last_section = None
-        row = list_top
-        for i in range(scroll, min(len(items), scroll + list_h)):
-            p = items[i]
+        for i, p in enumerate(items):
             if p.section != last_section:
-                if row < list_top + list_h:
-                    put(stdscr, row, 2, model.SECTION_TITLES[p.section],
-                        curses.A_BOLD | curses.color_pair(C_HEAD))
-                    row += 1
+                rows.append((None, model.SECTION_TITLES[p.section]))
                 last_section = p.section
-            if row >= list_top + list_h:
-                break
+            rows.append((i, p))
+        sel_row = next(r for r, (i, _) in enumerate(rows) if i == idx)
+        if sel_row < scroll:
+            # Keep a heading with the first option under it when scrolling up.
+            scroll = sel_row - 1 if rows[sel_row - 1][0] is None else sel_row
+        if sel_row >= scroll + list_h:
+            scroll = sel_row - list_h + 1
+        scroll = max(0, min(scroll, max(0, len(rows) - list_h)))
+
+        for offset, (i, p) in enumerate(rows[scroll:scroll + list_h]):
+            row = list_top + offset
+            if i is None:
+                put(stdscr, row, 2, p,
+                    curses.A_BOLD | curses.color_pair(C_HEAD), maxx=list_right)
+                continue
             sel = (i == idx)
             marker = "> " if sel else "  "
             text = f"{marker}{p.label}: {fmt_value(p, values[p.id])}"
             put(stdscr, row, 4, text,
-                curses.A_REVERSE if sel else curses.A_NORMAL)
+                curses.A_REVERSE if sel else curses.A_NORMAL, maxx=list_right)
             # What applying this option costs sits on the option's own row. A
             # live push doesn't update the group's launch snapshot, so an option
             # can be both live and still due a restart — say both.
             if running:
                 tag_col = 5 + len(text)
                 if p.live:
-                    put(stdscr, row, tag_col, "(live)", curses.color_pair(C_OK))
+                    put(stdscr, row, tag_col, "(live)",
+                        curses.color_pair(C_OK), maxx=list_right)
                     tag_col += 7
                 pend = sup.pending_for(p.id, values)
                 if pend:
                     put(stdscr, row, tag_col, pending_tag(pend),
-                        curses.color_pair(C_WARN) | curses.A_BOLD)
-            row += 1
+                        curses.color_pair(C_WARN) | curses.A_BOLD,
+                        maxx=list_right)
+
+        if panel:
+            # The panel runs the full column height, past the description pane:
+            # the metrics and the pose table need more rows than the option
+            # list alone leaves.
+            panel_h = h - 2 - list_top
+            try:
+                stdscr.vline(list_top, panel_x - 2, curses.ACS_VLINE, panel_h)
+            except curses.error:
+                pass
+            draw_side_panel(stdscr, link, values, running, driving,
+                            driving and time.time() - last_drive_at < 0.6,
+                            list_top, panel_h, panel_x, PANEL_W - 1)
 
         # -- description pane for the selected option
         # The value-specific line is rendered first and on its own, so cycling a
         # value changes only that line; the shared text below it stays put
         # instead of reflowing.
         dtop = list_top + list_h
-        put(stdscr, dtop, 2, "-" * (w - 4), curses.A_DIM)
-        width = max(20, w - 6)
+        put(stdscr, dtop, 2, "-" * max(0, list_right - 4), curses.A_DIM,
+            maxx=list_right)
+        width = max(20, list_right - 6)
         drow = dtop + 1
         if cur.kind == "enum" and values[cur.id] in cur.choice_help:
             head = f"{values[cur.id]}: {cur.choice_help[values[cur.id]]}"
             for line in textwrap.wrap(head, width)[:2]:
-                put(stdscr, drow, 3, line, curses.color_pair(C_OK) | curses.A_BOLD)
+                put(stdscr, drow, 3, line, curses.color_pair(C_OK) | curses.A_BOLD,
+                    maxx=list_right)
                 drow += 1
         remaining = (dtop + desc_h) - drow
         if remaining > 0:
             for line in textwrap.wrap(cur.description, width)[:remaining]:
-                put(stdscr, drow, 3, line, curses.color_pair(C_INFO))
+                put(stdscr, drow, 3, line, curses.color_pair(C_INFO),
+                    maxx=list_right)
                 drow += 1
 
         # -- pending changes / status
         _, to_start, to_restart = sup.plan(values)
         pending = sorted(set(to_start + to_restart))
         foot = h - 2
-        if point_mode and point is not None:
+        # The gate zeroes every command while disarmed, so the drive keys are
+        # dead until it is armed — say that instead of listing them.
+        disarmed = bool(running) and link.gate_state == "DISABLED"
+        blocked = time.time() - last_blocked_drive_at < BLOCKED_DRIVE_FLASH_S
+        arm_hint = "press M to enable motion"
+        # A blocked key gets the line reversed for a moment — the same text,
+        # impossible to read past.
+        flash = curses.A_REVERSE if blocked else 0
+        if goto_mode and point is not None:
             dist_txt = (f"  dist {point_dist:.1f} m" if point_dist is not None
                         else "")
-            yield_txt = "  — YIELDING TO REVISIT" if revisit_active() else ""
+            # The point still moves while disarmed; the vehicle just won't
+            # swim to it, which is what the middle of the line says.
+            gate_txt = (f"  —  MOTION DISABLED, {arm_hint}" if disarmed else "")
             put(stdscr, foot, 2,
-                f"TARGET ({point[0]:.1f}, {point[1]:.1f}, {point[2]:.1f})"
-                f"{dist_txt}{yield_txt}  —  " + model.POINT_KEYS,
-                curses.color_pair(C_WARN if yield_txt else C_OK) | curses.A_BOLD)
+                f"GOTO ({point[0]:.1f}, {point[1]:.1f}, {point[2]:.1f})"
+                f"{dist_txt}{gate_txt}  —  "
+                + model.POINT_KEYS.get(values["keyboard"],
+                                       model.POINT_KEYS["qwerty"]),
+                curses.color_pair(C_WARN if disarmed else C_OK)
+                | curses.A_BOLD | (flash if disarmed else 0))
+        elif disarmed and (driving or blocked):
+            put(stdscr, foot, 2, f"MOTION DISABLED — {arm_hint}",
+                curses.color_pair(C_WARN) | curses.A_BOLD | flash)
         elif driving and running:
             take = " (autonomy suspended)  " if planner_suspended else "  "
             put(stdscr, foot, 2,
                 "DRIVE" + take
                 + model.TELEOP_KEYS.get(values["keyboard"],
-                                        model.TELEOP_KEYS["qwerty"])
-                + "  Y target point",
+                                        model.TELEOP_KEYS["qwerty"]),
                 curses.color_pair(C_OK) | curses.A_BOLD)
         elif status:
             put(stdscr, foot, 2, status[:w - 4], curses.color_pair(status_kind) | curses.A_BOLD)
@@ -1216,7 +1440,8 @@ def control_screen(stdscr, sup, values, link, session):
 
         keys = ("Up/Down move  Left/Right change  " +
                 ("i edit  " if cur.kind in ("int", "float", "text") else "") +
-                "Enter apply  m arm  y point  r reset  o advanced  p preset  k stop  Esc quit")
+                "Enter apply  m arm  r reset  o advanced  "
+                "p preset  k stop  Esc quit")
         put(stdscr, h - 1, 2, keys, curses.A_DIM)
         stdscr.refresh()
 
@@ -1239,16 +1464,25 @@ def control_screen(stdscr, sup, values, link, session):
         if key == curses.KEY_RESIZE:
             continue
 
-        # Drive keys are always live on this screen — there is no teleop mode
-        # to enter any more. The first press takes control, suspending the
-        # planner first if autonomy is running.
+        # The drive cluster is always live on this screen; the mode decides
+        # what it moves. In frontier mode the first press takes control,
+        # suspending the planner (Esc hands it back).
         ch = chr(key) if 0 <= key < 256 else ""
-        if point_mode and point is not None:
-            # Point mode doesn't take over teleop — the planner (already
-            # running to own this) drives to the point on its own, so
-            # dragging the point just edits local state and republishes.
+        if goto_mode:
+            # goto never takes over the command topic — the planner drives to
+            # the point, so a key just edits the point and republishes it.
             paction = core.point_axis_action(ch, values["keyboard"])
             if paction is not None:
+                if point is None:
+                    # The point is placed on the vehicle as soon as odometry
+                    # arrives; until then there is nothing to move.
+                    set_status("No odometry yet — no target point to move",
+                               C_WARN)
+                    continue
+                if disarmed:
+                    # The point moves either way; flag that nothing will
+                    # follow it until the gate is armed.
+                    last_blocked_drive_at = time.time()
                 if paction == "halt":
                     # F recalls the point to the vehicle's current position.
                     pose = link.control_pose()
@@ -1259,51 +1493,22 @@ def control_screen(stdscr, sup, values, link, session):
                     point = core.move_point(
                         point, paction, core.POINT_STEP_M * link.speed_factor)
                 link.publish_target_marker(point)
-                if not revisit_active():
-                    link.publish_point_goal(point)
-                    last_point_pub_at = time.time()
+                link.publish_point_goal(point)
+                last_point_pub_at = time.time()
                 continue
         else:
             action = core.drive_action(ch, values["keyboard"])
             if action is not None:
+                if disarmed:
+                    # Don't take control (nor suspend autonomy) for a command
+                    # the gate will zero anyway — flash the arm hint instead.
+                    last_blocked_drive_at = time.time()
+                    continue
                 if ensure_driving():
                     link.send_action(action)
                     last_action = action
                     last_drive_at = time.time()
                 continue
-        if ch and ch.lower() == "y":
-            if point_mode:
-                stop_point_mode()
-                set_status("Target point off — planner resumes its own goals",
-                           C_INFO)
-            elif driving:
-                set_status("Stop driving (Esc) before setting a target point",
-                           C_WARN)
-            elif "planner" not in running:
-                set_status("Target point needs the frontier planner running "
-                           "(mode:=frontier)", C_WARN)
-            else:
-                pose = link.control_pose()
-                if pose is None:
-                    set_status("No odometry yet — cannot place the target point",
-                               C_WARN)
-                else:
-                    # Start from the vehicle position, so toggling on never
-                    # commands a jump; the point then travels with the keys.
-                    point = [pose["robot_x"], pose["robot_y"], pose["robot_z"]]
-                    point_mode = True
-                    link.publish_target_marker(point)
-                    link.set_planner_suspended(True)
-                    if revisit_active():
-                        last_point_pub_at = 0.0   # publish as soon as the yield clears
-                        set_status("Target point set — yielding to an active "
-                                   "revisit until it clears", C_WARN)
-                    else:
-                        link.publish_point_goal(point)
-                        last_point_pub_at = time.time()
-                        set_status("Target point ON — drive keys move it, "
-                                   "the planner paths to it", C_OK)
-            continue
 
         if key == curses.KEY_UP:
             idx = (idx - 1) % len(items)
@@ -1363,8 +1568,8 @@ def control_screen(stdscr, sup, values, link, session):
                 if planner_suspended:
                     release_driving(resume=True)
                 else:
-                    stop_point_mode()   # the target would drag the teleported
-                    link.halt()         # vehicle; drop it and hold position
+                    drop_point()   # the target would drag the teleported
+                    link.halt()    # vehicle; drop it and hold position
                 was_armed = bool(link.enabled)
                 name = "bluerov2"
                 xyz = tuple(saved_robot_pose[key] for key in
@@ -1411,12 +1616,14 @@ def control_screen(stdscr, sup, values, link, session):
             if sup.running_ids() and last_slam is not None and last_slam != values["slam"]:
                 if not confirm_slam_switch(stdscr):
                     continue
-            if driving and values["mode"] == "frontier":
-                # The planner is a wanted group in frontier mode: apply would
-                # start it alongside our publisher, and the gate would read
-                # two command sources. Hand the topic back first; apply
+            if driving and values["mode"] in ("frontier", "goto"):
+                # The planner is a wanted group in both those modes: apply
+                # would start it alongside our publisher, and the gate would
+                # read two command sources. Hand the topic back first; apply
                 # (re)starts the planner below.
                 release_driving(resume=False)
+            if values["mode"] != "goto":
+                drop_point()
             # A live odometry readback must not silently become the next core
             # launch pose when save-on-exit is off (for example if changing
             # object scale restarts Stonefish mid-run).
@@ -1440,13 +1647,8 @@ def control_screen(stdscr, sup, values, link, session):
                                     else " — no changes")
                        + (" — motion re-armed" if was_armed and regated else ""), C_OK)
         elif key == 27:
-            # Esc peels off one layer at a time: target point first, then the
-            # frontier takeover, then the screen itself. (q/Q is a drive key.)
-            if point_mode:
-                stop_point_mode()
-                set_status("Target point off — planner resumes its own goals",
-                           C_INFO)
-                continue
+            # Esc peels off one layer at a time: the frontier takeover first,
+            # then the screen itself. (q/Q is a drive key.)
             if planner_suspended:
                 release_driving(resume=True)
                 continue

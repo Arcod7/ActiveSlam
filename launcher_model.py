@@ -83,25 +83,31 @@ SECTION_TITLES = {
     "primary": "Primary",
     "scene": "Scene + object",
     "robot": "Robot pose",
-    "frontier": "Frontier exploration",
+    "frontier": "Planner",
     "slam": "SLAM / pose source",
     "advanced": "Other",
 }
 SECTION_ORDER = ["primary", "scene", "robot", "frontier", "slam", "advanced"]
 
 _frontier = lambda v: v["mode"] == "frontier"
+# goto and frontier both run the planner layer (A* + path executor); they
+# differ only in who picks the goal.
+_planner = lambda v: v["mode"] in ("frontier", "goto")
 _slam = lambda v: v["slam"] == "slam"
 
 PARAMS = [
     Param("mode", "Mode", "enum", "teleop", "primary",
-          "Who drives the vehicle. teleop hands control to the keyboard — the "
-          "drive keys are always live on this screen, no mode key needed; "
-          "frontier runs autonomous exploration: frontier detection on the "
-          "occupancy map, A* planning, then a path executor. Pressing a drive "
-          "key in frontier mode suspends the planner and takes over (Esc "
-          "hands control back).",
-          ["teleop", "frontier"],
+          "Who picks where the vehicle goes. teleop hands control to the "
+          "keyboard — the drive keys are always live on this screen, no mode "
+          "key needed. goto lets you fly a target point around with the same "
+          "keys and has the planner swim to it: A* replans to the point, the "
+          "path executor follows. frontier runs autonomous exploration: "
+          "frontier detection on the occupancy map, A* planning, then the "
+          "same executor. Pressing a drive key in frontier mode suspends the "
+          "planner and takes over (Esc hands control back).",
+          ["teleop", "goto", "frontier"],
           {"teleop": "Manual keyboard control, driven from this launcher.",
+           "goto": "Drive a target point; the planner swims the vehicle to it.",
            "frontier": "Autonomous frontier-based exploration."}),
     Param("mapper", "Mapper", "enum", "octomap", "primary",
           "Map backend. OctoMap is an octree occupancy grid (probabilistic, "
@@ -244,7 +250,7 @@ PARAMS = [
           {"default": "Direct path following, heading along travel.",
            "walloriented": "Path following with a fixed yaw offset toward the wall.",
            "walllooking": "WIP — wall-tangent/path blend; consumes TSDF normals."},
-          visible=_frontier),
+          visible=_planner),
     Param("scan_style", "Scan style", "enum", "sweep", "frontier",
           "Rotation used when scanning at a waypoint. sweep is the cable-safe "
           "right-then-left motion (net yaw returns to zero). spin is the "
@@ -375,12 +381,12 @@ PARAMS = [
           "mapped surface, so the sonar keeps the wall in view while moving "
           "along the path.",
           advanced=True, step=5.0, lo=-180.0, hi=180.0,
-          visible=lambda v: _frontier(v) and v["motion"] == "walloriented"),
+          visible=lambda v: _planner(v) and v["motion"] == "walloriented"),
     Param("wall_orientation_lookahead_m", "Wall lookahead (m)", "float", 0.0, "frontier",
           "Lookahead radius along the A* path used to pick the heading. 0 uses "
           "the heading at the current position.",
           advanced=True, step=0.5, lo=0.0,
-          visible=lambda v: _frontier(v) and v["motion"] == "walloriented"),
+          visible=lambda v: _planner(v) and v["motion"] == "walloriented"),
     Param("tsdf_frontier_standoff_m", "TSDF frontier standoff (m)", "float", 1.0, "frontier",
           "How far off the reconstructed surface, along its outward normal, a "
           "TSDF frontier goal is placed — keeps goals in free water.",
@@ -390,40 +396,40 @@ PARAMS = [
           "Target distance to hold from the wall while wall-looking. "
           "Live-tunable while running.",
           advanced=True, step=0.1, lo=0.1,
-          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+          visible=lambda v: _planner(v) and v["motion"] == "walllooking"),
     Param("wall_switch_goal_distance", "Wall-switch goal dist (m)", "float", 6.0, "frontier",
           "When the planner goal is nearer than this, look for another wall "
           "instead of continuing along the current one. Live-tunable.",
           advanced=True, step=0.5, lo=0.0,
-          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+          visible=lambda v: _planner(v) and v["motion"] == "walllooking"),
     Param("wall_switch_scan_angle", "Wall-switch sweep (rad)", "float", 3.14159, "frontier",
           "Sweep angle used when searching for the next wall. Live-tunable.",
           advanced=True, step=0.1, lo=0.0,
-          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+          visible=lambda v: _planner(v) and v["motion"] == "walllooking"),
     Param("wall_switch_scan_yaw", "Wall-switch sweep yaw", "float", 0.08, "frontier",
           "Yaw rate command used during that sweep. Live-tunable.",
           advanced=True, step=0.01, lo=0.0,
-          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+          visible=lambda v: _planner(v) and v["motion"] == "walllooking"),
     Param("wall_path_influence", "Path influence", "float", 0.70, "frontier",
           "Travel-direction blend: 0 follows the wall tangent, 1 follows the "
           "planned path. Live-tunable.",
           advanced=True, step=0.05, lo=0.0, hi=1.0,
-          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+          visible=lambda v: _planner(v) and v["motion"] == "walllooking"),
     Param("wall_path_look_offset_deg", "Path look offset", "float", 30.0, "frontier",
           "Degrees to turn the path-derived look heading toward the wall. "
           "Live-tunable.",
           advanced=True, step=5.0, lo=-180.0, hi=180.0,
-          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+          visible=lambda v: _planner(v) and v["motion"] == "walllooking"),
     Param("wall_normal_offset_deg", "Wall normal offset", "float", 0.0, "frontier",
           "Degrees to turn the wall-facing normal back toward the path "
           "bearing. Live-tunable.",
           advanced=True, step=5.0, lo=-180.0, hi=180.0,
-          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+          visible=lambda v: _planner(v) and v["motion"] == "walllooking"),
     Param("wall_path_heading_weight", "Look blend", "float", 0.35, "frontier",
           "Orientation blend: 0 uses the wall-derived heading, 1 the "
           "path-derived heading. Live-tunable.",
           advanced=True, step=0.05, lo=0.0, hi=1.0,
-          visible=lambda v: _frontier(v) and v["motion"] == "walllooking"),
+          visible=lambda v: _planner(v) and v["motion"] == "walllooking"),
 ]
 
 PARAM_MAP = {p.id: p for p in PARAMS}
@@ -457,9 +463,12 @@ TELEOP_KEYS = {
     "qwerty": "W/S fwd/back  Q/E strafe  A/D yaw  Space/X up/down  F stop",
     "azerty": "Z/S fwd/back  A/E strafe  Q/D yaw  Space/X up/down  F stop",
 }
-# Shown while the target point is on: the same cluster moves the point
-# instead of the vehicle, but along world axes (a point has no heading).
-POINT_KEYS = "W/S X  A/D Y  Q/E Z  F recalls it to the vehicle  Y off"
+# goto mode: the same cluster moves the target point instead of the vehicle,
+# but along world axes (a point has no heading).
+POINT_KEYS = {
+    "qwerty": "W/S X  A/D Y  Q/E Z  F recalls it to the vehicle",
+    "azerty": "Z/S X  Q/D Y  A/E Z  F recalls it to the vehicle",
+}
 
 INFOS = [
     ("What this is", [
