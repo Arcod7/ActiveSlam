@@ -23,7 +23,6 @@ setup(
     maintainer_email='antoine.esman7@gmail.com',
     description='Frontier-based exploration: OctoMap projected map → waypoint → thruster control',
     license='MIT',
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'frontier_extractor  = frontier_slam.frontier_extractor:main',

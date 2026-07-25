@@ -21,7 +21,6 @@ setup(
     maintainer_email='ave4000@hw.ac.uk',
     description='GTSAM iSAM2 pose-graph SLAM backend with simulated sensors',
     license='MIT',
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'pressure_sim    = slam_backend.sensor_models.pressure_sim:main',

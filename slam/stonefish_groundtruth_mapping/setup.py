@@ -27,7 +27,6 @@ setup(
     maintainer_email='antoine.esman7@gmail.com',
     description='Ground-truth SLAM pipeline: Stonefish → depth_image_proc → OctoMap',
     license='MIT',
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'odom_to_tf       = stonefish_groundtruth_mapping.odom_to_tf:main',
