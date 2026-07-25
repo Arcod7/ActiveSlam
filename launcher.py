@@ -721,8 +721,10 @@ def fits(stdscr):
 # --------------------------------------------------------------------------
 # screens
 
-def welcome_screen(stdscr, built):
-    options = ["Launch", "---", "Update", "Rebuild", "---", "Infos", "Exit"]
+def welcome_screen(stdscr, built, values):
+    KEYBOARD_ROW = "Keyboard layout"
+    options = ["Launch", "---", KEYBOARD_ROW, "---",
+               "Update", "Rebuild", "---", "Infos", "Exit"]
     idx = 0
     while True:
         if not fits(stdscr):
@@ -748,14 +750,17 @@ def welcome_screen(stdscr, built):
             if opt == "---":
                 put(stdscr, row + i, 6, "-" * 22, curses.A_DIM)
                 continue
+            label = (f"{KEYBOARD_ROW}: {values['keyboard'].upper()}"
+                     if opt == KEYBOARD_ROW else opt)
             prefix = "> " if idx == i else "  "
             attr = curses.A_REVERSE if idx == i else curses.A_NORMAL
             if opt == "Launch":
                 attr |= curses.A_BOLD
-            put(stdscr, row + i, 4, f"{prefix}{opt}", attr)
+            put(stdscr, row + i, 4, f"{prefix}{label}", attr)
 
         hints = {
             "Launch": "Configure options and bring the stack up.",
+            KEYBOARD_ROW: "Enter to switch between QWERTY and AZERTY.",
             "Update": "git pull, then reinstall dependencies (./bootstrap.sh).",
             "Rebuild": "colcon build --symlink-install.",
             "Infos": "Technologies this project is built on.",
@@ -778,6 +783,11 @@ def welcome_screen(stdscr, built):
             while options[idx] == "---":
                 idx = (idx + 1) % len(options)
         elif key in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            if options[idx] == KEYBOARD_ROW:
+                values["keyboard"] = ("azerty" if values["keyboard"] == "qwerty"
+                                      else "qwerty")
+                save_selection(values)
+                continue
             return options[idx]
         elif key in (ord("q"), ord("Q"), 27):
             return "Exit"
@@ -1641,7 +1651,8 @@ def main():
             pass
 
     while True:
-        choice = curses.wrapper(lambda scr: (init_colors(), welcome_screen(scr, built))[1])
+        choice = curses.wrapper(lambda scr: (init_colors(),
+                                             welcome_screen(scr, built, values))[1])
 
         if choice == "Exit":
             break
