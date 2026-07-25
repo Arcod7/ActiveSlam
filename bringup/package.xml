@@ -16,7 +16,7 @@
   <exec_depend>octomap_server</exec_depend>
   <!-- liboctomap.so, LD_PRELOADed into RViz -->
   <exec_depend>octomap</exec_depend>
-  <!-- OccupancyGrid display, referenced by rviz/demo_slam.rviz -->
+  <!-- OccupancyGrid display, referenced by rviz/demo.rviz -->
   <exec_depend>octomap_rviz_plugins</exec_depend>
 
   <export>

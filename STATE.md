@@ -4,28 +4,35 @@ Mutable snapshot. Overwrite, never append. Last updated: 2026-07-25.
 
 Change log → `Progress.md`. Detailed design + as-built deltas → `docs/SLAM_PLAN.md`.
 
-## RViz views
+## RViz view
 
-`bringup/demo.launch.py` picks one of three configs automatically (`slam:=slam`
-takes priority over `mapper`):
-- `rviz/demo.rviz` — unchanged base view (`mapper:=octomap slam:=none`).
-- `rviz/demo_tsdf.rviz` — TSDF surface plus `OcTree (occupied)` on
-  `/octomap_binary`, which under `mapper:=tsdf` is published by
-  `tsdf_to_octomap` (not `octomap_server`, which never runs in this mode).
-  `OcTree (free)` and the marker-based `TSDFVoxels` view of the same cells are
-  present but off by default. With `tsdf_octomap:=false` there is no
-  `/octomap_binary` at all and the OcTree displays sit empty — enable
-  `TSDFVoxels` instead.
-- `rviz/demo_slam.rviz` — the error/noise view: ground truth (green) vs SLAM
-  (blue) vs raw dead-reckoning (red) paths, pose-graph edges, covariance
-  ellipsoids, and a drift arrow + live text HUD sourced from
-  `eval_tools/benchmark.py`'s `/eval/markers` (`MarkerArray`) topic —
-  `err`/`ATE`/`RPE` translation+rotation/keyframe count/loop-closure
-  count/D-optimality, refreshed on every `/slam/pose` update. Also overlays
-  a second, ground-truth-only map (`GroundTruthMap` / `/gt/octomap_binary`,
-  enabled by default; `TSDFSurface_GroundTruth`/`TSDFVoxels_GroundTruth` for
-  `mapper:=tsdf`, disabled by default) against the belief map — see
-  "Ground-truth reference map" below.
+`rviz/demo.rviz` is the only config; `bringup/demo.launch.py` and the launcher
+both pass it in every mode. A display whose topic has no publisher in the
+current mode draws nothing, so nothing has to be picked — and there is no
+second copy left to drift out of sync (three hand-edited configs were merged
+into this one; the `mapper`/`slam` branch in both launch paths is gone).
+
+Enabled by default:
+- `OcTree (occupied)` on `/octomap_binary` — published by `octomap_server`
+  under `mapper:=octomap`, by `tsdf_to_octomap` under `mapper:=tsdf`. With
+  `tsdf_octomap:=false` there is no `/octomap_binary` at all; enable
+  `TSDFVoxels` instead. `OcTree (free)` is present but off.
+- `TSDFSurface` (orange, `/tsdf/surface_cloud`) and
+  `TSDFSurface_GroundTruth` (green, `/gt/tsdf/surface_cloud`) together, so
+  `slam:=slam mapper:=tsdf` shows belief vs. truth in the same
+  representation. The marker-based `TSDFVoxels`/`TSDFVoxels_GroundTruth`
+  views of the same cells are present but off.
+- `GroundTruthMap` (`/gt/octomap_binary`) — see "Ground-truth reference map".
+- Ground truth (green) vs SLAM (blue) vs raw dead-reckoning (red) paths,
+  pose-graph edges, covariance ellipsoids, and a drift arrow, all from
+  `slam:=slam`. Metrics — `err`/`ATE`/`RPE` translation+rotation/keyframe
+  count/loop-closure count/D-optimality, refreshed on every `/slam/pose`
+  update — come from `eval_tools/benchmark.py`'s `/eval/markers` and render
+  in the Eval HUD panel docked at the bottom.
+- Exactly one image view, `SLAM input (noised range)`
+  (`/cloud_in/range_image`, published in every mode). `DepthCamera` and
+  `Clean cloud (range)` are present but off: enabling several tabs them into
+  one dock slot where only the front tab renders.
 
 ## Ground-truth reference map (`slam:=slam` only)
 
@@ -343,19 +350,26 @@ one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.3
   **(Phase 43)** All three RViz configs previously had two or three of these Image displays
   enabled at once, tabbed together in the same dock slot — only the front tab renders, so which
   view actually appeared on launch depended on the saved (opaque, hand-uneditable) `QMainWindow
-  State` blob, not on anything the launch args controlled. Each config now enables exactly one:
-  `DepthCamera` (ground truth) in `demo.rviz`/`demo_tsdf.rviz`, `SLAM input (noised range)` in
-  `demo_slam.rviz`. The floating 3D `eval_hud` text marker (ATE/RPE/D-opt, `benchmark.py`) is
-  likewise superseded in `demo_slam.rviz` by a real docked panel — see Eval HUD panel below.
-- ✅ **Eval HUD panel** (Phase 43, `tools/eval_hud_rviz`): new RViz panel plugin (mirrors
+  State` blob, not on anything the launch args controlled. **(Phase 44)** The single `demo.rviz`
+  enables exactly one, `SLAM input (noised range)`; `DepthCamera` and `Clean cloud (range)` are
+  present but off. ⚠️ On this machine RViz ignores that at startup — every `Image` display comes
+  up disabled with no dock, because RViz ties an `Image` display's enabled state to its dock
+  widget's visibility and the dock is created while the main window is still hidden. Verified
+  against unmodified configs from before Phase 44, and with the `QMainWindow State` blob removed
+  entirely, so it is neither the merge nor the saved layout. Enable the image view with one click
+  in the Displays tree after launch.
+- ✅ **Eval HUD panel** (Phase 43, `tools/eval_hud_rviz`): RViz panel plugin (mirrors
   `motion_safety_rviz`'s structure) subscribing to `/eval/markers` and showing the `eval_hud`
-  namespace's text (err/ATE/RPE/KF/LC/D-opt) in a panel docked where the `Time` panel used to
-  be in `demo_slam.rviz` — a fixed on-screen readout instead of a marker that floats above the
-  robot in world space and moves with the camera. `demo_slam.rviz`'s `Time` panel entry is
-  removed. Not yet visually confirmed in a live GUI session (the panel's own gtest passes
-  offscreen; RViz2 needs `QT_QPA_PLATFORM=xcb` on this machine, see Build & run above) — the
-  saved `QMainWindow State` blob has no entry for the new panel name, so it may not dock in
-  exactly the old `Time` slot on first launch and might need dragging into place once.
+  namespace's text (err/ATE/RPE/KF/LC/D-opt) in a panel docked at the bottom of the window — a
+  fixed on-screen readout instead of a marker that floats above the robot in world space and
+  moves with the camera. Outside `slam:=slam` it shows a placeholder line, since nothing
+  publishes `/eval/markers` there. **(Phase 44)** Phase 43 removed the `Time` panel and added the
+  panel to the `Panels:` list, but left the `QMainWindow State` blob still naming `Time` in the
+  bottom dock slot and never naming `Eval HUD` — Qt turns the unmatched name into a placeholder
+  and leaves the real panel wherever `addPane` put it, which is why the metrics never appeared.
+  The blob now carries `Eval HUD` in that slot (the name is a length-prefixed UTF-16BE string
+  inside the hex blob, so it is patchable without re-saving from the GUI). Confirmed live: the
+  panel docks along the bottom, full width, and shows its placeholder outside `slam:=slam`.
 - ✅ **Benchmarking switches** (Phase 16): `loop_closure:=false` keeps
   `/slam/loop_closure_count` at 0 (default still closes loops); `noise_seed:=7` reaches all
   four sensor nodes; a forced-threshold live run fired 4 map-rebuild cycles cleanly

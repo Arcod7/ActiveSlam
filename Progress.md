@@ -1645,3 +1645,93 @@ where `Time` was — the saved `QMainWindow State` blob has no entry for the
 new panel name (it never existed when that state was saved), so Qt's
 `restoreState` will fall back to a default placement for it; may need
 dragging into place once, after which RViz will save the new geometry.
+
+## Phase 44 — One RViz config for every mode; the eval panel actually docks
+
+**Date**: 2026-07-25
+**Files**: `bringup/rviz/demo.rviz` (now the only config, renamed from
+`demo_slam.rviz`), `bringup/rviz/demo_slam.rviz` + `bringup/rviz/demo_tsdf.rviz`
+(deleted), `bringup/launch/demo.launch.py`, `bringup/setup.py`,
+`bringup/package.xml`, `launcher_core.py`, `launcher_model.py`,
+`docs/TROUBLESHOOTING.md`,
+`slam/stonefish_groundtruth_mapping/launch/gt_map.launch.py`, `STATE.md`,
+`Progress.md`
+
+**Report**: after Phase 43, RViz still showed the ROS-time bar, the eval
+metrics were nowhere on screen, and the ground-truth TSDF was missing.
+
+**Discovery**: Phase 43 edited `demo_slam.rviz` only, but the config in use
+was one of the other two — the picker in `demo.launch.py` (mirrored, a second
+time, in `launcher_core.py`) selects `demo_slam.rviz` only under `slam:=slam`.
+`demo.rviz` and `demo_tsdf.rviz` therefore still carried the `rviz_common/Time`
+panel, had no `eval_hud_rviz/EvalHudPanel`, and — since the ground-truth
+displays were only ever added to `demo_slam.rviz` — no GT map at all. Three
+hand-maintained ~700-line configs meant every RViz change had to be applied
+three times, and this one was applied once.
+
+**Second defect, in `demo_slam.rviz` itself**: Phase 43 flagged that the saved
+`QMainWindow State` blob had no entry for the new panel and might need
+dragging into place. It is worse than that — the blob still named `Time` in
+the bottom dock slot. Qt's `restoreState` turns a name it cannot match into a
+`QPlaceHolderItem` and leaves the real, unnamed dock wherever `addPane` put
+it, so the panel would not have appeared at the bottom even under
+`slam:=slam`. The blob is hex-encoded `QMainWindow::saveState()` output and
+the dock name inside it is a length-prefixed UTF-16BE string, so it is
+patchable by hand after all: `fb 00000008 "Time"` became
+`fb 00000010 "Eval HUD"`, in place, keeping the surrounding geometry ints.
+
+**Open, and not caused by this change — `Image` displays ignore `Enabled` on a
+fresh launch**: live runs showed `SLAM input (noised range)` coming up
+unchecked with no image dock, despite `Enabled: true`. Bisected against
+unmodified configs from `HEAD`: Phase 43's `demo_slam.rviz` does the same, and
+so does the *old* `demo.rviz` with its `DepthCamera` — which nonetheless shows
+as enabled in a long-running session (that window's title carries RViz's `*`
+modified marker, i.e. it was switched on by hand). Removing the
+`QMainWindow State` blob entirely does not change it either, so the saved
+layout is not the cause. RViz ties an `Image` display's enabled state to its
+dock widget's visibility (`Display::associatedPanelVisibilityChange` calls
+`setEnabled`), and on this machine the dock is created while the main window
+is still hidden, so the display disables itself before the config's value can
+take effect. Consequence: which `Image` display a config enables cannot be
+honoured at startup here — it takes one click in the Displays tree after
+launch, which then shows the dock. No regression either way: the previous
+default (`DepthCamera`) came up disabled too.
+
+**Fix**: the three configs are collapsed into a single `bringup/rviz/demo.rviz`
+(git-renamed from `demo_slam.rviz`, the superset), used unconditionally by
+both `demo.launch.py` and the launcher — the `PythonExpression` picker and
+`launcher_core._rviz_config`'s branch are gone. A display whose topic has no
+publisher in the current mode draws nothing, which is what the per-mode
+configs were working around. The two `OccupancyGrid` displays keep
+`demo_tsdf.rviz`'s clearer `OcTree (free)` / `OcTree (occupied)` names, with
+occupied enabled.
+
+**Ground-truth TSDF comparison**: the belief and truth surfaces were being
+shown in different representations — `TSDFSurface_GroundTruth` (points) on,
+`TSDFSurface` (points) off since Phase 42, with only the marker-based
+`TSDFVoxels` on for the belief side. Both surface clouds are now enabled in
+contrasting flat colours (belief orange `255;140;30`, truth green
+`40;220;40`); both voxel views stay present and off, one click away. The GT
+stack only publishes under `slam:=slam`, so `slam:=slam mapper:=tsdf` remains
+the combination that shows both.
+
+**Verification** (live GUI, `QT_QPA_PLATFORM=xcb`, screenshot of the running
+window): ✅ the `Eval HUD` panel docks along the bottom, full width, showing
+its `no eval data yet (requires slam:=slam)` placeholder — the thing Phase 43
+could not confirm; ✅ no ROS-time bar anywhere; ✅ `TSDFSurface` renders
+orange against the OcTree, `TSDFVoxels` off, GT counterparts present;
+✅ `Displays` and `Motion Safety` keep their left-dock placement; ✅ RViz
+loads the config with no plugin load failures and subscribes to both
+`/tsdf/surface_cloud` and `/gt/tsdf/surface_cloud`; ✅ `colcon build --paths
+bringup` succeeds and installs exactly one `rviz/demo.rviz`; ✅ the config
+parses as valid YAML with no `Time` entry in `Panels:`; ✅ no
+`demo_slam`/`demo_tsdf` references remain in code, launch files or docs.
+⚠️ The image dock still has to be enabled by hand after launch — see the
+`Image` display note above; unchanged from before this phase.
+
+The blob was rebuilt from the one config whose layout is known to work rather
+than hand-repaired: the old `demo.rviz` blob, with its `DepthCamera` slot
+renamed to `SLAM input (noised range)` and its `Time` slot to `Eval HUD`.
+Docks absent from a blob are appended and shown normally (that is how
+`Motion Safety` has always been placed), so dropping the stale entries costs
+nothing.

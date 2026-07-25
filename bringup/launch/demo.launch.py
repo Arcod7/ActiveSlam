@@ -25,14 +25,16 @@ the others. `mode:=frontier` owns goal/path planning; `motion` chooses its one
 executor. motion:=walllooking consumes /tsdf/surface_normals_cloud, so it only does
 something useful with mapper:=tsdf (a LogInfo reminds you at launch).
 
-RViz view is picked automatically (see rviz/demo*.rviz), slam:=slam taking priority:
-  slam:=slam    -> demo_slam.rviz: GT vs SLAM vs dead-reckoning paths, a drift arrow
-                   + a live error/ATE/RPE/D-opt metrics panel docked at the bottom
-                   (tools/eval_hud_rviz), graph edges, covariance ellipsoids, and a
-                   second ground-truth-only map (see gt_map.launch.py) overlaid
-                   against the belief map so map drift/distortion is visible directly
-  mapper:=tsdf  -> demo_tsdf.rviz: TSDF surface/voxels instead of OctoMap displays
-  otherwise     -> demo.rviz: unchanged base view
+One RViz view covers every mode: rviz/demo.rviz carries the displays for all of
+them (OctoMap and TSDF, belief and ground truth, SLAM/dead-reckoning paths, graph
+edges, covariance ellipsoids) plus a live error/ATE/RPE/D-opt metrics panel docked
+at the bottom (tools/eval_hud_rviz). A display whose topic has no publisher in the
+current mode simply draws nothing, so no per-mode config is needed — and one file
+can't drift out of sync with the others the way three hand-edited ones did.
+
+The ground-truth map (see gt_map.launch.py) only publishes under slam:=slam, so
+`slam:=slam mapper:=tsdf` is what puts the GT TSDF surface (green) next to the
+belief TSDF surface (orange) for a direct look at map drift/distortion.
 
 Note on mode:=teleop: keyboard_control reads the terminal directly
 (termios raw mode), which needs a real TTY — `ros2 launch` doesn't give
@@ -597,7 +599,7 @@ def generate_launch_description():
             " (also drives the sonar noise model on /cloud_in) — see "
             "eval/runs/<timestamp>/ for ATE/RPE logs. A second, "
             "ground-truth-only map is also running under /gt/... "
-            "(demo_slam.rviz overlays it against the belief map).",
+            "(demo.rviz overlays it against the belief map).",
         ],
         condition=LaunchConfigurationEquals("slam", "slam"),
     )
@@ -699,29 +701,10 @@ def generate_launch_description():
         ),
     )
 
-    # Three purpose-built views, picked by mapper/slam rather than hand-edited
-    # per run: the plain demo.rviz stays byte-for-byte what it always was
-    # (slam:=none mapper:=octomap, the base teleop/frontier demo); mapper:=tsdf
-    # swaps in the TSDF-focused view (its OctoMap displays would just show
-    # nothing, since octomap_server isn't even launched); slam:=slam takes
-    # priority over both because the SLAM view is the only one that adds the
-    # ground-truth-vs-estimate comparison (ATE/RPE drift arrow + text HUD,
-    # SLAM/dead-reckoning path overlay, covariance ellipsoids, graph edges).
-    rviz_config = PythonExpression(
-        [
-            "'",
-            os.path.join(bringup_share, "rviz", "demo_slam.rviz"),
-            "' if '",
-            LaunchConfiguration("slam"),
-            "' == 'slam' else ('",
-            os.path.join(bringup_share, "rviz", "demo_tsdf.rviz"),
-            "' if '",
-            LaunchConfiguration("mapper"),
-            "' == 'tsdf' else '",
-            os.path.join(bringup_share, "rviz", "demo.rviz"),
-            "')",
-        ]
-    )
+    # One view for every mode: displays whose topic has no publisher in the
+    # current mode draw nothing, so branching here only bought drift between
+    # three near-identical 700-line configs.
+    rviz_config = os.path.join(bringup_share, "rviz", "demo.rviz")
 
     # liboctomap lives under a Debian multiarch triplet directory, so derive the
     # triplet instead of naming one architecture. Falls back to the unsuffixed
