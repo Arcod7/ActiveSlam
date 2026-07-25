@@ -826,7 +826,6 @@ def generate_launch_description():
             wall_normal_offset_arg,
             wall_path_heading_weight_arg,
             mapper_arg,
-            *per_sensor_noise_args,
             thrust_boost_arg,
             hard_inflation_arg,
             inflation_arg,
@@ -834,7 +833,10 @@ def generate_launch_description():
             tsdf_octomap_arg,
             rviz_arg,
             slam_arg,
+            # Must precede the per-sensor args: each defaults to this one, and a
+            # default is resolved where it is declared.
             noise_profile_arg,
+            *per_sensor_noise_args,
             loop_closure_arg,
             noise_seed_arg,
             near_cutoff_arg,
