@@ -2208,3 +2208,46 @@ more forcefully to loop closures: these runs carry ~11000 of them over ~1000
 keyframes, each contributing as if independent, which is the most likely
 remaining source of the ANEES gap. Fixing that needs correlated noise or closure
 sparsification, not another sigma.
+
+## Phase 53 — rqt pinned to the planning dashboard
+
+**Date**: 2026-07-25
+**Files**: `bringup/rqt/planning_dashboard.perspective` (new), `bringup/setup.py`,
+`launcher_core.py`, `docs/RUN.md`, `Progress.md`
+
+**Discovery**: the launcher's rqt layer ran plain `rqt`, which reopens the
+perspective named `current-perspective` in `~/.config/ros.org/rqt_gui.ini`. That
+key is global to the machine and is claimed by any standalone plugin run:
+`ros2 run rqt_image_view rqt_image_view` and `rqt_tf_tree` each create a hidden
+perspective and leave it as current. On this machine it held
+`@rqt_image_view__ImageView` with its topic set to `/frontier_slam/debug_image`
+— the pre-Phase-45 name of the planning dashboard — so the layer opened as an
+Image View on a topic nothing publishes any more.
+
+**Fix**: the view ships as `bringup/rqt/planning_dashboard.perspective` and the
+launcher passes `--perspective-file`. rqt imports that file into a *hidden*
+perspective on every start, which (a) is wiped and re-imported each run, so it
+cannot drift, (b) is never written to `current-perspective`, so nothing outside
+can capture it, and (c) is read-only — session state goes to the ini, never back
+to the file, unlike the RViz config the launcher has to hand out as a scratch
+copy. A missing file falls back to plain `rqt`; rqt refuses to start on a
+`--perspective-file` that does not exist.
+
+One plugin: an Image View on `/frontier_slam/planning_dashboard`, filling a
+1280x900 window. Perspective files are JSON, keyed by the same settings tree the
+ini uses — `pluginmanager/running-plugins` (plugin ids come from the `class name`
+in each `plugin.xml`, so `rqt_image_view/ImageView`), then
+`plugin__<plugin_id>__<serial>/plugin/<key>` for the plugin's own settings, and
+`mainwindow/geometry`+`state` as hex-encoded QByteArrays. Values are
+`{"type": "repr", "repr": "<python repr>"}`, eval'd on import.
+
+**Verified**: `rqt --perspective-file <installed path>` under
+`QT_QPA_PLATFORM=offscreen` logs `switching to perspective
+"@planning_dashboard.perspective"`, `_load_plugin(rqt_image_view/ImageView#1)
+successful` and `MainWindow.restore_state()`, and `ros2 topic info
+/frontier_slam/planning_dashboard` then reports `Subscription count: 1`.
+Repeated against a topic with no publisher: still `Subscription count: 1`, so
+rqt does not need the planner up first. `current-perspective` in the user ini is
+unchanged after both runs. `bringup` clean-rebuilds, the launcher emits the
+installed `--perspective-file` path, and the 13 launcher tests pass. Not yet
+watched on screen with a display attached.

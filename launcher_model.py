@@ -144,11 +144,16 @@ PARAMS = [
           "Start RViz on demo.rviz — one view for every mode (OctoMap and "
           "TSDF, belief and ground truth, drift arrow, error HUD, covariance "
           "ellipsoids). Displays with no publisher in this mode draw nothing."),
-    Param("rqt", "rqt", "bool", False, "primary",
-          "Start rqt alongside RViz for introspection — node graph, topic "
-          "monitor, live plots and parameter reconfigure. Off by default: it "
-          "is a debugging tool, not part of the demo view.",
+    Param("rqt", "Planning Dashboard (RQT)", "bool", False, "primary",
+          "Start rqt on the planning dashboard — map, inflation zones, path "
+          "and robot/goal state, top-down. Off by default: it is a debugging "
+          "view, not part of the demo. Frontier mode only.",
           visible=_frontier),
+    Param("rqt_depthmap", "Sonar DepthMap (RQT)", "bool", False, "primary",
+          "Start rqt on the sonar range image (/cloud_in/range_image) — the "
+          "2D depth-camera-style view of what SLAM consumes, noise and all. "
+          "In rqt rather than RViz because an RViz Image display unticks "
+          "itself whenever its dock is hidden, e.g. moving desktop."),
     Param("keyboard", "Keyboard layout", "enum", "qwerty", "primary",
           "Physical-key mapping for the drive cluster, so the same finger "
           "positions drive on either layout. qwerty uses W/S/Q/E/A/D; azerty "
@@ -511,8 +516,8 @@ DEFAULTS[HIDDEN_SECTIONS_KEY] = list(DEFAULT_HIDDEN_SECTIONS)
 LAUNCH_ARG_ALIASES = {"robot_depth_target": "depth"}
 # Options demo.launch.py has no argument for: launcher-only UI state, and the
 # noise attenuation switch, which it expresses as a near_cutoff distance.
-LAUNCH_ARG_SKIP = {"keyboard", "robot_save_pose_on_exit", "rqt", "thrust_boost",
-                   "noise_attenuation", "near_cutoff_m"}
+LAUNCH_ARG_SKIP = {"keyboard", "robot_save_pose_on_exit", "rqt", "rqt_depthmap",
+                   "thrust_boost", "noise_attenuation", "near_cutoff_m"}
 
 
 def launch_command(values):

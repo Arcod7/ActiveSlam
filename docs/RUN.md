@@ -71,9 +71,17 @@ control screen that:
 - **retunes wall-following parameters live**, via `ros2 param set`, with no
   restart at all — those parameters are re-read every control cycle. Options
   that support this are marked `(live)`.
-- **starts the viewers.** RViz is on by default; the *rqt* option adds an
-  `rqt` layer beside it (node graph, topic monitor, plots, parameter
-  reconfigure) for when a run needs introspection rather than a demo view.
+- **starts the viewers.** RViz is on by default; the *rqt* option adds an `rqt`
+  layer beside it showing the planning dashboard
+  (`/frontier_slam/planning_dashboard` — map, inflation zones, path and
+  robot/goal state, top-down) in an Image View, and nothing else. rqt is pinned
+  to `bringup/rqt/planning_dashboard.perspective` (`--perspective-file`) rather
+  than left to reopen its last perspective, which any standalone plugin run —
+  `rqt_image_view`, `rqt_tf_tree` — otherwise claims in
+  `~/.config/ros.org/rqt_gui.ini`. Start order does not matter: the Image View
+  subscribes whether or not the planner is already publishing. To change the
+  view for good, arrange it, *Perspectives → Export*, and overwrite the file;
+  the layer is killed outright at shutdown, so live edits last the session only.
 - **shuts down cleanly.** Every layer runs in its own process group and is torn
   down with an escalating SIGINT → SIGTERM → SIGKILL, on quit, on Ctrl-C, and
   on exit, so nothing is left running in the background.

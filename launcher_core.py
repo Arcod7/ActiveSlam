@@ -26,7 +26,7 @@ import time
 
 # Order matters: groups are started top-down and stopped bottom-up.
 GROUP_ORDER = ["core", "tf", "cloud", "mapper", "gt_map", "slam", "eval",
-               "planner", "teleop_support", "rviz", "rqt"]
+               "planner", "teleop_support", "rviz", "rqt", "rqt_depthmap"]
 
 # Groups that accumulate state across a run (maps, pose graph, eval output,
 # planner blacklists). A reset restarts exactly these; the simulator, TF, point
@@ -83,6 +83,34 @@ def _rviz_config(v, bringup_share):
     dst = os.path.join(session_dir, f"demo_{os.getpid()}.rviz")
     shutil.copyfile(os.path.join(bringup_share, "rviz", "demo.rviz"), dst)
     return dst
+
+
+def _rqt_perspective_args(bringup_share, name):
+    """Pin an rqt instance to one of the shipped views.
+
+    Plain `rqt` reopens whatever perspective the ini names as current, and any
+    standalone plugin run (`ros2 run rqt_image_view rqt_image_view`, rqt_tf_tree)
+    writes itself there — so this came up as someone else's Image View, still
+    bound to /frontier_slam/debug_image from before the rename.
+    --perspective-file re-imports our file into a hidden perspective on every
+    start, so nothing outside can capture it and nothing writes back.
+    """
+    path = os.path.join(bringup_share, "rqt", f"{name}.perspective")
+    if not os.path.isfile(path):
+        return []       # rqt refuses to start on a missing --perspective-file
+    return ["--perspective-file", path]
+
+
+def _rqt_settings_env(name):
+    """A private settings dir, so two rqt instances cannot fight over one ini.
+
+    qt_gui stores window state through QSettings, which is keyed off
+    XDG_CONFIG_HOME; sharing it means whichever instance exits last overwrites
+    the other's geometry, and the user's own rqt config as well.
+    """
+    path = os.path.join(tempfile.gettempdir(), f"activeslam_rqt_{name}")
+    os.makedirs(path, exist_ok=True)
+    return {"XDG_CONFIG_HOME": path}
 
 
 class Group:
@@ -235,7 +263,10 @@ def build_groups(bringup_share=""):
         return [["rviz2", "-d", _rviz_config(v, bringup_share)]]
 
     def rqt(v):
-        return [["rqt"]]
+        return [["rqt"] + _rqt_perspective_args(bringup_share, "planning_dashboard")]
+
+    def rqt_depthmap(v):
+        return [["rqt"] + _rqt_perspective_args(bringup_share, "sonar_depthmap")]
 
     is_slam = lambda v: v["slam"] == "slam"
 
@@ -308,11 +339,20 @@ def build_groups(bringup_share=""):
               env_extra=({"LD_PRELOAD": _preload} if (_preload := octomap_preload_path())
                          else {}),
               graceful=False),
-        Group("rqt", "rqt",
-              "Introspection GUI: node graph, topic monitor, plots and "
-              "parameter reconfigure. Restores whatever perspective was left "
-              "open last time. Offered under frontier mode only.",
+        Group("rqt", "Planning Dashboard (RQT)",
+              "The planning dashboard (/frontier_slam/planning_dashboard) in an "
+              "Image View, and nothing else — map, inflation zones, path and "
+              "robot/goal state, top-down. Offered under frontier mode only.",
               rqt, visible=lambda v: bool(v["rqt"]) and v["mode"] == "frontier",
+              env_extra=_rqt_settings_env("planning_dashboard"),
+              graceful=False),
+        Group("rqt_depthmap", "Sonar DepthMap (RQT)",
+              "The sonar range image (/cloud_in/range_image) in an Image View. "
+              "Not an RViz display: RViz ties an Image display's enabled state "
+              "to its dock's Qt visibility, so moving the window to another "
+              "desktop unticks it and drops the subscription.",
+              rqt_depthmap, visible=lambda v: bool(v["rqt_depthmap"]),
+              env_extra=_rqt_settings_env("sonar_depthmap"),
               graceful=False),
     ]
 
