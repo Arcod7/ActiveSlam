@@ -53,12 +53,14 @@ Published topics:
 """
 
 from collections import deque, OrderedDict
+import threading
 import time
 
 import numpy as np
 import rclpy
 import small_gicp
-from rclpy.executors import ExternalShutdownException
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point, PoseStamped
@@ -74,7 +76,14 @@ from vdbfusion import VDBVolume
 
 
 class TSDFMapper(Node):
-    PUBLISH_HZ   = 1.0   # surface cloud + normals
+    """Threading: ingest (cloud + TF drain + replay), viz (surface + voxels) and
+    stats each own a MutuallyExclusiveCallbackGroup and run under a
+    MultiThreadedExecutor, so a slow grid walk cannot starve /cloud_in or the TF
+    callbacks that resolve deferred scans. _volume_lock serialises every VDB
+    access across those threads; viz work is duty-capped and cached by revision
+    so it re-extracts only when the map actually changed."""
+
+    PUBLISH_HZ   = 1.0   # surface cloud + normals (upper bound; see viz_max_duty)
     VOXEL_VIZ_HZ = 0.5   # voxel CUBE_LIST (expensive iteration)
 
     def __init__(self) -> None:
@@ -128,9 +137,17 @@ class TSDFMapper(Node):
         # blocking lookup in the cloud callback cannot receive the queued TF,
         # so keep a short, bounded FIFO of ROS async-TF futures and drain it
         # after returning to spin().
-        self.declare_parameter('tf_wait_timeout_s', 0.5)
-        self.declare_parameter('tf_queue_size', 10)
+        # Sized to ride out one full viz cycle rather than one cloud period: a
+        # marching-cubes pass on a large map takes seconds, and a 0.5s deadline
+        # expired every scan once the map grew, freezing it permanently.
+        self.declare_parameter('tf_wait_timeout_s', 5.0)
+        self.declare_parameter('tf_queue_size', 30)
         self.declare_parameter('tf_queue_tick_s', 0.02)
+        # Ceiling on the wall-clock fraction the surface/voxel extractions may
+        # consume; the rest is left to ingest.
+        self.declare_parameter('viz_max_duty', 0.25)
+        # Cap on sampled normals per surface publish (0 = normal_every only).
+        self.declare_parameter('max_normals', 4000)
 
         self._world_frame  = self.get_parameter('world_frame').value
         self._cloud_frame  = self.get_parameter('cloud_frame').value
@@ -168,8 +185,14 @@ class TSDFMapper(Node):
         #   <=>  d <= trunc * (1 - 2*voxel_min_solid_confidence)
         self._voxel_max_d = trunc * (1.0 - 2.0 * self._voxel_min_solid_confidence)
         self._volume     = VDBVolume(voxel_size, trunc, space_carving=space_carving)
+        # Every VDB access is serialised on this; the volume itself is not
+        # thread-safe and a rebuild swaps the object outright.
+        self._volume_lock = threading.Lock()
+        self._pyopenvdb = bool(self._volume.pyopenvdb_support_enabled)
+        # Bumped on every integrate/replay/reset so viz can skip unchanged maps.
+        self._map_revision = 0
 
-        if not self._volume.pyopenvdb_support_enabled:
+        if not self._pyopenvdb:
             self.get_logger().warn(
                 'VDBFusion built without pyopenvdb — voxel visualisation disabled')
 
@@ -195,10 +218,32 @@ class TSDFMapper(Node):
         self._tf_failed = 0
         self._tf_overflow = 0
 
+        # ── callback groups (see class docstring) ────────────────────────
+        # TransformListener already runs /tf in its own ReentrantCallbackGroup,
+        # so it stays live whatever these two are doing.
+        self._ingest_group = MutuallyExclusiveCallbackGroup()
+        self._viz_group    = MutuallyExclusiveCallbackGroup()
+        self._stats_group  = MutuallyExclusiveCallbackGroup()
+
+        viz_max_duty = float(self.get_parameter('viz_max_duty').value)
+        self._max_normals = max(0, int(self.get_parameter('max_normals').value))
+        self._surface_gate = _DutyGate(viz_max_duty)
+        self._voxels_gate  = _DutyGate(viz_max_duty)
+        self._surface_revision = -1
+        self._voxels_revision  = -1
+        self._surface_cache = None
+        self._voxels_cache  = None
+
         # ── pub/sub ──────────────────────────────────────────────────────
-        self.create_subscription(PointCloud2, '/cloud_in', self._cloud_cb, 5)
-        self.create_timer(tf_queue_tick_s, self._tf_queue_tick)
-        self.create_timer(10.0, self._log_cloud_tf_stats)
+        # Depth matches the TF queue: a viz cycle can block ingest for its whole
+        # duration, and scans dropped by DDS never reach the deferral queue.
+        self.create_subscription(PointCloud2, '/cloud_in', self._cloud_cb,
+                                 self._tf_queue_size,
+                                 callback_group=self._ingest_group)
+        self.create_timer(tf_queue_tick_s, self._tf_queue_tick,
+                          callback_group=self._ingest_group)
+        self.create_timer(10.0, self._log_cloud_tf_stats,
+                          callback_group=self._stats_group)
 
         self._enable_rebuild = bool(self.get_parameter('enable_rebuild').value)
         self._cache_voxel_size = float(self.get_parameter('cache_voxel_size').value)
@@ -213,11 +258,15 @@ class TSDFMapper(Node):
         self._pending_path_new = None
         self._replay_queue: list = []
         if self._enable_rebuild:
-            self.create_subscription(Int32, '/slam/rebuild/begin', self._rebuild_begin_cb, 10)
-            self.create_subscription(Path, '/slam/rebuild/path_old', self._rebuild_path_old_cb, 10)
-            self.create_subscription(Path, '/slam/rebuild/path_new', self._rebuild_path_new_cb, 10)
+            self.create_subscription(Int32, '/slam/rebuild/begin', self._rebuild_begin_cb, 10,
+                                     callback_group=self._ingest_group)
+            self.create_subscription(Path, '/slam/rebuild/path_old', self._rebuild_path_old_cb, 10,
+                                     callback_group=self._ingest_group)
+            self.create_subscription(Path, '/slam/rebuild/path_new', self._rebuild_path_new_cb, 10,
+                                     callback_group=self._ingest_group)
             rebuild_tick_s = float(self.get_parameter('rebuild_tick_s').value)
-            self.create_timer(rebuild_tick_s, self._replay_tick)
+            self.create_timer(rebuild_tick_s, self._replay_tick,
+                              callback_group=self._ingest_group)
             self.get_logger().info(
                 'Map rebuild consumer enabled: will reset+re-integrate cached scans '
                 'on a validated /slam/rebuild/path_old + path_new pair')
@@ -235,7 +284,7 @@ class TSDFMapper(Node):
         # surface-derived projection would be all-unknown-free and useless.
         self._projected_map_pub = None
         if self._projected_map_enabled:
-            if self._volume.pyopenvdb_support_enabled:
+            if self._pyopenvdb:
                 latched_qos = QoSProfile(
                     depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                     reliability=ReliabilityPolicy.RELIABLE,
@@ -256,7 +305,7 @@ class TSDFMapper(Node):
         # nothing about empty space.
         self._free_cloud_pub = None
         if self._free_voxels_enabled:
-            if self._volume.pyopenvdb_support_enabled:
+            if self._pyopenvdb:
                 self._free_cloud_pub = self.create_publisher(
                     PointCloud2, '/tsdf/free_voxels', 1)
             else:
@@ -268,8 +317,10 @@ class TSDFMapper(Node):
         # them when pyopenvdb (the grid path) is unavailable.
         self._last_surface_verts = None
 
-        self.create_timer(1.0 / self.PUBLISH_HZ,   self._publish_surface)
-        self.create_timer(1.0 / self.VOXEL_VIZ_HZ, self._publish_voxels)
+        self.create_timer(1.0 / self.PUBLISH_HZ,   self._publish_surface,
+                          callback_group=self._viz_group)
+        self.create_timer(1.0 / self.VOXEL_VIZ_HZ, self._publish_voxels,
+                          callback_group=self._viz_group)
 
         self.get_logger().info('tsdf_mapper ready')
 
@@ -354,7 +405,9 @@ class TSDFMapper(Node):
             f'integrated={self._cloud_integrated} deferred={self._tf_deferred} '
             f'recovered={self._tf_recovered} expired={self._tf_expired} '
             f'failed={self._tf_failed} overflow={self._tf_overflow} '
-            f'queued={len(self._tf_queue)}')
+            f'queued={len(self._tf_queue)} rev={self._map_revision} '
+            f'viz: surface={self._surface_gate.last_s:.2f}s '
+            f'voxels={self._voxels_gate.last_s:.2f}s')
 
     def _integrate_cloud(self, msg: PointCloud2, tf_msg) -> bool:
         """Filter and integrate one cloud using its exact capture-time TF."""
@@ -387,7 +440,9 @@ class TSDFMapper(Node):
         pts_world = pts_cam @ R.T + t      # (N,3) world frame, float64
         origin    = t                       # camera origin in world frame, float64
 
-        self._volume.integrate(pts_world, origin)
+        with self._volume_lock:
+            self._volume.integrate(pts_world, origin)
+        self._map_revision += 1
 
         if self._enable_rebuild:
             self._cache_scan(msg.header.stamp, pts_cam, T)
@@ -455,7 +510,10 @@ class TSDFMapper(Node):
 
         self._write_back_cache(keyframe_ts, corrections)
 
-        self._volume = VDBVolume(self._voxel_size, self._trunc, space_carving=self._space_carving)
+        with self._volume_lock:
+            self._volume = VDBVolume(
+                self._voxel_size, self._trunc, space_carving=self._space_carving)
+        self._map_revision += 1
         self._replay_queue = list(self._scan_cache.keys())
         self.get_logger().info(
             f'Map rebuild: {len(keyframe_ts)} keyframe corrections, replaying '
@@ -473,14 +531,16 @@ class TSDFMapper(Node):
         chunk, self._replay_queue = (
             self._replay_queue[:self._rebuild_chunk_scans],
             self._replay_queue[self._rebuild_chunk_scans:])
-        for key in chunk:
-            entry = self._scan_cache.get(key)
-            if entry is None:
-                continue   # evicted between snapshot and replay
-            pts_cam, T = entry
-            R, t = T[:3, :3], T[:3, 3]
-            pts_world = pts_cam.astype(np.float64) @ R.T + t
-            self._volume.integrate(pts_world, t)
+        with self._volume_lock:
+            for key in chunk:
+                entry = self._scan_cache.get(key)
+                if entry is None:
+                    continue   # evicted between snapshot and replay
+                pts_cam, T = entry
+                R, t = T[:3, :3], T[:3, 3]
+                pts_world = pts_cam.astype(np.float64) @ R.T + t
+                self._volume.integrate(pts_world, t)
+        self._map_revision += 1
         if not self._replay_queue:
             self.get_logger().info('Map rebuild replay complete')
 
@@ -489,95 +549,159 @@ class TSDFMapper(Node):
     # ────────────────────────────────────────────────────────────────────
 
     def _publish_surface(self) -> None:
-        try:
-            verts, _tris = self._volume.extract_triangle_mesh(
-                fill_holes=False, min_weight=float(self._min_weight))
-        except Exception as exc:
-            self.get_logger().warn(
-                f'extract_triangle_mesh failed: {exc}', throttle_duration_sec=5.0)
+        started = self._monotonic()
+        if (self._map_revision != self._surface_revision
+                and self._surface_gate.ready(started)):
+            self._rebuild_surface_cache(started)
+
+        if self._surface_cache is None:
+            return
+        # Re-sent unchanged so RViz keeps the arrows alive past their lifetime.
+        cloud, markers, normals_cloud = self._surface_cache
+        stamp = self.get_clock().now().to_msg()
+        self._cloud_pub.publish(_restamp(cloud, stamp))
+        if markers is not None:
+            self._normals_pub.publish(_restamp(markers, stamp))
+            self._normals_cloud_pub.publish(_restamp(normals_cloud, stamp))
+
+    def _normal_stride(self, n_verts: int) -> int:
+        """normal_every, widened so at most max_normals samples are built."""
+        stride = max(1, self._normal_every)
+        if self._max_normals > 0:
+            stride = max(stride, -(-n_verts // self._max_normals))
+        return stride
+
+    def _rebuild_surface_cache(self, started: float) -> None:
+        """Re-run marching cubes and rebuild the cached surface messages."""
+        revision = self._map_revision
+        sampled = normals = None
+        with self._volume_lock:
+            try:
+                verts, _tris = self._volume.extract_triangle_mesh(
+                    fill_holes=False, min_weight=float(self._min_weight))
+            except Exception as exc:
+                self.get_logger().warn(
+                    f'extract_triangle_mesh failed: {exc}', throttle_duration_sec=5.0)
+                verts = None
+            if verts is not None:
+                verts = np.asarray(verts, dtype=np.float32)
+                # Normals need the TSDF grid (pyopenvdb-only); the cloud does not.
+                if len(verts) and self._pyopenvdb:
+                    sampled = verts[::self._normal_stride(len(verts))]
+                    normals = _compute_normals_vdb(
+                        self._volume.tsdf, sampled, self._voxel_size)
+        finished = self._monotonic()
+        self._surface_gate.record(finished, finished - started)
+        if verts is None:
             return
 
+        self._surface_revision = revision
         if len(verts) == 0:
             return
-
-        verts = np.asarray(verts, dtype=np.float32)
         self._last_surface_verts = verts
 
         header = Header()
         header.stamp    = self.get_clock().now().to_msg()
         header.frame_id = self._world_frame
 
-        self._cloud_pub.publish(_make_pointcloud2(header, verts))
-
-        # Normals need the TSDF grid (pyopenvdb-only); the surface cloud does not.
-        if self._volume.pyopenvdb_support_enabled:
-            sampled = verts[::self._normal_every]
-            normals  = _compute_normals_vdb(self._volume.tsdf, sampled, self._voxel_size)
-            self._normals_pub.publish(_normals_markers(sampled, normals, header))
-
+        markers = normals_cloud = None
+        if normals is not None:
+            markers = _normals_markers(sampled, normals, header)
             valid = ~np.isnan(normals).any(axis=1)
-            self._normals_cloud_pub.publish(
-                _make_normals_cloud(header, sampled[valid], normals[valid]))
+            normals_cloud = _make_normals_cloud(header, sampled[valid], normals[valid])
+        self._surface_cache = (_make_pointcloud2(header, verts), markers, normals_cloud)
 
-        self.get_logger().info(f'Surface: {len(verts)} pts', throttle_duration_sec=5.0)
+        self.get_logger().info(
+            f'Surface: {len(verts)} pts in {self._surface_gate.last_s:.2f}s',
+            throttle_duration_sec=5.0)
 
     # ────────────────────────────────────────────────────────────────────
     # Voxel CUBE_LIST visualisation
     # ────────────────────────────────────────────────────────────────────
 
     def _publish_voxels(self) -> None:
-        if not self._volume.pyopenvdb_support_enabled:
+        if not self._pyopenvdb:
             self._publish_voxels_from_surface()
             return
 
-        if self._projected_map_pub is not None or self._free_cloud_pub is not None:
-            # One walk feeds the solid viz, the 2-D planning map and the free
-            # cloud: keep every voxel at/above the low map weight (min_weight)
-            # so free (d>0) cells survive, then re-filter to solids here for
-            # the CUBE_LIST + /tsdf/occupied_voxels.
-            coords, all_d, all_w = _extract_voxel_arrays(
-                self._volume.tsdf, self._volume.weights, self._min_weight)
-            self._publish_projected_map(coords, all_d, all_w)
-            self._publish_free_voxels(coords, all_d)
-            if coords is None:
-                pts = d_vals = w_vals = None
+        started = self._monotonic()
+        if (self._map_revision != self._voxels_revision
+                and self._voxels_gate.ready(started)):
+            self._rebuild_voxel_cache(started)
+
+        if self._voxels_cache is None:
+            return
+        solid_cloud, markers, free_cloud, grid = self._voxels_cache
+        stamp = self.get_clock().now().to_msg()
+        self._solid_cloud_pub.publish(_restamp(solid_cloud, stamp))
+        self._voxels_pub.publish(_restamp(markers, stamp))
+        if free_cloud is not None:
+            self._free_cloud_pub.publish(_restamp(free_cloud, stamp))
+        if grid is not None:
+            self._projected_map_pub.publish(_restamp(grid, stamp))
+
+    def _rebuild_voxel_cache(self, started: float) -> None:
+        """Walk the VDB grid once and rebuild every cached voxel-view message.
+
+        Only the walk needs the volume lock; everything downstream is numpy and
+        message building over plain arrays."""
+        revision = self._map_revision
+        banded = self._projected_map_pub is not None or self._free_cloud_pub is not None
+        coords = all_d = all_w = None
+        pts = d_vals = w_vals = None
+        with self._volume_lock:
+            if banded:
+                # One walk feeds the solid viz, the 2-D planning map and the free
+                # cloud: keep every voxel at/above the low map weight (min_weight)
+                # so free (d>0) cells survive, then re-filter to solids below for
+                # the CUBE_LIST + /tsdf/occupied_voxels.
+                coords, all_d, all_w = _extract_voxel_arrays(
+                    self._volume.tsdf, self._volume.weights, self._min_weight)
             else:
+                # Only iterate voxels we'll actually show (early filtering inside):
+                # confidently solid (TSDF-derived) AND observed often enough (weight).
+                max_d = self._voxel_max_d if not self._show_free else None
+                pts, d_vals, w_vals = _extract_voxels(
+                    self._volume.tsdf, self._volume.weights,
+                    self._voxel_size, min_weight=self._voxel_min_weight, max_d=max_d)
+        finished = self._monotonic()
+        self._voxels_gate.record(finished, finished - started)
+        self._voxels_revision = revision
+
+        now = self.get_clock().now().to_msg()
+        header = Header(stamp=now, frame_id=self._world_frame)
+
+        free_cloud = grid = None
+        if banded:
+            grid = self._build_projected_map_msg(coords, all_d, all_w, now)
+            if grid is None and self._voxels_cache is not None:
+                grid = self._voxels_cache[3]   # keep the last good band
+            free_cloud = self._build_free_voxels_msg(coords, all_d, header)
+            if coords is not None:
                 solid = (all_w >= self._voxel_min_weight) & (all_d <= self._voxel_max_d)
                 if np.any(solid):
                     pts = (coords[solid].astype(np.float32) * self._voxel_size
                            + self._voxel_size / 2.0)
                     d_vals = all_d[solid]
                     w_vals = all_w[solid]
-                else:
-                    pts = d_vals = w_vals = None
-        else:
-            # Only iterate voxels we'll actually show (early filtering inside):
-            # confidently solid (TSDF-derived) AND observed often enough (weight).
-            max_d = self._voxel_max_d if not self._show_free else None
-            pts, d_vals, w_vals = _extract_voxels(
-                self._volume.tsdf, self._volume.weights,
-                self._voxel_size, min_weight=self._voxel_min_weight, max_d=max_d)
-
-        now = self.get_clock().now().to_msg()
-        header = Header(stamp=now, frame_id=self._world_frame)
 
         if pts is None:
-            self._solid_cloud_pub.publish(
-                _make_pointcloud2(header, np.empty((0, 3), dtype=np.float32)))
             del_m = Marker()
             del_m.header.stamp    = now
             del_m.header.frame_id = self._world_frame
             del_m.ns     = 'tsdf_voxels'
             del_m.id     = 0
             del_m.action = Marker.DELETE
-            self._voxels_pub.publish(MarkerArray(markers=[del_m]))
+            self._voxels_cache = (
+                _make_pointcloud2(header, np.empty((0, 3), dtype=np.float32)),
+                MarkerArray(markers=[del_m]), free_cloud, grid)
             return
 
         # This remains a solid-only cloud even if the optional voxel
         # visualisation includes free space.  It is consumed by the frontier
         # planner to veto only goals physically inside a TSDF solid voxel.
         solid_pts = pts if not self._show_free else pts[d_vals <= self._voxel_max_d]
-        self._solid_cloud_pub.publish(_make_pointcloud2(header, solid_pts))
+        solid_cloud = _make_pointcloud2(header, solid_pts)
 
         n = len(pts)
         if n > self._max_viz:
@@ -615,8 +739,10 @@ class TSDFMapper(Node):
         m.colors   = [ColorRGBA(r=float(c[0]), g=float(c[1]),
                                 b=float(c[2]), a=float(c[3])) for c in colors]
 
-        self._voxels_pub.publish(MarkerArray(markers=[m]))
-        self.get_logger().info(f'Voxels: {len(pts)} published', throttle_duration_sec=5.0)
+        self._voxels_cache = (solid_cloud, MarkerArray(markers=[m]), free_cloud, grid)
+        self.get_logger().info(
+            f'Voxels: {len(pts)} published in {self._voxels_gate.last_s:.2f}s',
+            throttle_duration_sec=5.0)
 
     # ────────────────────────────────────────────────────────────────────
     # 2-D planning map (/projected_map) derived from the TSDF grid
@@ -637,35 +763,29 @@ class TSDFMapper(Node):
             f'projected_map band centre locked to z={self._projected_map_z:.2f}m')
         return self._projected_map_z
 
-    def _publish_projected_map(self, coords, d_vals, w_vals) -> None:
+    def _build_projected_map_msg(self, coords, d_vals, w_vals, stamp):
         if self._projected_map_pub is None or coords is None:
-            return
+            return None
         z = self._band_center_z()
         if z is None:
-            return
-        grid = _build_projected_map(
+            return None
+        return _build_projected_map(
             coords, d_vals, w_vals, self._voxel_size,
             z_lo=z - self._projected_map_band, z_hi=z + self._projected_map_band,
             occ_max_d=self._voxel_max_d, occ_min_weight=self._voxel_min_weight,
             margin=self._projected_map_margin,
-            frame=self._world_frame, stamp=self.get_clock().now().to_msg())
-        if grid is not None:
-            self._projected_map_pub.publish(grid)
+            frame=self._world_frame, stamp=stamp)
 
-    def _publish_free_voxels(self, coords, d_vals) -> None:
+    def _build_free_voxels_msg(self, coords, d_vals, header):
         """Observed-empty voxel centres, the free half tsdf_to_octomap needs."""
         if self._free_cloud_pub is None:
-            return
-        header = Header(stamp=self.get_clock().now().to_msg(),
-                        frame_id=self._world_frame)
+            return None
         if coords is None:
-            self._free_cloud_pub.publish(
-                _make_pointcloud2(header, np.empty((0, 3), dtype=np.float32)))
-            return
+            return _make_pointcloud2(header, np.empty((0, 3), dtype=np.float32))
         free = d_vals > 0.0
         pts = (coords[free].astype(np.float32) * self._voxel_size
                + self._voxel_size / 2.0)
-        self._free_cloud_pub.publish(_make_pointcloud2(header, pts))
+        return _make_pointcloud2(header, pts)
 
     def _publish_voxels_from_surface(self) -> None:
         """Occupancy-voxel view built from the marching-cubes surface, for
@@ -717,6 +837,37 @@ class TSDFMapper(Node):
 # ══════════════════════════════════════════════════════════════════════════════
 # Module-level helpers
 # ══════════════════════════════════════════════════════════════════════════════
+
+class _DutyGate:
+    """Bounds a slow periodic task to a fraction of wall-clock time.
+
+    After a run lasting `elapsed`, blocks the next one until
+    elapsed*(1/max_duty - 1) has passed, so the task can never occupy more than
+    max_duty of its thread however large the map grows. Timings come from the
+    caller, so this is pure and unit-testable in isolation."""
+
+    def __init__(self, max_duty: float) -> None:
+        self._max_duty = min(max(float(max_duty), 1e-3), 1.0)
+        self._next_ok = 0.0
+        self.last_s = 0.0
+
+    def ready(self, now: float) -> bool:
+        return now >= self._next_ok
+
+    def record(self, now: float, elapsed: float) -> None:
+        self.last_s = max(0.0, elapsed)
+        self._next_ok = now + self.last_s * (1.0 / self._max_duty - 1.0)
+
+
+def _restamp(msg, stamp):
+    """Refresh a cached message's stamp in place before republishing."""
+    if isinstance(msg, MarkerArray):
+        for m in msg.markers:
+            m.header.stamp = stamp
+    else:
+        msg.header.stamp = stamp
+    return msg
+
 
 def _parse_pointcloud2(msg: PointCloud2) -> 'np.ndarray | None':
     """Return (N,3) float64 array of finite XYZ points, or None."""
@@ -1150,12 +1301,17 @@ def _normals_markers(points: np.ndarray, normals: np.ndarray,
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = TSDFMapper()
+    # One thread each for ingest, viz and stats, plus the listener's own /tf
+    # group — a slow extraction must never hold up cloud or TF callbacks.
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         try:
+            executor.shutdown()
             node.destroy_node()
             rclpy.try_shutdown()
         except KeyboardInterrupt:
