@@ -18,7 +18,8 @@ class GoalSelection:
     gx: float
     gy: float
     stuck_pct: int        # 0–100, percent of stuck timeout elapsed on current goal
-    event: str = ''       # '', 'STUCK_BLACKLIST', 'ALL_BLACKLISTED'
+    # '', 'STUCK_BLACKLIST', 'ALL_BLACKLISTED', 'OUTSIDE_SURVEY_AREA'
+    event: str = ''
     # Populated only when event == 'STUCK_BLACKLIST', for user-facing logging.
     stuck_goal: tuple | None = None     # (x, y, elapsed_s, progress_m)
 
@@ -31,7 +32,9 @@ class GoalManager:
                  stuck_timeout: float = 30.0,
                  stuck_min_progress: float = 0.5,
                  blacklist_duration: float = 60.0,
-                 arrival_blacklist_duration: float = 20.0):
+                 arrival_blacklist_duration: float = 20.0,
+                 survey_center: tuple | None = None,
+                 survey_radius: float = 0.0):
         self.min_explore_dist           = min_explore_dist
         self.goal_vanish_dist           = goal_vanish_dist
         self.goal_radius                = goal_radius
@@ -39,6 +42,12 @@ class GoalManager:
         self.stuck_min_progress         = stuck_min_progress
         self.blacklist_duration         = blacklist_duration
         self.arrival_blacklist_duration = arrival_blacklist_duration
+        # Survey working area: frontier goals outside it are not candidates,
+        # so exploration stays on the structure instead of following open
+        # water outward without bound. radius <= 0 disables it entirely, which
+        # is the default -- every existing run behaves exactly as before.
+        self.survey_center              = survey_center
+        self.survey_radius              = survey_radius
 
         self._committed: np.ndarray | None = None
         self._committed_time: float = 0.0
@@ -63,18 +72,36 @@ class GoalManager:
         )
 
     # ---- main entry point
+    def inside_survey_area(self, wx: float, wy: float) -> bool:
+        """Whether a goal lies within the configured working area."""
+        if self.survey_radius <= 0.0 or self.survey_center is None:
+            return True
+        return float(np.hypot(wx - self.survey_center[0],
+                              wy - self.survey_center[1])) <= self.survey_radius
+
     def select(self, clusters, robot_xy: np.ndarray, now: float):
         """Pick the next goal from the cluster list.
 
         Returns None when all candidates are within MIN_EXPLORE_DIST.
         Returns a GoalSelection with event='ALL_BLACKLISTED' when every
-        remaining candidate is blacklisted.
+        remaining candidate is blacklisted, or 'OUTSIDE_SURVEY_AREA' when
+        every candidate lies beyond the survey radius -- the working area has
+        been explored, which is a finished mission rather than a fault.
         """
         self._blacklist = [(x, y, t) for x, y, t in self._blacklist if t > now]
 
         candidates = [c for c in clusters if c.distance >= self.min_explore_dist]
         if not candidates:
             return None
+
+        # Bound before blacklisting: a goal outside the area is not a failed
+        # goal, so it must not consume a blacklist slot or trigger STUCK.
+        in_area = [c for c in candidates if self.inside_survey_area(c.wx, c.wy)]
+        if candidates and not in_area:
+            self._committed = None
+            return GoalSelection(float('nan'), float('nan'), 0,
+                                 'OUTSIDE_SURVEY_AREA')
+        candidates = in_area
 
         candidates = [c for c in candidates if not self.is_blacklisted(c.wx, c.wy)]
         if not candidates:

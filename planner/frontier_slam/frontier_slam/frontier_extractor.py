@@ -91,6 +91,16 @@ class FrontierExtractor(Node):
         self.declare_parameter('hard_inflation_m', HARD_INFLATION_M)
         self.declare_parameter('inflation_m', INFLATION_M)
         self.declare_parameter('plan_inflation_m', PLAN_INFLATION_M)
+        # Survey working area. Frontier exploration in open water has no
+        # natural bound -- it follows free space outward indefinitely, so a
+        # run spends its budget leaving the structure instead of surveying it.
+        # <= 0 disables the bound, which is the default.
+        self.declare_parameter('survey_radius_m', 0.0)
+        # NaN centre = the deployment point, taken from the first odometry
+        # fix. A survey area is defined relative to where the vehicle was put
+        # in the water unless the operator names a different centre.
+        self.declare_parameter('survey_center_x', float('nan'))
+        self.declare_parameter('survey_center_y', float('nan'))
         odom_topic = str(self.get_parameter('odom_topic').value)
         depth_arg = float(self.get_parameter('depth_setpoint').value)
         # Same value, same launch arg, as waypoint_controller's own
@@ -139,6 +149,10 @@ class FrontierExtractor(Node):
         self._tsdf_surface_tree: cKDTree | None = None
         self._tsdf_surface_received_at: float | None = None
 
+        survey_radius = float(self.get_parameter('survey_radius_m').value)
+        cx = float(self.get_parameter('survey_center_x').value)
+        cy = float(self.get_parameter('survey_center_y').value)
+        self._survey_center_fixed = not (math.isnan(cx) or math.isnan(cy))
         self._goals = GoalManager(
             min_explore_dist=3.0,
             goal_vanish_dist=3.0,
@@ -147,7 +161,15 @@ class FrontierExtractor(Node):
             stuck_min_progress=0.5,
             blacklist_duration=30.0,
             arrival_blacklist_duration=20.0,
+            survey_radius=max(0.0, survey_radius),
+            survey_center=((cx, cy) if self._survey_center_fixed else None),
         )
+        if survey_radius > 0.0:
+            where = (f'({cx:.1f}, {cy:.1f})' if self._survey_center_fixed
+                     else 'the deployment point')
+            self.get_logger().info(
+                f'Survey area: {survey_radius:.1f} m around {where}; frontier '
+                'goals outside it are not candidates')
 
         self._log = open_session_log('extractor', CSV_COLUMNS, _LOG_DIR)
 
@@ -185,6 +207,15 @@ class FrontierExtractor(Node):
         self._robot_speed = math.hypot(v.x, v.y)
         if self._cruise_z is None:   # first odom, no depth_setpoint launch arg
             self._cruise_z = float(p.z)
+        # Anchor the survey area on the deployment point, once, unless the
+        # operator named a centre explicitly.
+        if (self._goals.survey_radius > 0.0
+                and self._goals.survey_center is None
+                and not self._survey_center_fixed):
+            self._goals.survey_center = (float(p.x), float(p.y))
+            self.get_logger().info(
+                f'Survey area anchored at deployment point '
+                f'({p.x:.1f}, {p.y:.1f})')
 
     def _tsdf_solid_cb(self, msg: PointCloud2) -> None:
         points = _parse_xyz_cloud(msg)
@@ -357,7 +388,10 @@ class FrontierExtractor(Node):
 
         if selection.event == 'ALL_BLACKLISTED' or math.isnan(selection.gx):
             self.get_logger().info(
-                'All candidates blacklisted — waiting', throttle_duration_sec=5.0,
+                'Survey area fully explored — every remaining frontier is '
+                'outside it' if selection.event == 'OUTSIDE_SURVEY_AREA'
+                else 'All candidates blacklisted — waiting',
+                throttle_duration_sec=5.0,
             )
             self._current_goal_xy = None
             self._current_path    = []

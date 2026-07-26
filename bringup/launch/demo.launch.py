@@ -215,6 +215,21 @@ def generate_launch_description():
         default_value="1.50",
         description="A* soft-zone radius around occupied cells (high cost, last-resort passage)",
     )
+    survey_radius_arg = DeclareLaunchArgument(
+        "survey_radius_m",
+        default_value="0.0",
+        description="Radius (m) of the survey working area: frontier goals outside "
+        "it are not candidates, so exploration stays on the structure instead of "
+        "following open water outward without bound. 0 = unbounded (default).",
+    )
+    survey_center_x_arg = DeclareLaunchArgument(
+        "survey_center_x", default_value="nan",
+        description="Survey-area centre X (NED north, m). nan = the deployment point.",
+    )
+    survey_center_y_arg = DeclareLaunchArgument(
+        "survey_center_y", default_value="nan",
+        description="Survey-area centre Y (NED east, m). nan = the deployment point.",
+    )
     plan_inflation_arg = DeclareLaunchArgument(
         "plan_inflation_m",
         default_value="3.00",
@@ -627,6 +642,9 @@ def generate_launch_description():
             "hard_inflation_m": LaunchConfiguration("hard_inflation_m"),
             "inflation_m": LaunchConfiguration("inflation_m"),
             "plan_inflation_m": LaunchConfiguration("plan_inflation_m"),
+            "survey_radius_m": LaunchConfiguration("survey_radius_m"),
+            "survey_center_x": LaunchConfiguration("survey_center_x"),
+            "survey_center_y": LaunchConfiguration("survey_center_y"),
             "odom_topic": PythonExpression(
                 [
                     "'/slam/odometry' if '",
@@ -882,6 +900,9 @@ def generate_launch_description():
             hard_inflation_arg,
             inflation_arg,
             plan_inflation_arg,
+            survey_radius_arg,
+            survey_center_x_arg,
+            survey_center_y_arg,
             tsdf_octomap_arg,
             voxel_size_arg,
             voxel_min_weight_arg,

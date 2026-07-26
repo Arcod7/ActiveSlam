@@ -315,6 +315,20 @@ def generate_launch_description():
         'plan_inflation_m', default_value='3.00',
         description='A* planning-margin radius around occupied cells (moderate cost, steers paths away).',
     )
+    survey_radius_arg = DeclareLaunchArgument(
+        'survey_radius_m', default_value='0.0',
+        description='Radius (m) of the survey working area; frontier goals outside '
+                    'it are not candidates, so exploration stays on the structure '
+                    'instead of following open water outward. 0 = unbounded.',
+    )
+    survey_center_x_arg = DeclareLaunchArgument(
+        'survey_center_x', default_value='nan',
+        description='Survey-area centre X (NED north, m). nan = the deployment point.',
+    )
+    survey_center_y_arg = DeclareLaunchArgument(
+        'survey_center_y', default_value='nan',
+        description='Survey-area centre Y (NED east, m). nan = the deployment point.',
+    )
     depth = LaunchConfiguration('depth')
     odom_topic = LaunchConfiguration('odom_topic')
 
@@ -323,6 +337,9 @@ def generate_launch_description():
         hard_inflation_arg,
         inflation_arg,
         plan_inflation_arg,
+        survey_radius_arg,
+        survey_center_x_arg,
+        survey_center_y_arg,
         odom_topic_arg,
         safety_start_enabled_arg,
         actuator_backend_arg,
@@ -420,6 +437,9 @@ def generate_launch_description():
                 'hard_inflation_m': _float_parameter('hard_inflation_m'),
                 'inflation_m': _float_parameter('inflation_m'),
                 'plan_inflation_m': _float_parameter('plan_inflation_m'),
+                'survey_radius_m': _float_parameter('survey_radius_m'),
+                'survey_center_x': _float_parameter('survey_center_x'),
+                'survey_center_y': _float_parameter('survey_center_y'),
             }],
         ),
         Node(
