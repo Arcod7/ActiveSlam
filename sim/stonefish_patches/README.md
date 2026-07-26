@@ -59,3 +59,18 @@ git checkout b21eb8e194c570ff2f61e91aeffb38d73dc25f42
 git am /path/to/ActiveSlam/sim/stonefish_patches/*.patch
 # then follow Stonefish's own build instructions (CMake + its 3rdparty deps)
 ```
+
+`bootstrap.sh` does this for you against `external/stonefish`, which is the
+checkout it builds — patch that one, not another clone of the fork.
+
+Building is not enough: `stonefish_simulator` resolves `libStonefish.so` to the
+install prefix, so a patch only takes effect after `sudo cmake --install`
+(`sudo ldconfig` too, when installing over an older copy). Nothing needs
+recompiling in the ROS 2 workspace — the bridge links the library by path — but
+the simulator has to be restarted.
+
+`bootstrap.sh` fingerprints the sources it built into
+`$prefix/share/Stonefish/.source-id` and rebuilds when that stops matching. It
+also probes the installed headers for the patched API, but on its own that test
+cannot see a patch which changes no header — 0003, 0004 and 0006 are all
+implementation-only.
