@@ -268,6 +268,20 @@ def generate_launch_description():
                     "to clear the near-field reverberation spray around the vehicle "
                     "(-1 = profile default, 0 = keep all; e.g. 1.6 cuts the spray).",
     )
+    near_fade_arg = DeclareLaunchArgument(
+        "near_fade",
+        default_value="-1.0",
+        description="Soft alternative to near_cutoff: probability of dropping a sonar "
+                    "return at the sensor, falling to 0 at near_fade_range, so close "
+                    "geometry thins rather than disappears "
+                    "(-1 = profile default, 0 = off; e.g. 0.8 keeps a fifth of it).",
+    )
+    near_fade_range_arg = DeclareLaunchArgument(
+        "near_fade_range",
+        default_value="-1.0",
+        description="Range (m) at which near_fade thinning reaches zero "
+                    "(-1 = profile default).",
+    )
     carve_no_return_arg = DeclareLaunchArgument(
         "carve_no_return",
         default_value="false",
@@ -840,6 +854,8 @@ def generate_launch_description():
             loop_closure_arg,
             noise_seed_arg,
             near_cutoff_arg,
+            near_fade_arg,
+            near_fade_range_arg,
             map_rebuild_arg,
             carve_no_return_arg,
             output_dir_arg,

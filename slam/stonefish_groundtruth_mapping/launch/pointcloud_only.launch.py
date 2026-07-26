@@ -63,6 +63,18 @@ def generate_launch_description():
                     'clear the near-field reverberation spray around the vehicle. '
                     '-1 = use the profile default (0 = keep all near returns).',
     )
+    near_fade_arg = DeclareLaunchArgument(
+        'near_fade', default_value='-1.0',
+        description='Soft alternative to near_cutoff: probability of dropping a '
+                    'return at the sensor, falling to 0 at near_fade_range. Thins '
+                    'the near-field spray while leaving close geometry visible. '
+                    '-1 = use the profile default (0 = off).',
+    )
+    near_fade_range_arg = DeclareLaunchArgument(
+        'near_fade_range', default_value='-1.0',
+        description='Range (m) at which the near_fade thinning reaches zero. '
+                    '-1 = use the profile default.',
+    )
 
     # depth_image_proc always publishes /cloud_in_raw and sonar_noise always
     # republishes it as /cloud_in, whether or not it adds noise. Publishing
@@ -116,6 +128,9 @@ def generate_launch_description():
             'noise_profile_path': noise_file,
             'noise_seed': LaunchConfiguration('noise_seed'),
             'min_range_m': ParameterValue(LaunchConfiguration('near_cutoff'), value_type=float),
+            'near_fade_p': ParameterValue(LaunchConfiguration('near_fade'), value_type=float),
+            'near_fade_range_m': ParameterValue(
+                LaunchConfiguration('near_fade_range'), value_type=float),
             'input_topic': '/cloud_in_raw',
             'output_topic': '/cloud_in',
             'passthrough': passthrough,
@@ -138,6 +153,6 @@ def generate_launch_description():
 
     return LaunchDescription([
         sonar_noise_arg, noise_profile_arg, noise_profile_sonar_arg,
-        noise_seed_arg, near_cutoff_arg,
+        noise_seed_arg, near_cutoff_arg, near_fade_arg, near_fade_range_arg,
         depth_to_cloud, sonar_noise_node, range_image_slam, range_image_raw,
     ])

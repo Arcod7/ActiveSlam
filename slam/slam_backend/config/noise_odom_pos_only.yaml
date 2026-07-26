@@ -39,3 +39,4 @@ sonar:                       # exact passthrough (as noise_ideal.yaml)
   reverb_p: 0.0
   multipath_p: 0.0
   min_range_m: 0.0
+  near_fade_p: 0.0

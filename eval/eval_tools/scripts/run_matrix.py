@@ -56,7 +56,8 @@ VALID_KEYS = {
     # zeroes every command until armed — sim batches must opt in explicitly.
     'safety_start_enabled', 'scan_style', 'scan_sweep_deg', 'carve_no_return',
     'tsdf_octomap',
-    'near_cutoff', 'scene', 'obj_mesh', 'obj_x', 'obj_y', 'obj_z', 'obj_scale',
+    'near_cutoff', 'near_fade', 'near_fade_range',
+    'scene', 'obj_mesh', 'obj_x', 'obj_y', 'obj_z', 'obj_scale',
     'obj_roll', 'obj_pitch', 'obj_yaw',
     'robot_x', 'robot_y', 'robot_z', 'robot_roll', 'robot_pitch', 'robot_yaw', 'depth',
     # Motion tuning and the revisit trigger, so a batch can pin the same demo

@@ -37,6 +37,9 @@ Per-point stage, for each finite point with depth_min < range < NO_RETURN_RANGE_
      pose_graph's skip_nans read, octomap_server's native NaN support.
   7. near-field gate (min_range_m): drop returns nearer than the threshold,
      a tunable knob to clear the reverberation spray around the vehicle.
+  8. near-field fade (near_fade_p): the soft form of item 7 — a drop
+     probability rising toward the sensor rather than a hard cut, so close
+     geometry survives thinned instead of erased.
 
 Range error and dropout are drawn from smooth random fields rather than
 independently per point, so both are correlated across neighbouring beams
@@ -282,6 +285,17 @@ def reverberation_range(r_grid, cos_inc, valid, field, rng, p):
     return out, mask
 
 
+def near_fade_drop_p(r, p):
+    """Drop probability of the near-field fade: near_fade_p at the sensor,
+    zero at near_fade_range_m. Thins close returns rather than cutting them,
+    so a sparse spray goes and a surface filling every beam stays outlined."""
+    r = np.asarray(r, dtype=float)
+    if p.near_fade_p <= 0.0 or p.near_fade_range_m <= 0.0:
+        return np.zeros(r.shape)
+    close = np.clip(1.0 - r / p.near_fade_range_m, 0.0, 1.0)
+    return p.near_fade_p * close ** p.near_fade_exp
+
+
 class SonarNoiseNode(Node):
     def __init__(self, **kwargs):
         super().__init__('sonar_noise', **kwargs)
@@ -298,6 +312,9 @@ class SonarNoiseNode(Node):
         # returns nearer than this to clear the reverberation spray around the
         # vehicle. -1 keeps the profile's own min_range_m (0 = off).
         self.declare_parameter('min_range_m', -1.0)
+        # Soft near-field fade, overridden the same way (-1 keeps the profile's).
+        self.declare_parameter('near_fade_p', -1.0)
+        self.declare_parameter('near_fade_range_m', -1.0)
 
         yaml_path = self.get_parameter('noise_profile_path').value
         if not yaml_path or not os.path.exists(yaml_path):
@@ -312,6 +329,12 @@ class SonarNoiseNode(Node):
         min_range_override = self.get_parameter('min_range_m').value
         if min_range_override >= 0.0:
             self.profile.min_range_m = min_range_override
+        fade_p_override = self.get_parameter('near_fade_p').value
+        if fade_p_override >= 0.0:
+            self.profile.near_fade_p = fade_p_override
+        fade_range_override = self.get_parameter('near_fade_range_m').value
+        if fade_range_override >= 0.0:
+            self.profile.near_fade_range_m = fade_range_override
 
         seed = resolve_seed(profile_seed, self.get_parameter('noise_seed').value, SEED_OFFSET)
         self._rng = np.random.default_rng(seed if seed != -1 else None)
@@ -324,7 +347,7 @@ class SonarNoiseNode(Node):
             self.profile.outlier_p, self.profile.sos_scale_error_pct,
             self.profile.argmax_window_px > 1, self.profile.lat_sigma_beam_frac,
             self.profile.reverb_p, self.profile.multipath_p,
-            self.profile.min_range_m,
+            self.profile.min_range_m, self.profile.near_fade_p,
         ])
 
         # One speed-of-sound error per run: a systematic range scale SLAM cannot
@@ -451,6 +474,12 @@ def apply_sonar_noise(xyz, r, cos_inc, f_range, f_drop, p, rng, sos_scale=1.0,
     # a tunable knob to pull the noised cloud back toward the clean geometry.
     if p.min_range_m > 0.0:
         dropout_mask = dropout_mask | (r_new < p.min_range_m)
+
+    # Soft counterpart of the gate, thinning the near field instead of clearing it.
+    fade_p = near_fade_drop_p(r_new, p)
+    if np.any(fade_p > 0.0):
+        # Independent draw, not the correlated field: survivors stay scattered.
+        dropout_mask = dropout_mask | (rng.random(n) < fade_p)
 
     x_hat = np.array([1.0, 0.0, 0.0])
     y_hat = np.array([0.0, 1.0, 0.0])

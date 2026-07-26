@@ -2298,3 +2298,64 @@ an implemented one, and the footer names the two blocked options. The 7 tests
 in `test/` pass. The full control screen has not been driven end to end on this
 change — the refusal path was exercised through `unimplemented()`, not through
 a keypress.
+
+## Phase 55 — A near-field filter that thins instead of cuts
+
+**Objective**: `near_cutoff` (Phase 32) clears the reverberation spray by
+deleting everything inside a radius, which also deletes any real surface the
+vehicle is close to. Driving up to an obstacle is exactly when the map most
+needs it. The user asked for the probabilistic form: make a near return
+*unlikely* rather than impossible, so a sparse spray disappears while a solid
+surface — which fills every beam it subtends — still comes through thinned.
+
+**What changed**: A near-field fade in `sonar_noise.py`, applied beside the
+existing gate. `near_fade_drop_p()` returns a per-point drop probability
+
+```
+p_drop(r) = near_fade_p * clip(1 - r / near_fade_range_m, 0, 1) ** near_fade_exp
+```
+
+— full strength at the sensor, zero at `near_fade_range_m`, exactly zero beyond
+it. Three new `SonarNoise` fields carry it; all ship at 0 (off), so every
+existing profile and run is unchanged.
+
+The draw is `rng.random(n)`, deliberately **not** the spatially correlated field
+the other dropouts are thresholded against. Patch-correlated removal is right
+for real dropouts but wrong here: with `corr_rho_time=0.7` a small obstacle
+could vanish coherently for several consecutive pings. Drawn per beam, the
+survivors stay scattered across the surface, and because they are re-drawn each
+ping the outline fills back in — at `near_fade_p=0.8` a beam is missed for 12
+straight pings with probability 0.8^12.
+
+Exposed as `near_fade` / `near_fade_range` launch arguments on `demo.launch.py`,
+inherited by the nested pointcloud include exactly as `near_cutoff` is, and
+overriding the profile when non-negative:
+
+```
+ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic near_fade:=0.8 near_fade_range:=1.6
+```
+
+In the launcher TUI, **Noise Attenuation** gains a third value `fade_close`
+alongside `none` / `cut_close`. "Cut distance (m)" is now "Near-field distance
+(m)" and serves both modes (the cut radius, or the range the fade reaches zero
+at); `fade_close` adds an advanced **"Fade strength"** (`near_fade_p`, default
+0.8).
+
+**Observed impact**: 34 sonar tests (6 new) and the 27 launcher tests pass.
+Measured through the real node on the `realistic` profile, 10 pings against a
+6 m wall: near-field returns per ping 245 with no filter, 0 under
+`near_cutoff:=1.6`, 53 under `near_fade:=0.8` — 78% of the spray gone. Against a
+wall the vehicle has closed on, the difference the fade exists for: at 0.5 m the
+cut leaves 0.1% of the surface and the fade leaves 43%; at 1.0 m, 0.1% vs 65%.
+On the `ideal` profile (no reverberation to relocate into the near field) a wall
+at 2 m and at 5 m returns all 8192 points with the fade on, confirming it is an
+exact no-op beyond its range.
+
+So `cut_close` remains the choice for the cleanest possible cloud in open water,
+and `fade_close` trades ~20% of the spray for keeping close geometry mappable.
+Like the gate, this hides reverberation rather than retuning it — lowering
+`reverb_p` is still the modelling fix, and none of it is fitted to hardware.
+
+**Not verified**: no full sim run. The measurements above drive
+`SonarNoiseNode` in-process with synthetic organized clouds; the effect on a
+TSDF built while approaching an obstacle has not been observed end to end.

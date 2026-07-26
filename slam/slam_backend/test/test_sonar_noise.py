@@ -8,8 +8,9 @@ import pytest
 from slam_backend.sensor_models.noise_profiles import SonarNoise, load_noise_profile
 from slam_backend.sensor_models.sonar_noise import (
     _fit_pinhole, apply_sonar_noise, correlated_field, incidence_cosine, multipath_range,
-    pixel_angular_spacing, reverberation_range, strongest_reflection_range,
-    surface_normals, within_sonar_range, DEPTH_MIN_M, MAX_RANGE_M)
+    near_fade_drop_p, pixel_angular_spacing, reverberation_range,
+    strongest_reflection_range, surface_normals, within_sonar_range,
+    DEPTH_MIN_M, MAX_RANGE_M)
 
 CONFIG_DIR = Path(__file__).parents[1] / 'config'
 SHAPE = (64, 128)
@@ -348,6 +349,60 @@ def test_near_field_gate_off_by_default_keeps_close_returns():
     p = SonarNoise(range_sigma0_m=0.005)   # min_range_m defaults to 0
     out = noisy(grid, p, seed=13)
     assert np.mean(np.isfinite(out[:, 0])) > 0.9
+
+
+def test_near_fade_thins_close_returns_without_erasing_them():
+    """A wall inside the fade zone survives, thinned, where the gate erases it."""
+    grid = plane_grid(0.0, distance=1.0)
+    p = SonarNoise(range_sigma0_m=0.005, near_fade_p=0.8, near_fade_range_m=2.0)
+    kept = np.mean(np.isfinite(noisy(grid, p, seed=14)[:, 0]))
+    assert 0.3 < kept < 0.9                       # thinned, not gated away
+    assert kept == pytest.approx(0.6, abs=0.05)   # 1 - 0.8 * (1 - 1.0/2.0)
+
+
+def test_near_fade_keeps_more_of_a_wall_the_further_it_is():
+    p = SonarNoise(near_fade_p=1.0, near_fade_range_m=3.0)
+    kept = [np.mean(np.isfinite(noisy(plane_grid(0.0, distance=d), p, seed=15)[:, 0]))
+            for d in (0.5, 1.5, 2.5)]
+    assert kept[0] < kept[1] < kept[2]
+    assert np.mean(np.isfinite(noisy(plane_grid(0.0, distance=4.0), p, seed=15)[:, 0])) == 1.0
+
+
+def test_near_fade_survivors_are_spread_over_the_surface():
+    """Drawn per beam, not from the correlated field, so no patch leaves whole."""
+    grid = plane_grid(0.0, distance=1.0)
+    p = SonarNoise(near_fade_p=0.8, near_fade_range_m=2.0, corr_length_px=6.0)
+    kept = np.isfinite(noisy(grid, p, seed=16)[:, 0]).reshape(SHAPE)
+    # Every 8x8 tile of a 64x128 grid holds ~26 survivors at p_keep=0.4; a
+    # correlated draw at corr_length 6 px would empty whole tiles.
+    tiles = kept.reshape(SHAPE[0] // 8, 8, SHAPE[1] // 8, 8).sum(axis=(1, 3))
+    assert tiles.min() > 0
+
+
+def test_near_fade_redraws_each_ping_so_coverage_accumulates():
+    """The obstacle fills back in over pings — what makes the TSDF still see it."""
+    grid = plane_grid(0.0, distance=0.5)
+    p = SonarNoise(near_fade_p=0.8, near_fade_range_m=2.0)
+    rng = np.random.default_rng(17)
+    ever = np.zeros(grid[..., 0].size, bool)
+    for _ in range(12):
+        ever |= np.isfinite(noisy(grid, p, rng=rng)[:, 0])
+    assert ever.mean() > 0.99   # p_drop 0.6 at 0.5 m, so 0.6^12 never returns
+
+
+def test_near_fade_off_by_default():
+    grid = plane_grid(0.0, distance=0.5)
+    out = noisy(grid, SonarNoise(range_sigma0_m=0.005), seed=18)
+    assert np.mean(np.isfinite(out[:, 0])) > 0.9
+
+
+def test_near_fade_drop_probability_shape():
+    p = SonarNoise(near_fade_p=0.8, near_fade_range_m=2.0)
+    r = np.array([0.0, 1.0, 2.0, 5.0])
+    assert near_fade_drop_p(r, p).tolist() == pytest.approx([0.8, 0.4, 0.0, 0.0])
+    p.near_fade_exp = 2.0
+    assert near_fade_drop_p(r, p).tolist() == pytest.approx([0.8, 0.2, 0.0, 0.0])
+    assert not near_fade_drop_p(r, SonarNoise(near_fade_range_m=2.0)).any()   # p defaults to 0
 
 
 def test_reverberation_disabled_is_identity():

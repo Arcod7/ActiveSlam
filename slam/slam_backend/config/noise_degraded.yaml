@@ -50,3 +50,6 @@ sonar:                       # WaterLinked Sonar 3D-15, turbid/degraded conditio
   multipath_p: 0.15
   multipath_grazing_exp: 1.0
   min_range_m: 0.0          # near-field gate; override per-run with the near_cutoff launch arg
+  near_fade_p: 0.0          # soft gate; override per-run with the near_fade launch arg
+  near_fade_range_m: 2.6    # turbid water: the spray reaches further out
+  near_fade_exp: 1.0

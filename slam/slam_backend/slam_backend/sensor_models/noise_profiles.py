@@ -62,6 +62,9 @@ class SonarNoise:
     multipath_p: float = 0.0           # geometric (screen-space) multipath probability
     multipath_grazing_exp: float = 1.0 # shape of the (1 - cos incidence) multipath weighting
     min_range_m: float = 0.0           # drop returns nearer than this (near-field gate, 0 = off)
+    near_fade_p: float = 0.0           # near-field fade: drop probability at the sensor (0 = off)
+    near_fade_range_m: float = 0.0     # range at which the fade reaches zero
+    near_fade_exp: float = 1.0         # fade shape; >1 confines the thinning closer to the sensor
 
 @dataclass
 class NoiseProfile:

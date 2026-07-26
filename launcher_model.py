@@ -401,20 +401,31 @@ PARAMS = [
           {"inherit": "Follow the master Noise profile."},
           advanced=True, visible=_slam),
     Param("noise_attenuation", "Noise Attenuation", "enum", "none", "slam",
-          "Post-filter applied over any noise profile. cut_close drops sonar "
-          "returns nearer than ~1.6 m, clearing the near-field volume-"
-          "reverberation spray around the vehicle so the noised cloud sits "
-          "closer to the clean ground truth.",
-          ["none", "cut_close"],
+          "Post-filter applied over any noise profile, clearing the near-field "
+          "volume-reverberation spray around the vehicle so the noised cloud "
+          "sits closer to the clean ground truth. cut_close cuts the near field "
+          "outright; fade_close thins it, which costs some spray but keeps an "
+          "obstacle the vehicle drives up to.",
+          ["none", "cut_close", "fade_close"],
           {"none": "Keep every return the profile produces.",
-           "cut_close": "Gate out the near-field reverberation spray."},
+           "cut_close": "Gate out the near-field reverberation spray.",
+           "fade_close": "Thin the near field, keeping close geometry visible."},
           visible=_slam),
-    Param("near_cutoff_m", "Cut distance (m)", "float", 1.6, "slam",
-          "cut_close only: drop sonar returns nearer than this. Raise it to "
-          "clear a larger near-field spray (e.g. the degraded profile reaches "
-          "~2.5 m); lower it to keep more close geometry.",
+    Param("near_cutoff_m", "Near-field distance (m)", "float", 1.6, "slam",
+          "Extent of the near field the filter acts on: the range cut_close "
+          "cuts at, or the range fade_close fades out to. Raise it to reach a "
+          "larger spray (e.g. the degraded profile reaches ~2.5 m); lower it to "
+          "leave more close geometry alone.",
           advanced=True, step=0.1, lo=0.2, hi=15.0,
-          visible=lambda v: _slam(v) and v["noise_attenuation"] == "cut_close"),
+          visible=lambda v: _slam(v) and v["noise_attenuation"] != "none"),
+    Param("near_fade_p", "Fade strength", "float", 0.8, "slam",
+          "fade_close only: probability of dropping a return at the sensor "
+          "itself, falling to zero at the near-field distance. 0.8 discards "
+          "four of five near returns — enough to clear a sparse spray, while a "
+          "surface filling every beam still comes through at a fifth of its "
+          "density and refills over successive pings.",
+          advanced=True, step=0.05, lo=0.0, hi=1.0,
+          visible=lambda v: _slam(v) and v["noise_attenuation"] == "fade_close"),
     Param("loop_closure", "Loop closure", "bool", True, "slam",
           "Detect revisited places and add graph constraints that correct "
           "accumulated drift. Turning it off is the A/B baseline: the pose "
@@ -590,11 +601,12 @@ DEFAULTS[HIDDEN_SECTIONS_KEY] = list(DEFAULT_HIDDEN_SECTIONS)
 # demo.launch.py's name for an option, where it differs from the launcher's id.
 LAUNCH_ARG_ALIASES = {"robot_depth_target": "depth"}
 # Options demo.launch.py has no argument for: launcher-only UI state, the
-# noise attenuation switch (which it expresses as a near_cutoff distance), and
+# noise attenuation switch (which it expresses as near_cutoff/near_fade), and
 # the roadmap options below, whose implemented value is the only behaviour
 # there is — nothing downstream reads them.
 LAUNCH_ARG_SKIP = {"keyboard", "robot_save_pose_on_exit", "rqt", "rqt_depthmap",
                    "thrust_boost", "noise_attenuation", "near_cutoff_m",
+                   "near_fade_p",
                    "frontier_space", "exploration", "goal_order",
                    "revisit_scoring", "revisit_trigger"}
 
@@ -628,6 +640,9 @@ def launch_command(values):
         parts.append(f"{LAUNCH_ARG_ALIASES.get(p.id, p.id)}:={value}")
     if values.get("noise_attenuation") == "cut_close":
         parts.append(f"near_cutoff:={values['near_cutoff_m']}")
+    elif values.get("noise_attenuation") == "fade_close":
+        parts.append(f"near_fade:={values['near_fade_p']}")
+        parts.append(f"near_fade_range:={values['near_cutoff_m']}")
     return " ".join(parts)
 
 

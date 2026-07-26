@@ -163,14 +163,19 @@ def build_groups(bringup_share=""):
 
     def cloud(v):
         noise = "true" if v["slam"] == "slam" else "false"
-        cut = str(v["near_cutoff_m"]) if v.get("noise_attenuation") == "cut_close" else "-1.0"
+        attenuation = v.get("noise_attenuation")
+        cut = str(v["near_cutoff_m"]) if attenuation == "cut_close" else "-1.0"
+        fade = str(v["near_fade_p"]) if attenuation == "fade_close" else "-1.0"
+        fade_range = str(v["near_cutoff_m"]) if attenuation == "fade_close" else "-1.0"
         return [["ros2", "launch", "stonefish_groundtruth_mapping",
                  "pointcloud_only.launch.py",
                  f"sonar_noise:={noise}",
                  f"noise_profile:={v['noise_profile']}",
                  *_sensor_profiles(v, ("sonar",)),
                  f"noise_seed:={v['noise_seed']}",
-                 f"near_cutoff:={cut}"]]
+                 f"near_cutoff:={cut}",
+                 f"near_fade:={fade}",
+                 f"near_fade_range:={fade_range}"]]
 
     def mapper(v):
         # Under mode:=frontier mapper:=tsdf the mapper derives /projected_map
@@ -291,7 +296,7 @@ def build_groups(bringup_share=""):
               "model is spliced in ahead of every consumer.",
               cloud, depends=["slam", "noise_profile", "noise_profile_sonar",
                               "noise_seed", "noise_attenuation",
-                              "near_cutoff_m"]),
+                              "near_cutoff_m", "near_fade_p"]),
         Group("mapper", "Map backend",
               "OctoMap occupancy grid or VDBFusion TSDF. Consumes /cloud_in "
               "only, so the backend can be swapped without touching the sim.",

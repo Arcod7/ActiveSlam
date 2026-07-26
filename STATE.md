@@ -410,8 +410,15 @@ one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.3
   returns nearer than the threshold — clears the reverberation spray around the vehicle. Off by
   default; live-verified 429 → 0 near-field returns/ping at `near_cutoff:=1.6`, far geometry
   untouched. Hides reverb rather than retuning it; lowering `reverb_p` is the alternative.
-  Exposed in the launcher TUI as **"Noise Attenuation"** (none / cut_close) under the SLAM section
-  (Phase 33); cut_close uses the advanced **"Cut distance (m)"** param (`near_cutoff_m`, default 1.6).
+  Exposed in the launcher TUI as **"Noise Attenuation"** under the SLAM section (Phase 33).
+- ✅ **Near-field fade** (Phase 55): `near_fade:=<p> near_fade_range:=<m>` — the soft form of the
+  gate. Drop probability `near_fade_p * (1 - r/range)^exp`, drawn per beam rather than from the
+  correlated field, so a close surface thins instead of disappearing and refills over pings. Off by
+  default. Measured on `realistic` against a 6 m wall: spray 245 → 53 returns/ping (vs 0 for the
+  cut), while a 0.5 m wall keeps 43% of its points where the cut leaves 0.1%; exact no-op beyond
+  its range. Third **Noise Attenuation** value `fade_close`; `near_cutoff_m` is now
+  **"Near-field distance (m)"** for both modes, plus advanced **"Fade strength"** (`near_fade_p`,
+  default 0.8). Not yet exercised in a full sim run.
 - ✅ **Range-image view** (Phase 34): `range_image` node renders the noised cloud back to a 2D
   depth-camera-style Image. `/cloud_in/range_image` (what SLAM gets) and `/cloud_in_raw/range_image`
   (clean) publish from `pointcloud_only.launch.py`; RViz layouts show them as "SLAM input (noised
