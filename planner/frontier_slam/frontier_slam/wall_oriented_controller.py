@@ -15,7 +15,7 @@ import math
 import os
 
 from frontier_slam.control_utils import (
-    depth_hold_effort, LowPassRate, wrap_angle, yaw_from_quat)
+    depth_hold_effort, LowPassRate, SlewLimiter, wrap_angle, yaw_from_quat)
 from frontier_slam.session_log import open_session_log
 from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry, Path
@@ -206,6 +206,10 @@ class WallOrientedController(Node):
     KP_YAW = 0.15
     YAW_RATE_TAU = 0.15      # diagnostic only; the CSV logs it, control ignores it
     YAW_EFFORT_LIMIT = 0.30
+    # Effort per second on the published yaw command: a step to full authority
+    # now takes 1 s, not one 0.1 s tick. The effort limit above bounds the rate
+    # eventually reached; this bounds the acceleration used to reach it.
+    YAW_SLEW_PER_S = 0.30
     KP_SPEED = 0.25
     KP_HEAVE = 0.35
     KD_HEAVE = 0.50          # damps the 6.1 s depth limit cycle P alone sustains
@@ -278,6 +282,7 @@ class WallOrientedController(Node):
         self._yaw_rate = LowPassRate(
             self.YAW_RATE_TAU, wrap=True, max_rate=self.YAW_RATE_MAX,
             max_gap_s=self.ODOM_GAP_S)
+        self._yaw_slew = SlewLimiter(self.YAW_SLEW_PER_S)
         self._yaw = 0.0
         self._odom_at: float | None = None
         self._path: list[tuple[float, float]] = []
@@ -559,7 +564,8 @@ class WallOrientedController(Node):
     def _send_thrust(self, surge: float, sway: float,
                      yaw: float, heave: float) -> None:
         """Single publish choke point — applies the operator speed/turn factors
-        (live-tunable from the launcher TUI) uniformly to every caller."""
+        (live-tunable from the launcher TUI) uniformly to every caller, then
+        slew-limits yaw so no caller can step the actuators."""
         speed_factor = float(self.get_parameter('speed_factor').value)
         turn_factor = float(self.get_parameter('turn_factor').value)
         cap = self.MAX_ABS_COMMAND
@@ -567,7 +573,9 @@ class WallOrientedController(Node):
         msg.linear.x = float(np.clip(surge * speed_factor, -cap, cap))
         msg.linear.y = float(np.clip(sway * speed_factor, -cap, cap))
         msg.linear.z = float(np.clip(heave * speed_factor, -cap, cap))
-        msg.angular.z = float(np.clip(yaw * turn_factor, -cap, cap))
+        # Slewed after turn_factor, so raising the factor ramps rather than steps.
+        msg.angular.z = self._yaw_slew.update(
+            float(np.clip(yaw * turn_factor, -cap, cap)), self._t_ros())
         self._command_pub.publish(msg)
 
     def _write_csv(self, surge: float, sway: float, yaw_cmd: float,

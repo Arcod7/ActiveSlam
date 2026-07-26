@@ -38,7 +38,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
 from frontier_slam.control_utils import (
-    depth_hold_effort, LowPassRate, wrap_angle, yaw_from_quat)
+    depth_hold_effort, LowPassRate, SlewLimiter, wrap_angle, yaw_from_quat)
 from frontier_slam.scan_sweep import SweepScan, scan_yaw_command
 from frontier_slam.session_log import open_session_log
 
@@ -81,6 +81,10 @@ class WaypointController(Node):
     OBS_SLOW_DIST         = 1.5    # m — begin linearly reducing surge at this distance
     EMERGENCY_STOP_DIST   = 0.4    # m — ramp reaches zero; switch to back-surge below this
     BACK_SURGE_SPEED      = 0.12   # m/s backward when obstacle is inside EMERGENCY_STOP_DIST
+    # Effort per second on the published yaw command. The sweep reverses sign
+    # between phases in a single tick, which reaches the thrusters as one
+    # impulse of angular acceleration; this ramps it instead.
+    YAW_SLEW_PER_S        = 0.30
     ESCAPE_YAW            = 0.20   # spin rate for CTRL_STUCK escape
     ESCAPE_DURATION       = 4.0    # s — CTRL_STUCK escape spin duration
     STUCK_SURGE_MIN       = 0.15   # min surge to consider "trying to move"
@@ -121,6 +125,7 @@ class WaypointController(Node):
         self._depth_rate = LowPassRate(
             self.DEPTH_RATE_TAU, max_rate=self.DEPTH_RATE_MAX,
             max_gap_s=self.ODOM_GAP_S)
+        self._yaw_slew = SlewLimiter(self.YAW_SLEW_PER_S)
         self._yaw  = 0.0
         self._odom_at: float | None = None
         self._min_front_dist      = float('inf')
@@ -403,14 +408,17 @@ class WaypointController(Node):
     def _send_thrust(self, surge: float, yaw: float, heave: float) -> None:
         """Single publish choke point — applies the operator speed/turn factors
         (live-tunable from the launcher TUI) uniformly to every caller: path
-        following, scanning, escape spin, obstacle backup."""
+        following, scanning, escape spin, obstacle backup. Yaw is slew-limited
+        here so none of them can step the actuators."""
         speed_factor = float(self.get_parameter('speed_factor').value)
         turn_factor = float(self.get_parameter('turn_factor').value)
         cap = self.MAX_ABS_COMMAND
         msg = Twist()
         msg.linear.x = float(np.clip(surge * speed_factor, -cap, cap))
         msg.linear.z = float(np.clip(heave * speed_factor, -cap, cap))
-        msg.angular.z = float(np.clip(yaw * turn_factor, -cap, cap))
+        # Slewed after turn_factor, so raising the factor ramps rather than steps.
+        msg.angular.z = self._yaw_slew.update(
+            float(np.clip(yaw * turn_factor, -cap, cap)), self._t_ros())
         self._command_pub.publish(msg)
 
     def _write_csv(self, surge, yaw_cmd, heave, event,

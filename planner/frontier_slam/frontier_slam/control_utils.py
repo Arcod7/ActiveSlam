@@ -102,6 +102,39 @@ class LowPassRate:
         self.value = 0.0
 
 
+class SlewLimiter:
+    """Rate limit on a command channel, so a setpoint step cannot reach the
+    actuators as a step.
+
+    Yaw is inertia plus a little drag, so an open-loop effort delivered in one
+    tick is one impulse of angular acceleration. A heading setpoint that jumps
+    -- a new goal, a wall-side change -- therefore whipped the vehicle to
+    1.37 rad/s on a hull whose steady scan rate is 0.22. An effort limit bounds
+    only the rate that is eventually reached; bounding how fast the effort may
+    change bounds the acceleration used to get there, whatever issued it.
+    """
+
+    def __init__(self, max_rate_per_s: float, max_gap_s: float = 0.5) -> None:
+        if max_rate_per_s <= 0.0:
+            raise ValueError('max_rate_per_s must be positive')
+        self._max_rate = max_rate_per_s
+        self._max_gap = max(0.0, max_gap_s)   # a longer gap is a stall, not a ramp
+        self._last_t: float | None = None
+        self.value = 0.0
+
+    def update(self, target: float, t: float) -> float:
+        dt = (0.0 if self._last_t is None
+              else min(max(0.0, t - self._last_t), self._max_gap))
+        self._last_t = float(t)
+        step = self._max_rate * dt
+        self.value += max(-step, min(step, float(target) - self.value))
+        return self.value
+
+    def reset(self) -> None:
+        self._last_t = None
+        self.value = 0.0
+
+
 def depth_hold_effort(depth_error: float, depth_rate: float,
                       kp: float, kd: float, limit: float = 1.0) -> float:
     """Bounded depth-hold effort with rate damping.
