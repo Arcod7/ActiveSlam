@@ -11,6 +11,7 @@ sim/world/data/obj/shipwreck.obj
 sim/world/data/obj/cliff.obj
 sim/world/data/obj/off_shore_station.obj
 sim/world/data/obj/br2.obj
+sim/world/data/obj/wave_tank_freecad.obj
 
 # uv virtualenv, when created inside the repo instead of the workspace root
 .venv/
