@@ -40,9 +40,13 @@ from eval_tools.run_paths import new_run_dir
 from eval_tools.tum_writer import TUMWriter
 from eval_tools.consistency import (
     XYH_ROS_INDICES, NEES_DOF, xyh_tangent_error, normalised_squared_error,
-    anees_bounds, classify_anees)
+    anees_bounds, classify_anees, covariance_rejection, robust_anees)
 
 PoseSample = namedtuple('PoseSample', ['t', 'pos', 'quat'])
+
+# Above this a single sample dominates the running mean, so record what produced
+# it rather than leaving the spike to be reconstructed from the CSV afterwards.
+NEES_OUTLIER_LOG_THRESHOLD = 1e3
 
 
 def _stamp_to_float(stamp) -> float:
@@ -121,13 +125,15 @@ class BenchmarkNode(Node):
         self._metrics_file = open(os.path.join(out_dir, 'metrics.csv'), 'w')
         self._metrics_file.write(
             't,abs_error,ate,rpe_trans,rpe_rot_deg,dopt,nees,anees,nis,chi2_norm,'
-            'lc_count,rebuild_count,revisit_count\n')
+            'lc_count,rebuild_count,revisit_count,anees_robust,nees_rejected\n')
 
         self._matched_pairs = []   # time-ordered [(gt_sample, est_sample), ...] for RPE
         self._sq_errors = []       # running ATE accumulator
         self._nees_samples = []    # running ANEES accumulator, one per keyframe
+        self._nees_rejected = 0    # keyframes whose covariance failed the degeneracy gate
         self._latest_nees = None
         self._latest_anees = None
+        self._latest_anees_robust = None
         self._latest_nis = None         # cached from /slam/nis, per loop closure
         self._latest_chi2_norm = None   # cached from /slam/chi2_normalized
         self._latest_dopt = None   # cached from pose_graph.py's /slam/dopt
@@ -158,6 +164,7 @@ class BenchmarkNode(Node):
         self.pub_dr_error = self.create_publisher(Float64, '/eval/dr_error', 10)
         self.pub_nees = self.create_publisher(Float64, '/eval/nees', 10)
         self.pub_anees = self.create_publisher(Float64, '/eval/anees', 10)
+        self.pub_anees_robust = self.create_publisher(Float64, '/eval/anees_robust', 10)
         self.pub_markers = self.create_publisher(MarkerArray, '/eval/markers', 10)
         self.pub_markers_live = self.create_publisher(MarkerArray, '/eval/markers_live', 10)
 
@@ -185,6 +192,14 @@ class BenchmarkNode(Node):
         cov = np.asarray(msg.pose.covariance).reshape(6, 6)
         cov_xyh = cov[np.ix_(XYH_ROS_INDICES, XYH_ROS_INDICES)]
 
+        rejection = covariance_rejection(cov_xyh)
+        if rejection is not None:
+            self._nees_rejected += 1
+            self.get_logger().warn(
+                f'NEES sample dropped at t={t:.3f}, degenerate covariance: {rejection}',
+                throttle_duration_sec=10.0)
+            return
+
         err = xyh_tangent_error(gt.pos, gt.quat,
                                 np.array([p.x, p.y, p.z]),
                                 np.array([q.x, q.y, q.z, q.w]))
@@ -192,11 +207,19 @@ class BenchmarkNode(Node):
         if sample is None:
             return
 
+        if sample > NEES_OUTLIER_LOG_THRESHOLD:
+            self.get_logger().warn(
+                f'NEES outlier {sample:.3e} at t={t:.3f}: '
+                f'err_xyh={np.array2string(err, precision=5)} '
+                f'cov_xyh={np.array2string(cov_xyh.ravel(), precision=9)}')
+
         self._nees_samples.append(sample)
         self._latest_nees = sample
         self._latest_anees = float(np.mean(self._nees_samples))
+        self._latest_anees_robust = robust_anees(self._nees_samples)
         self.pub_nees.publish(Float64(data=self._latest_nees))
         self.pub_anees.publish(Float64(data=self._latest_anees))
+        self.pub_anees_robust.publish(Float64(data=self._latest_anees_robust))
 
     def _kf_count_cb(self, msg: Int32):
         self._latest_kf_count = msg.data
@@ -254,7 +277,8 @@ class BenchmarkNode(Node):
             f'{_fmt(rpe_trans)},{_fmt(rpe_rot_deg)},{_fmt(self._latest_dopt, 8)},'
             f'{_fmt(self._latest_nees)},{_fmt(self._latest_anees)},'
             f'{_fmt(self._latest_nis)},{_fmt(self._latest_chi2_norm)},'
-            f'{self._latest_lc_count},{self._latest_rebuild_count},{self._latest_revisit_count}\n')
+            f'{self._latest_lc_count},{self._latest_rebuild_count},{self._latest_revisit_count},'
+            f'{_fmt(self._latest_anees_robust)},{self._nees_rejected}\n')
         self._metrics_file.flush()
 
         self._publish_eval_markers(gt, sample, abs_error, ate, rpe_trans, rpe_rot_deg)
@@ -296,7 +320,7 @@ class BenchmarkNode(Node):
         rpe_t_str = f'{rpe_trans:.2f} m' if rpe_trans is not None else 'n/a'
         rpe_r_str = f'{rpe_rot_deg:.1f} deg' if rpe_rot_deg is not None else 'n/a'
         dopt_str = f'{self._latest_dopt:.4f}' if self._latest_dopt is not None else 'n/a'
-        anees_str = (f'{np.mean(self._nees_samples):.1f}'
+        anees_str = (f'{self._latest_anees:.1f} (rob {self._latest_anees_robust:.1f})'
                      if self._nees_samples else 'n/a')
         # Spaced pipes and spaced units: the HUD panel renders this monospaced.
         text.text = (
@@ -410,10 +434,19 @@ class BenchmarkNode(Node):
             self.get_logger().info('No NEES samples: /slam/pose never paired with GT.')
             return
         anees = float(np.mean(self._nees_samples))
+        robust = robust_anees(self._nees_samples)
         lo, hi = anees_bounds(n)
+        # Classified on the robust value: the mean is the statistic a single
+        # degenerate covariance destroys, so it is reported but not judged on.
         self.get_logger().info(
-            f'ANEES {anees:.2f} over {n} keyframes, {NEES_DOF} DoF — '
-            f'95% acceptance [{lo:.2f}, {hi:.2f}] — {classify_anees(anees, n)}')
+            f'ANEES {robust:.2f} (robust) over {n} keyframes, {NEES_DOF} DoF — '
+            f'95% acceptance (mean-based, narrower than the median estimator warrants) '
+            f'[{lo:.2f}, {hi:.2f}] — {classify_anees(robust, n)}')
+        self.get_logger().info(f'ANEES {anees:.2f} (raw mean, outlier-sensitive)')
+        if self._nees_rejected:
+            self.get_logger().warn(
+                f'{self._nees_rejected} keyframes excluded from ANEES on a '
+                f'degenerate reported covariance.')
 
     def destroy_node(self):
         self._log_consistency_summary()
