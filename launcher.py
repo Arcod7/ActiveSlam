@@ -1707,7 +1707,7 @@ def control_screen(stdscr, sup, values, link, session):
                 ("i edit  " if cur is not None
                  and cur.kind in ("int", "float", "text") else "") +
                 "Enter apply  m arm  r reset  o advanced  "
-                "p preset  k stop  Esc quit")
+                "p preset  k stop all  Esc quit")
         put(stdscr, h - 1, 2, keys, curses.A_DIM)
         # Last item on the key line, after Esc: it reads as one more key rather
         # than a separate control.
@@ -1906,11 +1906,30 @@ def control_screen(stdscr, sup, values, link, session):
             else:
                 set_status(link.error or "could not reach the motion gate", C_ERR)
         elif key in (ord("k"), ord("K")):
-            if sup.running_ids():
+            owned = bool(sup.running_ids())
+            draw_busy(stdscr, "Stopping every instance...")
+            if owned:
                 release_driving(resume=False)
-                draw_busy(stdscr, "Stopping the stack...")
-                sup.shutdown_all()
+                sup.shutdown_all(on_event=session.event)
+            # A stack orphaned by an earlier launcher holds the same topics, so
+            # K has not stopped anything until those are gone too. Our own group
+            # is spared: the launcher would otherwise stop itself.
+            stopped, survived = core.stop_stray_processes(
+                sup.ws_root, exclude_pgids=(os.getpgid(0),),
+                on_event=session.event)
+            stray_txt = (f"{stopped} stray process{'es' if stopped != 1 else ''} "
+                         "from an earlier session")
+            if survived:
+                set_status(f"{survived} process(es) would not stop — see the "
+                           "session log", C_ERR)
+            elif owned and stopped:
+                set_status(f"Stack stopped — and {stray_txt}", C_WARN)
+            elif owned:
                 set_status("Stack stopped", C_INFO)
+            elif stopped:
+                set_status(stray_txt.capitalize() + " stopped", C_WARN)
+            else:
+                set_status("Nothing running", C_INFO)
         elif key in (ord("\n"), curses.KEY_ENTER, 10, 13):
             # `core` is running whenever the stack is up, so its snapshot holds
             # the pose source the running stack was actually started with.

@@ -628,6 +628,133 @@ class Proc:
             pass
 
 
+# -- stray stack processes ---------------------------------------------------
+# Nodes outlive their launcher whenever it dies without tearing down: a crash, a
+# closed terminal, a SIGKILL. They keep publishing on the same topics, so the
+# next run fights a stack nothing on screen admits to. Matched on what a process
+# *is* — argv[0]/argv[1] under the workspace — never on a path merely mentioned
+# in a command line, which would also catch shells and editors sitting in the
+# repository.
+
+STRAY_VIEWERS = ("rviz2", "rqt")
+
+
+def _proc_argv(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+    except OSError:
+        return []
+
+
+def _is_stack_argv(argv, install_dir, packages):
+    if not argv:
+        return False
+    if any(a.startswith(install_dir) for a in argv[:2]):
+        return True
+    base = os.path.basename(argv[0])
+    # `ros2` is a Python script, so it runs as `python3 /.../bin/ros2 launch ...`
+    # as often as it does under its own name.
+    head = [os.path.basename(a) for a in argv[:2]]
+    if "ros2" in head:
+        rest = argv[head.index("ros2") + 1:]
+        return len(rest) > 1 and rest[0] in ("launch", "run") and rest[1] in packages
+    if base in STRAY_VIEWERS:
+        return any(a.startswith(install_dir) for a in argv[1:])
+    # Spawned from /opt/ros, so only the frames it publishes identify it.
+    if base == "static_transform_publisher":
+        return any("bluerov2" in a for a in argv[1:])
+    return base.startswith("stonefish_simulator")
+
+
+def _live_pgids(pgids):
+    """Which of `pgids` still hold a process that is not a zombie.
+
+    Zombies are excluded because a stray's parent is usually gone: killpg would
+    keep reporting the group as populated and every stage would run to timeout.
+    """
+    alive = set()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", "rb") as f:
+                # Fields after the comm field's ')': state, ppid, pgrp.
+                fields = f.read().rsplit(b")", 1)[1].split()
+            state, pgid = fields[0], int(fields[2])
+        except (OSError, IndexError, ValueError):
+            continue
+        if state != b"Z" and pgid in pgids:
+            alive.add(pgid)
+    return alive
+
+
+def describe_argv(argv):
+    """Short readable name for a stack process."""
+    for a in argv:
+        if a.startswith("__node:="):
+            return a.split("=", 1)[1]
+    return os.path.basename(argv[0]) if argv else "?"
+
+
+def find_stray_processes(ws_root, exclude_pgids=()):
+    """(pid, pgid, argv) per stack process outside `exclude_pgids`."""
+    install = os.path.join(ws_root, "install")
+    install_dir = install + os.sep
+    try:
+        packages = {n for n in os.listdir(install)
+                    if os.path.isdir(os.path.join(install, n))}
+    except OSError:
+        packages = set()
+    exclude = set(exclude_pgids)
+    found = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        argv = _proc_argv(pid)
+        if not _is_stack_argv(argv, install_dir, packages):
+            continue
+        try:
+            pgid = os.getpgid(pid)
+        except OSError:
+            continue
+        if pgid not in exclude:
+            found.append((pid, pgid, argv))
+    return found
+
+
+def stop_stray_processes(ws_root, exclude_pgids=(), on_event=None, strays=None):
+    """SIGINT -> SIGTERM -> SIGKILL every stray process group, on the same
+    ladder Proc.stop uses. Returns (stopped, survived) process counts."""
+    if strays is None:
+        strays = find_stray_processes(ws_root, exclude_pgids)
+    if not strays:
+        return 0, 0
+    pgids = {pgid for _, pgid, _ in strays}
+    for sig, timeout, name in (
+        (signal.SIGINT, STOP_SIGINT_TIMEOUT, "SIGINT"),
+        (signal.SIGTERM, STOP_SIGTERM_TIMEOUT, "SIGTERM"),
+        (signal.SIGKILL, STOP_SIGKILL_TIMEOUT, "SIGKILL"),
+    ):
+        alive = _live_pgids(pgids)
+        if not alive:
+            break
+        if on_event:
+            on_event(f"stray sweep: {name} -> pgid {sorted(alive)}")
+        for pgid in alive:
+            try:
+                os.killpg(pgid, sig)
+            except OSError:
+                pass
+        deadline = time.time() + timeout
+        while time.time() < deadline and _live_pgids(pgids):
+            time.sleep(0.1)
+    alive = _live_pgids(pgids)
+    survived = sum(1 for _, pgid, _ in strays if pgid in alive)
+    return len(strays) - survived, survived
+
+
 class Supervisor:
     """Starts, stops and restarts groups; guarantees teardown on exit."""
 
