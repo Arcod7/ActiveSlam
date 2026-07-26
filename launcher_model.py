@@ -152,8 +152,9 @@ PARAMS = [
     Param("rqt", "Planning Dashboard (RQT)", "bool", False, "primary",
           "Start rqt on the planning dashboard — map, inflation zones, path "
           "and robot/goal state, top-down. Off by default: it is a debugging "
-          "view, not part of the demo. Frontier mode only.",
-          visible=_frontier),
+          "view, not part of the demo. Offered wherever the planner runs — "
+          "frontier and goto.",
+          visible=_planner),
     Param("rqt_depthmap", "Sonar DepthMap (RQT)", "bool", False, "primary",
           "Start rqt on the sonar range image (/cloud_in/range_image) — the "
           "2D depth-camera-style view of what SLAM consumes, noise and all. "

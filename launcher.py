@@ -45,6 +45,8 @@ LEGACY_SELECTION_FILE = os.path.expanduser("~/.activeslam_launcher.json")
 LOG_DIR = os.path.join(REPO_ROOT, "logs", "launcher")
 
 C_HEAD, C_ERR, C_INFO, C_OK, C_WARN = 1, 2, 3, 4, 5
+# Set but not running: purple for a value the stack has yet to be applied with.
+C_PEND = 6
 
 # How long the arm hint stays reversed after a drive key pressed on a
 # disarmed gate. Long enough to catch, short enough not to sit there.
@@ -792,6 +794,9 @@ def init_colors():
     curses.init_pair(C_INFO, curses.COLOR_CYAN, -1)
     curses.init_pair(C_OK, curses.COLOR_GREEN, -1)
     curses.init_pair(C_WARN, curses.COLOR_MAGENTA, -1)
+    # A brighter purple than the magenta warnings use where the terminal has
+    # 256 colours; magenta is the fallback, which still reads as "not green".
+    curses.init_pair(C_PEND, 141 if curses.COLORS >= 256 else curses.COLOR_MAGENTA, -1)
     # Button clicks only; leaving position reporting off keeps the terminal's
     # own text selection working.
     try:
@@ -1009,6 +1014,22 @@ def pending_tag(pend, limit=2):
     return "[" + "; ".join(parts) + "]"
 
 
+def unapplied_ids(applied, values):
+    """Visible option ids the running stack has not taken yet.
+
+    A change reaches the stack either by restarting a group or by a live push;
+    a mode switch does neither — goto and frontier launch the same nodes and
+    differ in what the launcher publishes — so pending_for() finds nothing to
+    report for it. Diffing against the configuration apply() last committed to
+    catches those, and the option's own row is coloured from it.
+    """
+    if not applied:
+        return set()
+    return {p.id for p in model.PARAMS
+            if not p.live and p.visible(values)
+            and p.id in applied and applied[p.id] != values.get(p.id)}
+
+
 def fmt_value(p, v):
     if p.kind == "bool":
         return "[x]" if v else "[ ]"
@@ -1196,13 +1217,16 @@ def draw_side_panel(stdscr, link, values, running, driving, drive_active,
         row += 1
 
 
-def draw_choice_inline(stdscr, p, value, row, col, maxx):
+def draw_choice_inline(stdscr, p, value, row, col, maxx, unapplied=False):
     """The selected option's values along its own row, the current one in < >.
 
     A list too long for the row scrolls under the cursor instead of sliding it:
     the current value is held near the middle and the others move past it, so
     the eye keeps one place to look. Near either end the list stops and the
-    cursor travels the last stretch itself. `...` marks a cut side."""
+    cursor travels the last stretch itself. `...` marks a cut side.
+
+    `unapplied` draws the selected value purple rather than green: the option
+    is set to it, the running stack is not."""
     entries = choice_lines(p, value)
     width = maxx - col - 1
     if not entries or width < CHOICE_MIN_W:
@@ -1234,8 +1258,8 @@ def draw_choice_inline(stdscr, p, value, row, col, maxx):
             continue
         put(stdscr, row, col + clip_lo - offset,
             label[clip_lo - start:clip_hi - start],
-            (curses.color_pair(C_OK) | curses.A_BOLD) if current
-            else curses.A_DIM, maxx=maxx)
+            (curses.color_pair(C_PEND if unapplied else C_OK) | curses.A_BOLD)
+            if current else curses.A_DIM, maxx=maxx)
     if offset:
         put(stdscr, row, col, "...", curses.A_DIM, maxx=maxx)
     if offset + width < total:
@@ -1259,6 +1283,10 @@ def control_screen(stdscr, sup, values, link, session):
     planner_suspended = False
     point = None              # [x, y, z] goto target, control-odom frame
     point_dist = None         # last controller distance, for the footer
+    # Whether goto mode is the one holding frontier_extractor suspended. Only
+    # what we suspended may be resumed: revisit_planner suspends it too, and
+    # resuming its detour would put two publishers on the goal topic.
+    suspended_for_goto = False
     last_point_pub_at = 0.0   # last /frontier_slam/goal republish
     last_drive_at = 0.0
     last_action = "halt"
@@ -1401,10 +1429,12 @@ def control_screen(stdscr, sup, values, link, session):
 
     def drop_point():
         """Forget the goto target and hand goal picking back to the planner."""
-        nonlocal point, point_dist
+        nonlocal point, point_dist, suspended_for_goto
         if point is not None:
             link.clear_target_marker()
+        if suspended_for_goto:
             link.set_planner_suspended(False)
+            suspended_for_goto = False
         point = None
         point_dist = None
 
@@ -1494,13 +1524,17 @@ def control_screen(stdscr, sup, values, link, session):
         point_dist = None
         # The mode the planner layer is actually running under, not the one
         # selected in the list — arrowing the Mode row must not move the keys
-        # out from under the operator before Enter applies it.
+        # out from under the operator before Enter applies it. Read from the
+        # applied configuration, not the planner group's own snapshot: goto
+        # and frontier launch the planner identically, so switching between
+        # them deliberately does not restart it.
         goto_mode = (running and "planner" in running
-                     and sup.applied.get("planner", {}).get("mode") == "goto")
-        if point is not None and not goto_mode:
+                     and sup.applied_values.get("mode") == "goto")
+        if not goto_mode and (point is not None or suspended_for_goto):
             drop_point()
         if goto_mode:
             link.set_planner_suspended(True)
+            suspended_for_goto = True
             pose = link.control_pose()
             if point is None and pose:
                 # Start from the vehicle position, so entering the mode never
@@ -1546,6 +1580,8 @@ def control_screen(stdscr, sup, values, link, session):
         # key line at the bottom) and the text goes to the clipboard.
         pending_values = launch_values()
         launch_cmd = model.launch_command(pending_values)
+        unapplied = (unapplied_ids(sup.applied_values, pending_values)
+                     if running else set())
 
         # -- parameter list
         desc_h = 5
@@ -1604,9 +1640,18 @@ def control_screen(stdscr, sup, values, link, session):
             # not repeat it — unless the pane is too narrow to draw the list.
             inline = (sel and p.kind == "enum"
                       and list_right - choice_col - 1 >= CHOICE_MIN_W)
+            due = p.id in unapplied
             text = label if inline else f"{label} {fmt_value(p, values[p.id])}"
-            put(stdscr, row, 4, text,
-                curses.A_REVERSE if sel else curses.A_NORMAL, maxx=list_right)
+            base = curses.A_REVERSE if sel else curses.A_NORMAL
+            if due and not inline:
+                # Only the value goes purple: the label names the option either
+                # way, and colouring the whole row would read as an error.
+                put(stdscr, row, 4, label, base, maxx=list_right)
+                put(stdscr, row, 5 + len(label), fmt_value(p, values[p.id]),
+                    base | curses.color_pair(C_PEND) | curses.A_BOLD,
+                    maxx=list_right)
+            else:
+                put(stdscr, row, 4, text, base, maxx=list_right)
             tag_col = 5 + len(text)
             for tag, attr in tags:
                 put(stdscr, row, tag_col, tag, attr, maxx=list_right)
@@ -1615,7 +1660,7 @@ def control_screen(stdscr, sup, values, link, session):
             # only for the selection, so there is one such list on screen.
             if sel:
                 draw_choice_inline(stdscr, p, values[p.id], row, tag_col + 1,
-                                   list_right)
+                                   list_right, unapplied=due)
 
         if panel:
             # The panel runs the full column height, past the description pane:
@@ -1716,9 +1761,13 @@ def control_screen(stdscr, sup, values, link, session):
                 + (" is" if len(planned) == 1 else " are")
                 + " planned work — Enter is blocked until set back",
                 curses.color_pair(C_WARN))
-        elif running and pending:
-            put(stdscr, foot, 2, "Pending — Enter applies (restarts: "
-                + ", ".join(pending) + ")", curses.color_pair(C_WARN))
+        elif running and (pending or unapplied):
+            # An option can be due without anything to restart — a mode switch
+            # only changes what this launcher publishes — so the purple rows
+            # need a footer that does not promise a restart.
+            put(stdscr, foot, 2, "Pending — Enter applies "
+                + (f"(restarts: {', '.join(pending)})" if pending
+                   else "(nothing restarts)"), curses.color_pair(C_WARN))
         elif not running:
             put(stdscr, foot, 2, "Enter starts the stack", curses.A_DIM)
 

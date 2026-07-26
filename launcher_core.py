@@ -72,6 +72,12 @@ def _odom_topic(v):
     return "/slam/odometry" if v["slam"] == "slam" else "/StoneFish/Odometry"
 
 
+def _planner_mode(v):
+    """Whether the planner layer runs. frontier and goto differ only in who
+    publishes the goal — a runtime topic, not a launch argument."""
+    return v["mode"] in ("frontier", "goto")
+
+
 def _rviz_config(v, bringup_share):
     """One view for every mode — mirrors demo.launch.py.
 
@@ -124,7 +130,11 @@ class Group:
         self.label = label
         self.description = description
         self.build = build          # values -> list of argv lists
-        self.depends = tuple(depends)  # parameter ids that force a restart
+        # Parameter ids that force a restart. An entry may also be
+        # (id, project): the group then restarts only when project(values)
+        # changes, for a parameter it reads through a coarser distinction than
+        # its own value — mode reaches the mapper only as planner-vs-teleop.
+        self.depends = tuple(depends)
         self.visible = visible
         # Extra environment for this group only — LD_PRELOAD in particular must
         # not leak into the Python nodes it was never meant for.
@@ -136,6 +146,16 @@ class Group:
 
     def commands(self, values):
         return self.build(values)
+
+    def changed(self, old, values):
+        """Dependency ids whose effect on this group differs between two configs."""
+        out = []
+        for dep in self.depends:
+            pid, project = dep if isinstance(dep, tuple) else (dep, None)
+            if (project(old) != project(values) if project
+                    else old.get(pid) != values.get(pid)):
+                out.append(pid)
+        return out
 
 
 def build_groups(bringup_share=""):
@@ -300,8 +320,8 @@ def build_groups(bringup_share=""):
         Group("mapper", "Map backend",
               "OctoMap occupancy grid or VDBFusion TSDF. Consumes /cloud_in "
               "only, so the backend can be swapped without touching the sim.",
-              mapper, depends=["mapper", "map_rebuild", "mode", "tsdf_octomap",
-                               "robot_depth_target"]),
+              mapper, depends=["mapper", "map_rebuild", ("mode", _planner_mode),
+                               "tsdf_octomap", "robot_depth_target"]),
         Group("gt_map", "Ground-truth reference map",
               "A second map built from the exact simulator pose, overlaid "
               "against the belief map so map drift is visible directly.",
@@ -321,7 +341,9 @@ def build_groups(bringup_share=""):
               "Frontier detection, A* planning and the path executor. Runs "
               "under frontier (it picks its own goals) and under goto (the "
               "operator's target point is the goal).",
-              planner, depends=["mode", "motion", "scan_style", "scenario",
+              # No mode dependency: teleop starts and stops this group through
+              # `visible`, and frontier <-> goto builds the identical command.
+              planner, depends=["motion", "scan_style", "scenario",
                                 "revisit", "slam", "mapper",
                                 "scenario_out_dx", "scenario_out_dy",
                                 "scan_sweep_deg", "robot_depth_target",
@@ -351,8 +373,9 @@ def build_groups(bringup_share=""):
         Group("rqt", "Planning Dashboard (RQT)",
               "The planning dashboard (/frontier_slam/planning_dashboard) in an "
               "Image View, and nothing else — map, inflation zones, path and "
-              "robot/goal state, top-down. Offered under frontier mode only.",
-              rqt, visible=lambda v: bool(v["rqt"]) and v["mode"] == "frontier",
+              "robot/goal state, top-down. Offered whenever the planner runs "
+              "(frontier and goto); it draws the goal either of them committed to.",
+              rqt, visible=lambda v: bool(v["rqt"]) and _planner_mode(v),
               env_extra=_rqt_settings_env("planning_dashboard"),
               graceful=False),
         Group("rqt_depthmap", "Sonar DepthMap (RQT)",
@@ -771,6 +794,10 @@ class Supervisor:
         self.env = env or os.environ.copy()
         self.procs = {}          # group id -> [Proc]
         self.applied = {}        # group id -> values snapshot it was started with
+        # The configuration the last apply() committed to, whether or not it
+        # restarted anything: a mode the running groups take at runtime rather
+        # than through their command line is only readable here.
+        self.applied_values = {}
         self._last_status = {}   # group id -> status at the last poll
         self._shutting_down = False
         os.makedirs(log_dir, exist_ok=True)
@@ -879,7 +906,7 @@ class Supervisor:
         old = self.applied.get(gid)
         if old is None:
             return False
-        return any(old.get(k) != values.get(k) for k in self.groups[gid].depends)
+        return bool(self.groups[gid].changed(old, values))
 
     def pending_for(self, pid, values):
         """Groups a single edited parameter would restart, start or stop.
@@ -893,7 +920,7 @@ class Supervisor:
             group = self.groups.get(gid)
             old = self.applied.get(gid)
             if (group and gid in running and old is not None
-                    and pid in group.depends and old.get(pid) != values.get(pid)):
+                    and pid in group.changed(old, values)):
                 actions[gid] = "restart"
         # Mirror plan()'s cascade so the row hint promises what apply() does.
         if actions.get("slam") == "restart":
@@ -936,6 +963,7 @@ class Supervisor:
 
     def apply(self, values, on_event=None):
         to_stop, to_start, to_restart = self.plan(values)
+        self.applied_values = dict(values)
         self.stop_many(to_stop + to_restart, on_event=on_event)
         for gid in [g for g in GROUP_ORDER if g in to_start + to_restart]:
             self.start(gid, values, on_event=on_event)
