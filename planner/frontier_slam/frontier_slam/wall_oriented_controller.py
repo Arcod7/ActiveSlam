@@ -1,7 +1,7 @@
 """
 Forward path controller with a fixed viewing offset toward the nearest wall.
 
-Unlike ``wall_follower``, this controller does not estimate wall normals,
+Unlike ``wall_looking``, this controller does not estimate wall normals,
 regulate standoff, or alter the planner route.  It follows the same path as
 the ordinary waypoint controller while yawing ``look_offset_deg`` to the left
 or right of the route bearing.  The nearest occupied/surface point in the map
@@ -14,7 +14,8 @@ along the planned path while its camera looks slightly toward the wall.
 import math
 import os
 
-from frontier_slam.control_utils import wrap_angle, yaw_from_quat
+from frontier_slam.control_utils import (
+    depth_hold_effort, LowPassRate, SlewLimiter, wrap_angle, yaw_from_quat)
 from frontier_slam.session_log import open_session_log
 from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry, Path
@@ -23,6 +24,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Image, PointCloud2, PointField
+from std_msgs.msg import String
 
 
 _LOG_DIR = os.path.join(
@@ -34,7 +36,7 @@ CSV_COLUMNS = [
     't_ros', 'rx', 'ry', 'rz', 'gx', 'gy', 'gz',
     'dist_m', 'route_hdg_deg', 'look_hdg_deg', 'hdg_err_deg',
     'wall_side', 'wall_dist_m', 'depth_err_m',
-    'surge', 'sway', 'yaw_cmd', 'heave',
+    'surge', 'sway', 'yaw_cmd', 'yaw_rate', 'heave',
     'obs_m', 'path_len', 'wp_idx', 'event',
 ]
 
@@ -62,19 +64,25 @@ def wall_side_distances(points: np.ndarray, pose: np.ndarray,
 
     pts = np.asarray(points, dtype=np.float64)
     p = np.asarray(pose, dtype=np.float64)
-    finite = np.isfinite(pts).all(axis=1)
-    depth_ok = np.abs(pts[:, 2] - p[2]) <= z_band_m
-    delta = pts[:, :2] - p[:2]
-    distance = np.hypot(delta[:, 0], delta[:, 1])
-    valid = finite & depth_ok & (distance <= max_distance_m)
-    if not np.any(valid):
-        return float('inf'), float('inf')
 
-    # Starboard unit vector for a route bearing in world NED.
-    right = np.array([-math.sin(route_heading), math.cos(route_heading)])
-    lateral = delta @ right
-    left_mask = valid & (lateral < -lateral_deadband_m)
-    right_mask = valid & (lateral > lateral_deadband_m)
+    # Gate before the vector maths; non-finite points fail both gates anyway.
+    near = np.abs(pts[:, 2] - p[2]) <= z_band_m
+    if not np.any(near):
+        return float('inf'), float('inf')
+    dx = pts[near, 0] - p[0]
+    dy = pts[near, 1] - p[1]
+    distance = np.hypot(dx, dy)
+    in_range = distance <= max_distance_m
+    if not np.any(in_range):
+        return float('inf'), float('inf')
+    dx, dy, distance = dx[in_range], dy[in_range], distance[in_range]
+
+    # Starboard unit vector for a route bearing in world NED. Elementwise, not a
+    # matmul: a two-column gemv dispatches to threaded BLAS, and at control rate
+    # the worker spin-wait costs far more than the arithmetic.
+    lateral = dx * -math.sin(route_heading) + dy * math.cos(route_heading)
+    left_mask = lateral < -lateral_deadband_m
+    right_mask = lateral > lateral_deadband_m
     left_dist = float(np.min(distance[left_mask])) if np.any(left_mask) else float('inf')
     right_dist = float(np.min(distance[right_mask])) if np.any(right_mask) else float('inf')
     return left_dist, right_dist
@@ -172,24 +180,65 @@ def parse_xyz_cloud(msg: PointCloud2) -> 'np.ndarray | None':
 
 
 class WallOrientedController(Node):
-    KP_YAW = 0.07
+    # Heading is held by a direct heading->thrust law, because the only yaw rate
+    # available here is a differentiated heading estimate and that cannot close a
+    # loop: compass sigma is 0.05 rad at 10 Hz, so differentiation yields ~0.24
+    # rad/s of noise against a 0.25 rad/s target -- measured on a constant-spin
+    # scan, the fed-back rate read backwards on 4 of 18 samples and the command
+    # flipped sign on 10 of 17. No gain or filter fixes that: resolving the rate
+    # at 10:1 would need ~3 s of averaging. Heading error itself is clean (under
+    # 2 deg of noise), so the law that uses it directly is smooth.
+    #
+    # yaw_rate_command()/MAX_YAW_RATE in control_utils stay: a real gyro measures
+    # rate without differentiating, and the cascade goes back on top of one.
+    # Until then YAW_EFFORT_LIMIT bounds authority instead of achieved rate --
+    # equivalent only while thrust_boost is off, which is what caps spin here.
+    # Yaw is inertia plus a little drag -- close to a double integrator, which
+    # proportional control alone cannot stabilise; only drag damps it, so the
+    # gain has to stay under what drag can absorb. At 0.60 the loop diverged on
+    # a smooth setpoint: heading error grew 8.4 -> 24.2 -> 25.7 deg mean across
+    # a run, peaking at 146, while look_hdg moved only 3 deg/s. 0.15 is twice
+    # the 0.07 that was stable before the cascade, and still 4x under 0.60.
+    # The real fix is the D term, which needs a rate a gyro can supply and a
+    # differentiated heading cannot -- see the note above.
+    # Effective loop gain is KP_YAW * turn_factor, so the launcher's turn_factor
+    # is the live knob if this still rings.
+    KP_YAW = 0.15
+    YAW_RATE_TAU = 0.15      # diagnostic only; the CSV logs it, control ignores it
+    YAW_EFFORT_LIMIT = 0.30
+    # Effort per second on the published yaw command: a step to full authority
+    # now takes 1 s, not one 0.1 s tick. The effort limit above bounds the rate
+    # eventually reached; this bounds the acceleration used to reach it.
+    YAW_SLEW_PER_S = 0.30
     KP_SPEED = 0.25
     KP_HEAVE = 0.35
+    KD_HEAVE = 0.50          # damps the 6.1 s depth limit cycle P alone sustains
+    DEPTH_RATE_TAU = 0.20    # s, low-pass on the differentiated depth
+
+    # Both rates are differentiated from a pose estimate that steps on graph
+    # corrections and stalls while the optimiser runs. Beyond these bounds the
+    # sample is one of those, not motion: measured true motion peaks at 1.26
+    # rad/s and 0.17 m/s.
+    YAW_RATE_MAX = 1.5       # rad/s (~86 deg/s)
+    DEPTH_RATE_MAX = 0.6     # m/s
+    ODOM_GAP_S = 0.5         # a longer gap carries no usable rate
+    ODOM_STALE_S = 1.0       # past this the pose is too old to steer on
 
     MAX_SPEED = 0.25
     GOAL_RADIUS = 2.0
     GOAL_REACHED_TIMEOUT = 10.0
-    SCAN_YAW = 0.08
+    SCAN_YAW = 0.08          # open-loop effort; ~0.22 rad/s achieved without boost
     INIT_SCAN_DURATION = 10.0
     WAYPOINT_ADVANCE_DIST = 1.5
     OBS_SLOW_DIST = 1.5
     EMERGENCY_STOP_DIST = 0.4
     BACK_SURGE_SPEED = 0.12
-    ESCAPE_YAW = 0.20
+    ESCAPE_YAW = 0.20        # open-loop effort, same basis as SCAN_YAW
     ESCAPE_DURATION = 4.0
     STUCK_SPEED_MIN = 0.15
     STUCK_WINDOW = 5.0
     STUCK_MOVE_MIN = 0.25
+    SIDE_SWITCH_DWELL_S = 4.0  # a side change must persist this long to be taken
     MAP_STALE_S = 5.0
     CTRL_HZ = 10.0
     LOG_EVERY_N_TICKS = 10
@@ -202,12 +251,14 @@ class WallOrientedController(Node):
         self.declare_parameter('lookahead_m', 0.0)
         self.declare_parameter('map_points_topic', '/octomap_point_cloud_centers')
         self.declare_parameter('max_wall_distance_m', 8.0)
-        self.declare_parameter('wall_z_band_m', 1.5)
+        self.declare_parameter('wall_z_band_m', 3.0)
         self.declare_parameter('side_switch_margin_m', 0.3)
         self.declare_parameter('odom_topic', '/StoneFish/Odometry')
         self.declare_parameter('goal_topic', '/frontier_slam/goal')
         self.declare_parameter('path_topic', '/frontier_slam/path')
         self.declare_parameter('command_topic', '/motion/body_command')
+        self.declare_parameter('speed_factor', 1.0)
+        self.declare_parameter('turn_factor', 1.0)
 
         depth = float(self.get_parameter('depth_setpoint').value)
         self._depth_setpoint: float | None = None if depth < 0 else depth
@@ -225,12 +276,22 @@ class WallOrientedController(Node):
 
         self._goal: np.ndarray | None = None
         self._pose: np.ndarray | None = None
+        self._depth_rate = LowPassRate(
+            self.DEPTH_RATE_TAU, max_rate=self.DEPTH_RATE_MAX,
+            max_gap_s=self.ODOM_GAP_S)
+        self._yaw_rate = LowPassRate(
+            self.YAW_RATE_TAU, wrap=True, max_rate=self.YAW_RATE_MAX,
+            max_gap_s=self.ODOM_GAP_S)
+        self._yaw_slew = SlewLimiter(self.YAW_SLEW_PER_S)
         self._yaw = 0.0
+        self._odom_at: float | None = None
         self._path: list[tuple[float, float]] = []
         self._wp_idx = 0
         self._map_points: np.ndarray | None = None
         self._map_received_at: float | None = None
         self._wall_side = 0
+        self._side_candidate = 0
+        self._side_candidate_t = 0.0
         self._wall_distance = float('nan')
         self._min_front_dist = float('inf')
         self._init_scan_end: float | None = None
@@ -247,6 +308,10 @@ class WallOrientedController(Node):
         self.create_subscription(Image, '/sensor_msgs/image_depth', self._depth_cb, 1)
         self.create_subscription(PointCloud2, map_topic, self._map_cb, 1)
         self._command_pub = self.create_publisher(Twist, command_topic, 1)
+        # Same label the CSV `event` column carries — what the vehicle is
+        # doing, for the launcher's status panel.
+        self._activity_pub = self.create_publisher(
+            String, '/frontier_slam/activity', 1)
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
 
         self.get_logger().info(
@@ -302,6 +367,9 @@ class WallOrientedController(Node):
         p = msg.pose.pose.position
         self._pose = np.array([p.x, p.y, p.z])
         self._yaw = yaw_from_quat(msg.pose.pose.orientation)
+        self._odom_at = self._t_ros()
+        self._depth_rate.update(float(p.z), self._odom_at)
+        self._yaw_rate.update(self._yaw, self._odom_at)
         if self._init_scan_end is None:
             if self._depth_setpoint is None:
                 self._depth_setpoint = float(p.z)
@@ -315,7 +383,8 @@ class WallOrientedController(Node):
         if self._depth_setpoint is None:
             return 0.0
         error = self._pose[2] - self._depth_setpoint
-        return float(np.clip(-self.KP_HEAVE * error, -1.0, 1.0))
+        return depth_hold_effort(error, self._depth_rate.value,
+                                 self.KP_HEAVE, self.KD_HEAVE)
 
     def _select_wall_side(self, route_heading: float, now: float) -> None:
         if (self._map_points is None or self._map_received_at is None
@@ -326,8 +395,24 @@ class WallOrientedController(Node):
         left, right = wall_side_distances(
             self._map_points, self._pose, route_heading,
             self._wall_z_band, self._max_wall_distance)
-        self._wall_side = choose_wall_side(
+        candidate = choose_wall_side(
             left, right, self._wall_side, self._side_switch_margin)
+        # Switching sides re-signs the viewing offset, so each change steps the
+        # yaw setpoint by 2*look_offset_deg at once -- measured at 48.6 deg,
+        # against 2.4 deg/s while the side holds. The 0.3 m margin alone does
+        # not settle it when both sides sit at a similar range: the side flipped
+        # 8 times in 107 s, which is the left-right sweep. Make a change earn
+        # itself over SIDE_SWITCH_DWELL_S before the setpoint follows it.
+        if candidate != self._wall_side:
+            if candidate != self._side_candidate:
+                self._side_candidate = candidate
+                self._side_candidate_t = now
+            elif now - self._side_candidate_t >= self.SIDE_SWITCH_DWELL_S:
+                self._wall_side = candidate
+                self._side_candidate_t = now
+        else:
+            self._side_candidate = candidate
+            self._side_candidate_t = now
         chosen = left if self._wall_side < 0 else right
         self._wall_distance = chosen if math.isfinite(chosen) else float('nan')
 
@@ -342,7 +427,8 @@ class WallOrientedController(Node):
         look_heading = offset_heading(
             look_path_heading, self._wall_side, self._look_offset_deg)
         heading_error = wrap_angle(look_heading - self._yaw)
-        yaw_cmd = float(np.clip(self.KP_YAW * heading_error, -1.0, 1.0))
+        yaw_cmd = float(np.clip(self.KP_YAW * heading_error,
+                                -self.YAW_EFFORT_LIMIT, self.YAW_EFFORT_LIMIT))
 
         # Reduce travel while the requested viewing heading is far away, then
         # project the unchanged route velocity onto the current body axes.
@@ -362,6 +448,20 @@ class WallOrientedController(Node):
             return
 
         now = self._t_ros()
+        if self._odom_at is not None and now - self._odom_at > self.ODOM_STALE_S:
+            # Steering on a pose seconds old is what makes the vehicle lurch.
+            # The stuck reference has to clear too: a pose that is not being
+            # updated is not evidence that the vehicle failed to move.
+            self._send_thrust(0.0, 0.0, 0.0, 0.0)
+            self._stuck_ref_pos = None
+            self._stuck_ref_t = None
+            self.get_logger().warn(
+                f'odometry {now - self._odom_at:.1f}s stale — holding',
+                throttle_duration_sec=5.0)
+            if write_csv:
+                self._write_csv(0.0, 0.0, 0.0, 0.0, 'ODOM_STALE')
+            return
+
         heave = self._heave_cmd()
         if self._init_scan_end is not None and now < self._init_scan_end:
             self._send_thrust(0.0, 0.0, self.SCAN_YAW, heave)
@@ -456,13 +556,26 @@ class WallOrientedController(Node):
             self._write_csv(surge, sway, yaw_cmd, heave, event, goal_dist,
                             route_heading, look_heading, heading_error)
 
+    # Matches safety_gate.py's max_abs_command default (1.0): the gate rejects
+    # (and latches INVALID_COMMAND on) any out-of-range component, so a
+    # speed_factor/turn_factor above 1x must saturate here, not there.
+    MAX_ABS_COMMAND = 1.0
+
     def _send_thrust(self, surge: float, sway: float,
                      yaw: float, heave: float) -> None:
+        """Single publish choke point — applies the operator speed/turn factors
+        (live-tunable from the launcher TUI) uniformly to every caller, then
+        slew-limits yaw so no caller can step the actuators."""
+        speed_factor = float(self.get_parameter('speed_factor').value)
+        turn_factor = float(self.get_parameter('turn_factor').value)
+        cap = self.MAX_ABS_COMMAND
         msg = Twist()
-        msg.linear.x = float(surge)
-        msg.linear.y = float(sway)
-        msg.linear.z = float(heave)
-        msg.angular.z = float(yaw)
+        msg.linear.x = float(np.clip(surge * speed_factor, -cap, cap))
+        msg.linear.y = float(np.clip(sway * speed_factor, -cap, cap))
+        msg.linear.z = float(np.clip(heave * speed_factor, -cap, cap))
+        # Slewed after turn_factor, so raising the factor ramps rather than steps.
+        msg.angular.z = self._yaw_slew.update(
+            float(np.clip(yaw * turn_factor, -cap, cap)), self._t_ros())
         self._command_pub.publish(msg)
 
     def _write_csv(self, surge: float, sway: float, yaw_cmd: float,
@@ -470,6 +583,7 @@ class WallOrientedController(Node):
                    route_heading: float = float('nan'),
                    look_heading: float = float('nan'),
                    heading_error: float = float('nan')) -> None:
+        self._activity_pub.publish(String(data=event or 'FOLLOW_PATH'))
         p, g = self._pose, self._goal
         depth_error = (p[2] - self._depth_setpoint
                        if self._depth_setpoint is not None else float('nan'))
@@ -480,7 +594,8 @@ class WallOrientedController(Node):
             float(g[2]) if g is not None else float('nan'),
             distance, math.degrees(route_heading), math.degrees(look_heading),
             math.degrees(heading_error), self._wall_side, self._wall_distance,
-            depth_error, surge, sway, yaw_cmd, heave, self._min_front_dist,
+            depth_error, surge, sway, yaw_cmd, self._yaw_rate.value, heave,
+            self._min_front_dist,
             len(self._path), self._wp_idx, event,
         ])
 

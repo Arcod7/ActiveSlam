@@ -11,8 +11,13 @@
   <exec_depend>frontier_slam</exec_depend>
   <exec_depend>launch_tools</exec_depend>
   <exec_depend>motion_safety_rviz</exec_depend>
+  <exec_depend>eval_hud_rviz</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>octomap_server</exec_depend>
+  <!-- liboctomap.so, LD_PRELOADed into RViz -->
+  <exec_depend>octomap</exec_depend>
+  <!-- OccupancyGrid display, referenced by rviz/demo.rviz -->
+  <exec_depend>octomap_rviz_plugins</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

@@ -5,8 +5,11 @@ path waypoints published on /frontier_slam/path.  Responsibilities:
 
   1. Path following  — advance through waypoints published by the extractor,
                        yaw toward the current waypoint, surge when aligned.
-  2. Depth hold      — keep the robot at a fixed depth setpoint captured on
-                       the first odometry message.  Goal Z is ignored.
+  2. Depth hold      — track the active goal's Z (whoever published it —
+                       frontier's own pick, a revisit/scenario/mission
+                       waypoint, the launcher's target point); with no goal
+                       (waiting or scanning), hold depth_setpoint, captured
+                       on the first odometry message unless set explicitly.
   3. Emergency stop  — zero surge if the forward depth camera detects an
                        obstacle closer than EMERGENCY_STOP_DIST (last-resort
                        safety; A* inflation should prevent this normally).
@@ -14,9 +17,13 @@ path waypoints published on /frontier_slam/path.  Responsibilities:
                        picks a cable-safe sweep (default, scan_sweep.py) or
                        the legacy spin. Same behaviour while waiting/at goal.
 
-Why a fixed depth setpoint?
-  See Progress.md "Session 1 — Findings".  Locking the setpoint once on first
-  odom breaks the slow-sink feedback loop.
+Why not just track the goal's Z unconditionally? See Progress.md "Session 1 —
+Findings": frontier_extractor used to set the goal's Z to the robot's own
+live Z every cycle, a self-referential loop that let the robot sink
+undetected (Change 12). It now anchors its own picks to depth_setpoint
+instead (locked from first odom, same as here), so goal.point.z is always a
+real target by the time it reaches this node — never a copy of the robot's
+own position.
 """
 import math
 import os
@@ -28,8 +35,10 @@ from rclpy.node import Node
 from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
 
-from frontier_slam.control_utils import wrap_angle, yaw_from_quat
+from frontier_slam.control_utils import (
+    depth_hold_effort, LowPassRate, SlewLimiter, wrap_angle, yaw_from_quat)
 from frontier_slam.scan_sweep import SweepScan, scan_yaw_command
 from frontier_slam.session_log import open_session_log
 
@@ -54,6 +63,13 @@ class WaypointController(Node):
     # scan matching more overlap between consecutive mapping keyframes.
     KP_SURGE = 0.25
     KP_HEAVE = 0.35
+    KD_HEAVE = 0.50          # damps the depth limit cycle P alone sustains
+    DEPTH_RATE_TAU = 0.20    # s, low-pass on the differentiated depth
+    # Depth is differentiated from a pose estimate that steps on graph
+    # corrections and stalls while the optimiser runs; neither is motion.
+    DEPTH_RATE_MAX        = 0.6    # m/s — past this the sample is a correction
+    ODOM_GAP_S            = 0.5    # s — a longer gap carries no usable rate
+    ODOM_STALE_S          = 1.0    # s — past this the pose is too old to steer on
 
     MAX_SURGE             = 0.25
     GOAL_RADIUS           = 2.0    # m
@@ -65,6 +81,10 @@ class WaypointController(Node):
     OBS_SLOW_DIST         = 1.5    # m — begin linearly reducing surge at this distance
     EMERGENCY_STOP_DIST   = 0.4    # m — ramp reaches zero; switch to back-surge below this
     BACK_SURGE_SPEED      = 0.12   # m/s backward when obstacle is inside EMERGENCY_STOP_DIST
+    # Effort per second on the published yaw command. The sweep reverses sign
+    # between phases in a single tick, which reaches the thrusters as one
+    # impulse of angular acceleration; this ramps it instead.
+    YAW_SLEW_PER_S        = 0.30
     ESCAPE_YAW            = 0.20   # spin rate for CTRL_STUCK escape
     ESCAPE_DURATION       = 4.0    # s — CTRL_STUCK escape spin duration
     STUCK_SURGE_MIN       = 0.15   # min surge to consider "trying to move"
@@ -91,6 +111,9 @@ class WaypointController(Node):
         path_topic = str(self.get_parameter('path_topic').value)
         command_topic = str(self.get_parameter('command_topic').value)
 
+        self.declare_parameter('speed_factor', 1.0)
+        self.declare_parameter('turn_factor', 1.0)
+
         self.declare_parameter('scan_style', 'sweep')
         self.declare_parameter('scan_sweep_deg', 180.0)
         self._scan_style = str(self.get_parameter('scan_style').value)
@@ -99,7 +122,12 @@ class WaypointController(Node):
 
         self._goal: np.ndarray | None = None
         self._pose: np.ndarray | None = None
+        self._depth_rate = LowPassRate(
+            self.DEPTH_RATE_TAU, max_rate=self.DEPTH_RATE_MAX,
+            max_gap_s=self.ODOM_GAP_S)
+        self._yaw_slew = SlewLimiter(self.YAW_SLEW_PER_S)
         self._yaw  = 0.0
+        self._odom_at: float | None = None
         self._min_front_dist      = float('inf')
         self._init_scan_end: float | None  = None   # set on first odom
         self._goal_reached_at: float | None = None
@@ -117,6 +145,11 @@ class WaypointController(Node):
         self.create_subscription(Odometry,     odom_topic,                   self._odom_cb,  10)
         self.create_subscription(Image,        '/sensor_msgs/image_depth',   self._depth_cb, 1)
         self._command_pub = self.create_publisher(Twist, command_topic, 1)
+
+        # Same label the CSV `event` column carries — what the vehicle is
+        # doing, for the launcher's status panel.
+        self._activity_pub = self.create_publisher(
+            String, '/frontier_slam/activity', 1)
 
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
         self.get_logger().info(
@@ -160,6 +193,8 @@ class WaypointController(Node):
         p = msg.pose.pose.position
         self._pose = np.array([p.x, p.y, p.z])
         self._yaw  = yaw_from_quat(msg.pose.pose.orientation)
+        self._odom_at = self._t_ros()
+        self._depth_rate.update(float(p.z), self._odom_at)
         if self._init_scan_end is None:   # first odom
             if self._depth_setpoint is None:
                 self._depth_setpoint = float(p.z)
@@ -181,11 +216,23 @@ class WaypointController(Node):
     # ------------------------------------------------------------------
     # Control primitives
     def _heave_cmd(self) -> float:
-        """Hold the depth setpoint. Negative output = upward thrust in Stonefish."""
-        if self._depth_setpoint is None:
+        """Hold depth: the active goal's Z while pursuing one, the locked/
+        configured setpoint otherwise (no goal — waiting or scanning).
+
+        goal.point.z is a real target here regardless of who published it —
+        a frontier pick (now locked to depth_setpoint at the source, see
+        frontier_extractor's own _cruise_z), a revisit/scenario/mission
+        waypoint, or the launcher's target point: one goal message, one Z,
+        no separate depth channel to keep in sync (Change 12 is still
+        respected — see frontier_extractor.py for why its own picks don't
+        just copy the robot's live Z).
+        """
+        target_z = self._goal[2] if self._goal is not None else self._depth_setpoint
+        if target_z is None:
             return 0.0
-        depth_err = self._pose[2] - self._depth_setpoint    # +ve = too deep
-        return float(np.clip(-self.KP_HEAVE * depth_err, -1.0, 1.0))
+        depth_err = self._pose[2] - target_z    # +ve = too deep
+        return depth_hold_effort(depth_err, self._depth_rate.value,
+                                 self.KP_HEAVE, self.KD_HEAVE)
 
     def _xy_drive(self, target_xy: np.ndarray) -> tuple:
         """Return (surge_cmd, yaw_cmd, dist, heading_err)."""
@@ -207,6 +254,20 @@ class WaypointController(Node):
             return
 
         now   = self._t_ros()
+        if self._odom_at is not None and now - self._odom_at > self.ODOM_STALE_S:
+            # Steering on a pose seconds old is what makes the vehicle lurch.
+            # The stuck reference has to clear too: a pose that is not being
+            # updated is not evidence that the vehicle failed to move.
+            self._send_thrust(0.0, 0.0, 0.0)
+            self._stuck_ref_pos = None
+            self._stuck_ref_t   = None
+            self.get_logger().warn(
+                f'odometry {now - self._odom_at:.1f}s stale — holding',
+                throttle_duration_sec=5.0)
+            if write_csv:
+                self._write_csv(0.0, 0.0, 0.0, 'ODOM_STALE')
+            return
+
         heave = self._heave_cmd()
 
         # Initial scan — spin, or cable-safe sweep, to populate the map before first navigation
@@ -339,15 +400,30 @@ class WaypointController(Node):
 
     # ------------------------------------------------------------------
     # Output
+    # Matches safety_gate.py's max_abs_command default (1.0): the gate rejects
+    # (and latches INVALID_COMMAND on) any out-of-range component, so a
+    # speed_factor/turn_factor above 1x must saturate here, not there.
+    MAX_ABS_COMMAND = 1.0
+
     def _send_thrust(self, surge: float, yaw: float, heave: float) -> None:
+        """Single publish choke point — applies the operator speed/turn factors
+        (live-tunable from the launcher TUI) uniformly to every caller: path
+        following, scanning, escape spin, obstacle backup. Yaw is slew-limited
+        here so none of them can step the actuators."""
+        speed_factor = float(self.get_parameter('speed_factor').value)
+        turn_factor = float(self.get_parameter('turn_factor').value)
+        cap = self.MAX_ABS_COMMAND
         msg = Twist()
-        msg.linear.x = float(surge)
-        msg.linear.z = float(heave)
-        msg.angular.z = float(yaw)
+        msg.linear.x = float(np.clip(surge * speed_factor, -cap, cap))
+        msg.linear.z = float(np.clip(heave * speed_factor, -cap, cap))
+        # Slewed after turn_factor, so raising the factor ramps rather than steps.
+        msg.angular.z = self._yaw_slew.update(
+            float(np.clip(yaw * turn_factor, -cap, cap)), self._t_ros())
         self._command_pub.publish(msg)
 
     def _write_csv(self, surge, yaw_cmd, heave, event,
                    dist=float('nan'), hdg_err_deg=float('nan')) -> None:
+        self._activity_pub.publish(String(data=event or 'FOLLOW_PATH'))
         p = self._pose
         g = self._goal
         depth_err = ((p[2] - self._depth_setpoint)

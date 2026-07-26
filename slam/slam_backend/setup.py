@@ -21,7 +21,6 @@ setup(
     maintainer_email='ave4000@hw.ac.uk',
     description='GTSAM iSAM2 pose-graph SLAM backend with simulated sensors',
     license='MIT',
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'pressure_sim    = slam_backend.sensor_models.pressure_sim:main',
@@ -29,6 +28,7 @@ setup(
             'compass_sim     = slam_backend.sensor_models.compass_sim:main',
             'dvl_sim         = slam_backend.sensor_models.dvl_sim:main',
             'sonar_noise     = slam_backend.sensor_models.sonar_noise:main',
+            'range_image     = slam_backend.sensor_models.range_image:main',
             'dead_reckoning  = slam_backend.dead_reckoning:main',
             'pose_graph      = slam_backend.pose_graph:main',
         ],

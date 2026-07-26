@@ -16,6 +16,10 @@ This adds:
     leave-and-return waypoint sequence for watching loop closure fire on
     return (docs/plans/plan.md T1.1) — same suspend/goal interface as
     revisit_planner, see drift_return_scenario.py
+  - trajectory_mission (scenario:=trajectory only): follows a launch-settable
+    waypoint list or single point, yielding to revisit_planner when it's
+    active and resuming where it left off (docs/plans/tracks/
+    track_1_trajectory_mission.md) — see trajectory_mission.py
 
 Optional arguments:
   depth       Target depth in NED metres (Z-down, so positive = below surface).
@@ -31,10 +35,21 @@ Optional arguments:
   tsdf_frontier_standoff_m
               TSDF-only horizontal distance to hold from a frontier surface,
               measured along its outward normal. Default: 1.0 m.
-  scenario    Scripted evaluation scenario: none or drift_return. Default: none.
+  projected_map_band_m
+              Display only: the Z half-range one /projected_map cell collapses,
+              drawn on /frontier_slam/frontier_debug. Match the mapper in use.
+              Default: 3.0 (the TSDF mapper's own band).
+  scenario    Scripted evaluation scenario: none, drift_return, or trajectory.
+              Default: none.
   scenario_out_dx/scenario_out_dy
               Outbound leg offset (m) from the start position for
               scenario:=drift_return. Default: 15.0 / 0.0.
+  mission_waypoints
+              scenario:=trajectory: flat [x1,y1,z1,x2,y2,z2,...] waypoint
+              list in world_ned metres. A single triple is the point case.
+  mission_loop
+              scenario:=trajectory: repeat mission_waypoints instead of
+              finishing after the last one. Default: false.
   scan_style  Scanning motion for waypoint_controller's INIT_SCAN/SCAN/
               GOAL_REACHED states: sweep (default, cable-safe right-then-left,
               docs/plans/plan.md B1 — see scan_sweep.py) or spin (legacy 360°
@@ -43,6 +58,10 @@ Optional arguments:
               scan_style:=sweep total sweep width in degrees, mirrored left/
               right about the heading captured when each scan starts.
               Default: 180.0.
+  hard_inflation_m/inflation_m/plan_inflation_m
+              A* three-zone inflation radii around occupied cells (hard
+              block / soft high-cost / planning-margin cost), see
+              path_planner.py. Defaults: 0.20 / 0.75 / 1.50 m.
 
 Examples:
   ros2 launch frontier_slam frontier_slam.launch.py
@@ -53,10 +72,14 @@ Examples:
 
 Visualise in RViz2:
   - MarkerArray  /frontier_slam/frontiers  (cyan = candidates, red = active goal)
-  - Image        /frontier_slam/debug_image
+  - MarkerArray  /frontier_slam/frontier_debug  (why each frontier exists:
+    un-inflated boundary cells, the unknown cells bordering them, the Z column
+    each 2-D cell collapses, and the TSDF standoff offset)
+  - Image        /frontier_slam/planning_dashboard
   - OccupancyGrid /frontier_slam/inflated_map
 """
 import os
+from typing import List
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -72,6 +95,14 @@ def _float_parameter(name: str) -> ParameterValue:
     return ParameterValue(LaunchConfiguration(name), value_type=float)
 
 
+def _float_list_parameter(name: str) -> ParameterValue:
+    """Resolve a launch argument (a YAML-list string, e.g. '[0.0,0.0,8.0]') as
+    a ROS double array. Every element needs an explicit decimal point —
+    launch's typed-substitution coercion checks isinstance(x, float), and
+    YAML parses a bare '0' as int, which fails that check."""
+    return ParameterValue(LaunchConfiguration(name), value_type=List[float])
+
+
 def _bool_parameter(name: str) -> ParameterValue:
     """Resolve a launch argument as a ROS boolean."""
     return ParameterValue(LaunchConfiguration(name), value_type=bool)
@@ -82,8 +113,10 @@ def generate_launch_description():
         'depth',
         default_value='-1.0',
         description=(
-            'Target depth in NED metres (e.g. depth:=8.0). '
-            'Omit (or pass depth:=-1) to lock depth automatically from the first odometry reading.'
+            'Target/cruise depth in NED metres (e.g. depth:=8.0), shared by '
+            'frontier_extractor (the Z it anchors its own picks to) and '
+            'waypoint_controller (the Z it holds with no active goal). '
+            'Omit (or pass depth:=-1) to lock it from the first odometry reading instead.'
         ),
     )
     odom_topic_arg = DeclareLaunchArgument(
@@ -125,11 +158,35 @@ def generate_launch_description():
         default_value='false',
         description='Start revisit_planner (needs a SLAM pose source, e.g. bringup slam:=slam).',
     )
+    sigma_allow_xy_arg = DeclareLaunchArgument(
+        'sigma_allow_xy_m', default_value='0.045',
+        description=(
+            'Largest horizontal position sigma the mission tolerates, in metres. '
+            'With sigma_allow_yaw_rad it defines D(Sigma_allow), the denominator '
+            'of the revisit trigger ratio.'),
+    )
+    sigma_allow_yaw_arg = DeclareLaunchArgument(
+        'sigma_allow_yaw_rad', default_value='0.045',
+        description='Largest heading sigma the mission tolerates, in radians.',
+    )
+    ratio_trigger_arg = DeclareLaunchArgument(
+        'ratio_trigger', default_value='1.0',
+        description=(
+            'Uncertainty ratio U_r = D(Sigma)/D(Sigma_allow) above which exploration '
+            'is suspended to drive back and close a loop. 1.0 means "revisit exactly '
+            'when the estimate is less certain than the mission allows".'),
+    )
+    ratio_resume_arg = DeclareLaunchArgument(
+        'ratio_resume', default_value='0.5',
+        description='Uncertainty ratio below which exploration resumes after a revisit.',
+    )
     scenario_arg = DeclareLaunchArgument(
         'scenario',
         default_value='none',
-        choices=['none', 'drift_return'],
-        description='Scripted evaluation scenario: none or drift_return (docs/plans/plan.md T1.1).',
+        choices=['none', 'drift_return', 'trajectory'],
+        description=(
+            'Scripted evaluation scenario: none, drift_return (docs/plans/plan.md T1.1), '
+            'or trajectory (docs/plans/tracks/track_1_trajectory_mission.md).'),
     )
     scenario_out_dx_arg = DeclareLaunchArgument(
         'scenario_out_dx',
@@ -140,6 +197,22 @@ def generate_launch_description():
         'scenario_out_dy',
         default_value='0.0',
         description='drift_return: outbound leg Y offset (m) from the captured start position.',
+    )
+    mission_waypoints_arg = DeclareLaunchArgument(
+        'mission_waypoints',
+        default_value='[]',
+        description=(
+            "trajectory: YAML-list string of flat x,y,z triples in world_ned metres, e.g. "
+            "'[0.0,0.0,8.0, 10.0,0.0,8.0, 10.0,10.0,8.0]' — every number needs a decimal "
+            "point (a bare '0' parses as int and fails the float-array coercion). A "
+            "single triple is the point case. Required — the node rejects an empty or "
+            "malformed list at startup."),
+    )
+    mission_loop_arg = DeclareLaunchArgument(
+        'mission_loop',
+        default_value='false',
+        choices=['true', 'false'],
+        description='trajectory: repeat mission_waypoints instead of finishing after the last one.',
     )
     scan_style_arg = DeclareLaunchArgument(
         'scan_style',
@@ -159,6 +232,16 @@ def generate_launch_description():
         choices=['forward', 'walloriented', 'walllooking'],
         description='Selected motion executor for the planner path.',
     )
+    speed_factor_arg = DeclareLaunchArgument(
+        'speed_factor', default_value='1.0',
+        description='Multiplies commanded surge/sway/heave for whichever motion '
+                    'executor is active. Same knob as teleop; live-tunable.',
+    )
+    turn_factor_arg = DeclareLaunchArgument(
+        'turn_factor', default_value='1.0',
+        description='Multiplies commanded yaw for whichever motion executor is '
+                    'active. Same knob as teleop; live-tunable.',
+    )
     wall_orientation_offset_arg = DeclareLaunchArgument(
         'wall_orientation_offset_deg', default_value='30.0',
         description='walloriented: fixed yaw offset from the path toward the nearest wall.',
@@ -172,6 +255,15 @@ def generate_launch_description():
     tsdf_frontier_standoff_arg = DeclareLaunchArgument(
         'tsdf_frontier_standoff_m', default_value='1.0',
         description='TSDF frontier goal offset from the surface along its outward normal, in metres.',
+    )
+    projected_map_band_arg = DeclareLaunchArgument(
+        'projected_map_band_m', default_value='3.0',
+        description=(
+            'Display only: the Z half-range one /projected_map cell collapses, '
+            'drawn as the band_columns marker on /frontier_slam/frontier_debug. '
+            "Match the mapper publishing the map — tsdf.launch.py's "
+            'projected_map_band_m (3.0), or octomap.launch.py (0.25 with an '
+            'explicit depth, otherwise the full water column).'),
     )
     wall_points_topic_arg = DeclareLaunchArgument(
         'wall_points_topic', default_value='/octomap_point_cloud_centers',
@@ -211,26 +303,50 @@ def generate_launch_description():
         'wall_path_heading_weight', default_value='0.35',
         description='Orientation blend: 0=wall-derived look heading, 1=path-derived look heading.',
     )
+    hard_inflation_arg = DeclareLaunchArgument(
+        'hard_inflation_m', default_value='1.00',
+        description='A* hard-wall radius around occupied cells (cost = inf).',
+    )
+    inflation_arg = DeclareLaunchArgument(
+        'inflation_m', default_value='1.50',
+        description='A* soft-zone radius around occupied cells (high cost, last-resort passage).',
+    )
+    plan_inflation_arg = DeclareLaunchArgument(
+        'plan_inflation_m', default_value='3.00',
+        description='A* planning-margin radius around occupied cells (moderate cost, steers paths away).',
+    )
     depth = LaunchConfiguration('depth')
     odom_topic = LaunchConfiguration('odom_topic')
 
     return LaunchDescription([
         depth_arg,
+        hard_inflation_arg,
+        inflation_arg,
+        plan_inflation_arg,
         odom_topic_arg,
         safety_start_enabled_arg,
         actuator_backend_arg,
         mavlink_url_arg,
         ardusub_params_arg,
         revisit_arg,
+        sigma_allow_xy_arg,
+        sigma_allow_yaw_arg,
+        ratio_trigger_arg,
+        ratio_resume_arg,
         scenario_arg,
         scenario_out_dx_arg,
         scenario_out_dy_arg,
+        mission_waypoints_arg,
+        mission_loop_arg,
         scan_style_arg,
         scan_sweep_deg_arg,
         motion_arg,
+        speed_factor_arg,
+        turn_factor_arg,
         wall_orientation_offset_arg,
         wall_orientation_lookahead_arg,
         tsdf_frontier_standoff_arg,
+        projected_map_band_arg,
         wall_points_topic_arg,
         wall_standoff_arg,
         wall_switch_goal_distance_arg,
@@ -295,7 +411,15 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'odom_topic': odom_topic,
+                # Same value as waypoint_controller's depth_setpoint below —
+                # the cruise depth frontier_extractor anchors its own picks
+                # to, so goal.point.z is a real depth target either way.
+                'depth_setpoint': depth,
                 'tsdf_frontier_standoff_m': _float_parameter('tsdf_frontier_standoff_m'),
+                'projected_map_band_m': _float_parameter('projected_map_band_m'),
+                'hard_inflation_m': _float_parameter('hard_inflation_m'),
+                'inflation_m': _float_parameter('inflation_m'),
+                'plan_inflation_m': _float_parameter('plan_inflation_m'),
             }],
         ),
         Node(
@@ -308,6 +432,8 @@ def generate_launch_description():
                 'odom_topic': odom_topic,
                 'scan_style': LaunchConfiguration('scan_style'),
                 'scan_sweep_deg': _float_parameter('scan_sweep_deg'),
+                'speed_factor': _float_parameter('speed_factor'),
+                'turn_factor': _float_parameter('turn_factor'),
             }],
             condition=LaunchConfigurationEquals('motion', 'forward'),
         ),
@@ -322,13 +448,15 @@ def generate_launch_description():
                 'look_offset_deg': _float_parameter('wall_orientation_offset_deg'),
                 'lookahead_m': _float_parameter('wall_orientation_lookahead_m'),
                 'map_points_topic': LaunchConfiguration('wall_points_topic'),
+                'speed_factor': _float_parameter('speed_factor'),
+                'turn_factor': _float_parameter('turn_factor'),
             }],
             condition=LaunchConfigurationEquals('motion', 'walloriented'),
         ),
         Node(
             package='frontier_slam',
-            executable='wall_follower',
-            name='wall_follower',
+            executable='wall_looking',
+            name='wall_looking',
             output='screen',
             parameters=[{
                 'depth_setpoint': _float_parameter('depth'),
@@ -341,6 +469,8 @@ def generate_launch_description():
                 'path_look_offset_deg': _float_parameter('wall_path_look_offset_deg'),
                 'wall_normal_offset_deg': _float_parameter('wall_normal_offset_deg'),
                 'path_heading_weight': _float_parameter('wall_path_heading_weight'),
+                'speed_factor': _float_parameter('speed_factor'),
+                'turn_factor': _float_parameter('turn_factor'),
             }],
             condition=LaunchConfigurationEquals('motion', 'walllooking'),
         ),
@@ -349,7 +479,13 @@ def generate_launch_description():
             executable='revisit_planner',
             name='revisit_planner',
             output='screen',
-            parameters=[{'odom_topic': odom_topic}],
+            parameters=[{
+                'odom_topic': odom_topic,
+                'sigma_allow_xy_m': _float_parameter('sigma_allow_xy_m'),
+                'sigma_allow_yaw_rad': _float_parameter('sigma_allow_yaw_rad'),
+                'ratio_trigger': _float_parameter('ratio_trigger'),
+                'ratio_resume': _float_parameter('ratio_resume'),
+            }],
             condition=IfCondition(LaunchConfiguration('revisit')),
         ),
         Node(
@@ -363,5 +499,17 @@ def generate_launch_description():
                 'out_dy': LaunchConfiguration('scenario_out_dy'),
             }],
             condition=LaunchConfigurationEquals('scenario', 'drift_return'),
+        ),
+        Node(
+            package='frontier_slam',
+            executable='trajectory_mission',
+            name='trajectory_mission',
+            output='screen',
+            parameters=[{
+                'odom_topic': odom_topic,
+                'mission_waypoints': _float_list_parameter('mission_waypoints'),
+                'mission_loop': _bool_parameter('mission_loop'),
+            }],
+            condition=LaunchConfigurationEquals('scenario', 'trajectory'),
         ),
     ])

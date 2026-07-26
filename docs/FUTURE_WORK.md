@@ -4,22 +4,26 @@ Items investigated or prototyped during the project but deliberately left
 outside the delivered scope. Each entry records what exists, why it was
 parked, and what completing it would take.
 
-## Wall-guided motion executors
+## Wall-looking motion executor (work in progress)
 
-`motion:=walllooking` (`wall_follower.py`) and `motion:=walloriented`
-(`wall_oriented_controller.py`) are implemented behind the motion-executor
-interface and unit-tested, but are no longer part of the evaluated system.
-An A/B benchmark under wall-following motion (`matrix_lc_ab_wallfollow`)
-showed loop closure *increasing* trajectory error (final ATE 0.405 m with
-closures vs 0.200 m without, 437 closure edges on a small physical loop),
-the opposite of the drift-and-return result. The leading explanation is
-perceptual aliasing: a wall observed at a constant standoff is locally
-self-similar, so proximity-gated scan matching can accept constraints
-between different points along the surface. Confirming that hypothesis needs
-per-closure inlier diagnostics; until then wall-guided motion is not a
-reliable evaluation setting. The executors may be removed from the tree to
-simplify the motion stack; this entry and the git history preserve the
-finding either way.
+`motion:=walllooking` (`wall_looking.py`) is implemented behind the
+motion-executor interface and unit-tested, but is not part of the evaluated
+system. An A/B benchmark under it (`matrix_lc_ab_wallfollow`, whose
+`motion: wallfollow` is the `walllooking` alias) showed loop closure
+*increasing* trajectory error (final ATE 0.405 m with closures vs 0.200 m
+without, 437 closure edges on a small physical loop), the opposite of the
+drift-and-return result. The leading explanation is perceptual aliasing: a
+wall observed at a constant standoff is locally self-similar, so
+proximity-gated scan matching can accept constraints between different
+points along the surface. Confirming that hypothesis needs per-closure
+inlier diagnostics; until then wall-looking is not a reliable evaluation
+setting, and it stays selectable but marked WIP in the launcher.
+
+`motion:=walloriented` (`wall_oriented_controller.py`) is a supported
+executor and is *not* covered by that finding — the A/B above never ran
+under it. It follows the planner path while holding a fixed yaw offset
+toward the nearest mapped surface, which keeps the sonar on structure
+without changing the travel policy.
 
 ## Submap saliency descriptors (FPFH)
 
@@ -27,8 +31,18 @@ The revisit planner scores candidate keyframes by local keyframe density.
 The intended upgrade — FPFH descriptors clustered into a vocabulary with
 rarity weighting, following Suresh et al. — is unimplemented. Keyframe
 clouds are already stored in body frame ready for a descriptor pipeline.
-Open3D has no aarch64 wheel, so FPFH needs a numpy/scipy implementation or
-a small PCL C++ node.
+
+**This is descoped for time, not blocked by the platform.** Open3D publishes
+no aarch64 wheel, but the pinned `external/open3d` submodule builds and runs
+here: with `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2097152` set (see
+`docs/TROUBLESHOOTING.md`), `import open3d` succeeds and
+`compute_fpfh_feature` returns a 33xN descriptor matrix. A node needing it
+can set that variable through the launch file's environment. Earlier
+revisions of this file and the roadmap called FPFH blocked on aarch64; that
+was true before the submodule build landed and is no longer accurate.
+
+**Being attempted in the 2026-07-23 → 26 push** (`docs/plans/tracks/track_6_fpfh_saliency.md`).
+Move this entry to "done" or back to future work once that track resolves.
 
 ## Per-candidate uncertainty propagation
 
@@ -43,6 +57,10 @@ Frontier extraction runs on the 2-D projected OctoMap; under `mapper:=tsdf`
 a second, planning-only OctoMap instance provides that map. Detecting
 frontiers directly on TSDF voxels would retire the dual-map workaround and
 extend exploration to fully 3-D structure.
+
+**Being attempted in the 2026-07-23 → 26 push** (`docs/plans/tracks/track_5_exploration.md`),
+together with info-gain exploration of low-information TSDF regions once
+frontiers are exhausted. Move to "done" or back here once that track resolves.
 
 ## Frontier route ordering
 
@@ -64,12 +82,19 @@ aside for time. A rosbag-based comparison (same sensor stream through an
 external SLAM system) remains the cleanest way to position the pose-graph
 backend against established systems.
 
-## Sonar multipath effects
+## Sonar noise model: hardware fitting
 
-The sonar noise model covers range noise, lateral jitter, dropout, and
-outliers, but not multipath returns, which matter in confined structures
-such as wrecks. A multipath term would strengthen the degraded-conditions
-benchmark.
+The sonar noise model now covers range noise, projection-aware lateral jitter,
+grazing/range dropout, correlated speckle, speed-of-sound scale, strongest-
+return ranging, volume reverberation, and geometric multipath. Every parameter
+is argued from the datasheet and acoustics, not fitted — no real Sonar 3D-15
+range images have been recorded on this project. A short tank session (a flat
+wall swept through incidence angles, a 90-degree corner, still vs. stirred
+water, and a static scene held ~30 s) would constrain nearly every parameter
+and convert the model from geometrically motivated to measured. Two effects
+also remain unmodelled: multipath bounces off geometry outside the camera
+frustum (notably the water surface behind the sensor), and beam-density
+resampling from the sim's pinhole layout onto the device's uniform-angle grid.
 
 ## Real-vehicle campaign
 

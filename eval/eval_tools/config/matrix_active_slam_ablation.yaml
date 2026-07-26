@@ -1,0 +1,72 @@
+# Active-SLAM ablation ladder on the tuned off-shore-station demo scene.
+# Each rung adds exactly one capability, so the improvement between rungs is
+# attributable to that capability alone (same scene, seeds, motion, noise):
+#
+#   deadreckon  -> lc          isolates loop closure (trajectory drift)
+#   lc          -> lc_revisit  isolates uncertainty-triggered active revisit
+#   lc_revisit  -> full        isolates map re-integration (map accuracy)
+#
+# Metrics per run: ATE/RPE (benchmark.py), tsdf chamfer/RMSE + coverage
+# (map_metrics.py), and saved belief/gt maps (map_saver). 4 configs x 3 seeds
+# = 12 runs x 25 min ~= 5.2 h.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py \
+#       eval/eval_tools/config/matrix_active_slam_ablation.yaml
+batch_name: active_slam_ablation
+duration_s: 1500
+settle_s: 15
+seeds: [101, 102, 103]
+
+common_args:
+  # Motion gate is fail-closed; headless runs never arm it otherwise.
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  mapper: tsdf
+  rviz: 'false'
+  # Tuned demo scene + placement (config.yaml, off_shore_station).
+  scene: target
+  obj_mesh: off_shore_station.obj
+  obj_x: 15.55
+  obj_y: -7.62
+  obj_z: 2.88
+  obj_scale: 0.1501
+  obj_roll: -90.0
+  obj_pitch: 0.0
+  obj_yaw: 0.0
+  robot_x: 1.9491
+  robot_y: -5.1802
+  robot_z: 2.9818
+  robot_roll: -0.068
+  robot_pitch: 0.3095
+  robot_yaw: 16.5156
+  depth: 3.0
+  # Motion + perception held constant across the ladder.
+  motion: walloriented
+  scan_style: sweep
+  scan_sweep_deg: 180.0
+  speed_factor: 3.0
+  turn_factor: 1.0
+  noise_profile: realistic
+  near_cutoff: 1.5
+  sigma_allow_xy_m: 0.10
+  sigma_allow_yaw_rad: 0.05
+  ratio_trigger: 1.0
+  ratio_resume: 0.5
+  wall_orientation_offset_deg: 60.0
+  wall_orientation_lookahead_m: 3.0
+  tsdf_frontier_standoff_m: 1.0
+
+runs:
+  # Pure dead reckoning: no closures, no active revisit, no map re-integration.
+  - name: deadreckon
+    args: {loop_closure: 'false', revisit: 'false', map_rebuild: 'false'}
+  # Passive SLAM: loop closure on, but exploration never breaks off for it.
+  - name: lc
+    args: {loop_closure: 'true', revisit: 'false', map_rebuild: 'false'}
+  # Active SLAM: break off to close a loop when D-optimality crosses threshold.
+  - name: lc_revisit
+    args: {loop_closure: 'true', revisit: 'true', map_rebuild: 'false'}
+  # Full system: also re-integrate the TSDF at corrected poses after a closure.
+  - name: full
+    args: {loop_closure: 'true', revisit: 'true', map_rebuild: 'true'}

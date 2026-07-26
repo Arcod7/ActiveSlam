@@ -10,8 +10,9 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', ['launch/demo.launch.py']),
-        ('share/' + package_name + '/rviz', [
-            'rviz/demo.rviz', 'rviz/demo_tsdf.rviz', 'rviz/demo_slam.rviz']),
+        ('share/' + package_name + '/rviz', ['rviz/demo.rviz']),
+        ('share/' + package_name + '/rqt', ['rqt/planning_dashboard.perspective',
+                                            'rqt/sonar_depthmap.perspective']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

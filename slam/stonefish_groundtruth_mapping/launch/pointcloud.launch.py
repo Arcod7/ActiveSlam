@@ -1,8 +1,8 @@
 """
 Depth image → PointCloud2 (includes tf.launch.py: Stonefish + TF chain).
 
-  /sensor_msgs/image_depth  ──► depth_image_proc ──► /cloud_in
-  /sensor_msgs/camera_info  ──►┘
+  /sensor_msgs/image_depth  ──► depth_image_proc ──► /cloud_in_raw
+  /sensor_msgs/camera_info  ──►┘                          └─► sonar_noise ──► /cloud_in
 
 Thin composition of tf.launch.py and pointcloud_only.launch.py. Behaviour is
 unchanged for anything including it; launch pointcloud_only.launch.py by
@@ -10,15 +10,11 @@ itself to restart the cloud/noise layer without dropping the simulator.
 
 NaN replacement (REP 118) is handled inside stonefish_ros2 at publish time.
 
-When sonar_noise:=true (set by demo.launch.py under slam:=slam), a datasheet-
-grounded noise model is inserted between depth_image_proc and every consumer,
-standing in for a real WaterLinked Sonar 3D-15 (see slam_backend's
-sonar_noise.py):
-
-  depth_image_proc ──► /cloud_in_raw ──► sonar_noise ──► /cloud_in
-
-sonar_noise:=false (default, and always under slam:=none) keeps the original
-direct wiring so the topology and topic count are unchanged.
+sonar_noise always relays /cloud_in_raw to /cloud_in. In both modes it
+range-gates /cloud_in to the Sonar 3D-15's 15 m radial beam range;
+sonar_noise:=true (set by demo.launch.py under slam:=slam) additionally applies
+the datasheet-grounded model. The relay also owns /cloud_in's QoS, which is
+what lets every consumer connect on Humble — see pointcloud_only.launch.py.
 
 Test:
   ros2 topic echo /cloud_in --no-arr

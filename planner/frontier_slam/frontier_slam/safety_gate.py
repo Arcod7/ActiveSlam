@@ -1,4 +1,11 @@
-"""Fail-closed ROS 2 gate for normalized vehicle body commands."""
+"""Fail-closed ROS 2 gate for normalized vehicle body commands.
+
+Also publishes the vehicle on /motion/robot_marker as a state-coloured arrow
+(green = motion enabled, cyan = enabled and revisiting, white = enabled and
+running the initial scan, purple = disabled) plus a matching text label the
+RViz eval HUD renders — the gate is the only node that knows both the pose it
+watches and whether motion is armed.
+"""
 
 import time
 
@@ -8,9 +15,38 @@ from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, ColorRGBA, String
+from visualization_msgs.msg import Marker
 
 from frontier_slam.safety_logic import MotionSafetyState
+
+# Green when the gate passes motion, purple when it is disabled — the same
+# reading as the launcher's target-point sphere.
+ENABLED_COLOR = ColorRGBA(r=0.16, g=0.86, b=0.16, a=0.95)
+DISABLED_COLOR = ColorRGBA(r=0.70, g=0.20, b=0.90, a=0.95)
+# Cyan while the revisit planner drives the vehicle back to a known keyframe,
+# white while a motion executor is running its initial scan.
+REVISIT_COLOR = ColorRGBA(r=0.00, g=0.80, b=0.90, a=0.95)
+INIT_SCAN_COLOR = ColorRGBA(r=1.00, g=1.00, b=1.00, a=0.95)
+REVISITING_STATE = 'revisiting'
+INIT_SCAN_ACTIVITY = 'INIT_SCAN'
+
+# HUD wording for the labels the motion executors publish on
+# /frontier_slam/activity — keep in step with the launcher's ACTIVITY_TEXT.
+ACTIVITY_LABELS = {
+    'INIT_SCAN': 'INITIAL SCAN',
+    'SCAN': 'SCANNING FOR FRONTIERS',
+    'GOAL_REACHED': 'AT GOAL, SCANNING',
+    'FOLLOW_PATH': 'DRIVING TO WAYPOINT',
+    'TRACK': 'FOLLOWING WALL',
+    'WALL_SWITCH_SCAN': 'REACQUIRING WALL',
+    'NO_WALL_SCAN': 'SCANNING, NO WALL IN VIEW',
+    'NO_PATH_PROGRESS': 'STALLED, WAITING FOR REPLAN',
+    'EMERG_STOP': 'OBSTACLE AHEAD, BACKING OFF',
+    'CTRL_STUCK': 'STUCK, SPINNING TO ESCAPE',
+    'CTRL_STUCK_ESCAPE': 'STUCK, SPINNING TO ESCAPE',
+    'ODOM_STALE': 'ODOMETRY STALE, HOLDING',
+}
 
 
 class MotionSafetyGate(Node):
@@ -29,6 +65,14 @@ class MotionSafetyGate(Node):
         self.declare_parameter('publish_hz', 20.0)
         self.declare_parameter('require_odom', True)
         self.declare_parameter('start_enabled', False)
+        self.declare_parameter('marker_topic', '/motion/robot_marker')
+        self.declare_parameter('marker_frame', 'world_ned')
+        self.declare_parameter('revisit_state_topic',
+                               '/frontier_slam/revisit_state')
+        self.declare_parameter('activity_topic', '/frontier_slam/activity')
+        # Both sources publish at 1 Hz; fall back to the plain enabled colour
+        # when either stops, rather than latching its state forever.
+        self.declare_parameter('marker_state_timeout_s', 3.0)
 
         command_topic = str(self.get_parameter('command_topic').value)
         output_topic = str(self.get_parameter('output_topic').value)
@@ -51,13 +95,29 @@ class MotionSafetyGate(Node):
             bool(self.get_parameter('start_enabled').value))
         self._command_topic = command_topic
         self._last_status: str | None = None
+        self._marker_frame = str(self.get_parameter('marker_frame').value)
+        self._marker_state_timeout_s = float(
+            self.get_parameter('marker_state_timeout_s').value)
+        self._last_pose = None
+        self._revisit_state: str | None = None
+        self._revisit_state_time = 0.0
+        self._activity: str | None = None
+        self._activity_time = 0.0
 
         self._output_pub = self.create_publisher(Twist, output_topic, 10)
         self._status_pub = self.create_publisher(String, status_topic, 10)
+        self._marker_pub = self.create_publisher(
+            Marker, str(self.get_parameter('marker_topic').value), 1)
         self.create_subscription(
             Twist, command_topic, self._command_cb, 10)
         self.create_subscription(Bool, enable_topic, self._enable_cb, 10)
         self.create_subscription(Odometry, odom_topic, self._odom_cb, 10)
+        self.create_subscription(
+            String, str(self.get_parameter('revisit_state_topic').value),
+            self._revisit_state_cb, 10)
+        self.create_subscription(
+            String, str(self.get_parameter('activity_topic').value),
+            self._activity_cb, 10)
         self.create_timer(1.0 / publish_hz, self._tick)
         self.publish_zero()
 
@@ -100,8 +160,88 @@ class MotionSafetyGate(Node):
         if not self._state.enabled:
             self.publish_zero()
 
-    def _odom_cb(self, _msg: Odometry) -> None:
+    def _odom_cb(self, msg: Odometry) -> None:
         self._state.update_odometry(self._now())
+        self._last_pose = msg.pose.pose
+
+    def _revisit_state_cb(self, msg: String) -> None:
+        self._revisit_state = msg.data
+        self._revisit_state_time = self._now()
+
+    def _activity_cb(self, msg: String) -> None:
+        self._activity = msg.data
+        self._activity_time = self._now()
+
+    def _fresh(self, value: str | None, stamp: float) -> str | None:
+        """The value while it is younger than the timeout, else None."""
+        if value is None or self._now() - stamp > self._marker_state_timeout_s:
+            return None
+        return value
+
+    def _marker_state(self) -> tuple[str, ColorRGBA]:
+        """HUD label and arrow colour, resolved together so they cannot
+        disagree. Gate state first — a disabled gate is the reading that
+        matters most; revisit outranks the initial scan, which in practice
+        never overlap."""
+        if not self._state.enabled:
+            return 'MOTION DISABLED', DISABLED_COLOR
+        if self._fresh(self._revisit_state,
+                       self._revisit_state_time) == REVISITING_STATE:
+            return 'REVISITING', REVISIT_COLOR
+        activity = self._fresh(self._activity, self._activity_time)
+        if activity == INIT_SCAN_ACTIVITY:
+            return ACTIVITY_LABELS[activity], INIT_SCAN_COLOR
+        if activity:
+            return (ACTIVITY_LABELS.get(activity, activity.replace('_', ' ')),
+                    ENABLED_COLOR)
+        return 'MOTION ENABLED', ENABLED_COLOR
+
+    def _publish_robot_marker(self) -> None:
+        """The vehicle as an arrow coloured by whether motion is enabled, plus
+        the revisit and initial-scan phases, and the same state as a text
+        label floating above it.
+
+        An RViz Odometry display carries a fixed colour, so the state has to
+        come from the marker: this replaces the ground-truth arrow in
+        demo.rviz. It follows the pose the gate itself watches — ground truth
+        under slam:=none, /slam/odometry under slam:=slam — i.e. the pose the
+        controller is acting on. The eval HUD panel reads the text marker off
+        this topic, so the panel and the arrow always agree.
+        """
+        if self._last_pose is None:
+            return
+        label, color = self._marker_state()
+        stamp = self.get_clock().now().to_msg()
+
+        marker = Marker()
+        marker.header.frame_id = self._marker_frame
+        marker.header.stamp = stamp
+        marker.ns = 'motion_state'
+        marker.id = 0
+        marker.type = Marker.ARROW
+        marker.action = Marker.ADD
+        marker.pose = self._last_pose
+        marker.scale.x = 1.0    # shaft length, along the vehicle's +X
+        marker.scale.y = 0.16   # shaft diameter
+        marker.scale.z = 0.16   # head diameter
+        marker.color = color
+        self._marker_pub.publish(marker)
+
+        text = Marker()
+        text.header.frame_id = self._marker_frame
+        text.header.stamp = stamp
+        text.ns = 'motion_state_text'
+        text.id = 0
+        text.type = Marker.TEXT_VIEW_FACING
+        text.action = Marker.ADD
+        text.pose.position.x = self._last_pose.position.x
+        text.pose.position.y = self._last_pose.position.y
+        text.pose.position.z = self._last_pose.position.z - 1.2  # NED: -z is up
+        text.pose.orientation.w = 1.0
+        text.scale.z = 0.4      # character height
+        text.color = color
+        text.text = label
+        self._marker_pub.publish(text)
 
     def _has_multiple_command_sources(self) -> bool:
         return len(self.get_publishers_info_by_topic(self._command_topic)) > 1
@@ -113,6 +253,7 @@ class MotionSafetyGate(Node):
         status = String()
         status.data = decision.state
         self._status_pub.publish(status)
+        self._publish_robot_marker()
         if decision.state != self._last_status:
             if decision.state == self._state.ACTIVE:
                 self.get_logger().info(

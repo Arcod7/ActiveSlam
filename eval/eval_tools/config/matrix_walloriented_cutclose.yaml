@@ -1,0 +1,45 @@
+# Wall-oriented drift investigation: does near-field noise attenuation
+# (cut_close) change the position drift, and is loop closure the culprit?
+#
+# Fixed: path executor = walloriented, mapper = tsdf, realistic noise.
+# A/B axes: noise attenuation (none vs cut_close=near_cutoff 1.6) and
+#           loop closure (on vs off, at attenuation=none).
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py \
+#       eval/eval_tools/config/matrix_walloriented_cutclose.yaml
+batch_name: walloriented_cutclose
+duration_s: 240
+settle_s: 15
+seeds: [101, 102, 103]
+
+common_args:
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  motion: walloriented
+  rviz: 'false'
+  noise_profile: realistic
+  loop_closure: 'true'
+  map_rebuild: 'false'
+  mapper: tsdf
+
+runs:
+  # A: baseline reproduction — walloriented, no near-field attenuation.
+  - name: wo_none
+    args: {}
+
+  # B: the requested condition — walloriented + cut_close (near_cutoff 1.6),
+  #    clears the near-field reverberation spray from the SLAM input cloud.
+  - name: wo_cutclose
+    args: {near_cutoff: 1.6}
+
+  # C: isolate the pose-graph's contribution — same as A but loop closure off,
+  #    so the estimate is dead-reckoning + sequential scan-match factors only.
+  - name: wo_lc_off
+    args: {loop_closure: 'false'}
+
+  # D: clean-sonar control — odom_only has exact (noise-free) sonar passthrough
+  #    with realistic nav drift. If noisy sonar scan-matching is what corrupts
+  #    the pose graph, SLAM should finally beat dead-reckoning here.
+  - name: wo_odomonly
+    args: {noise_profile: odom_only}

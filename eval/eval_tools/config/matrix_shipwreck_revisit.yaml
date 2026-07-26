@@ -1,0 +1,62 @@
+# Same lc vs lc_revisit A/B as matrix_revisit_dopt004.yaml, on the larger
+# shipwreck scene instead of off_shore_station -- does the revisit mechanism
+# (confirmed working on 2026-07-24, dopt_trigger:0.004) still help/engage on
+# a bigger, more complex environment. Object placement, robot spawn pose and
+# speed_factor:4.0/depth:6.0 come from configs/config_shipwreck.yaml (this
+# scene's own tuned values, not off_shore_station's -- the wreck is larger
+# and farther out).
+#
+# 2 configs x 2 seeds = 4 runs x 20 min ~= 1.5 h.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py \
+#       eval/eval_tools/config/matrix_shipwreck_revisit.yaml
+batch_name: shipwreck_revisit
+duration_s: 1200
+settle_s: 15
+seeds: [101, 102]
+
+common_args:
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  mapper: tsdf
+  rviz: 'false'
+  # Shipwreck scene + tuned placement (configs/config_shipwreck.yaml).
+  scene: target
+  obj_mesh: shipwreck.obj
+  obj_x: 40.55
+  obj_y: -13.62
+  obj_z: 20.38
+  obj_scale: 0.0001
+  obj_roll: 0.0
+  obj_pitch: -180.0
+  obj_yaw: 15.0
+  robot_x: 7.8579
+  robot_y: 29.9307
+  robot_z: 5.9475
+  robot_roll: 0.0831
+  robot_pitch: 0.1865
+  robot_yaw: -105.0284
+  depth: 6.0
+  motion: walloriented
+  scan_style: sweep
+  scan_sweep_deg: 180.0
+  speed_factor: 4.0
+  turn_factor: 1.0
+  noise_profile: realistic
+  near_cutoff: 1.5
+  wall_orientation_offset_deg: 60.0
+  wall_orientation_lookahead_m: 3.0
+  tsdf_frontier_standoff_m: 1.0
+  loop_closure: 'true'
+  map_rebuild: 'false'
+  sigma_allow_xy_m: 0.05
+  sigma_allow_yaw_rad: 0.03
+  ratio_trigger: 1.0
+  ratio_resume: 0.5
+
+runs:
+  - name: lc
+    args: {revisit: 'false'}
+  - name: lc_revisit
+    args: {revisit: 'true'}

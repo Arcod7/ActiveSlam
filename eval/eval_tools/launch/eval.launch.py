@@ -19,14 +19,15 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+
+from eval_tools.run_paths import new_run_dir
 
 
 def _launch_eval_nodes(context, *args, **kwargs):
     output_dir = LaunchConfiguration('output_dir').perform(context)
     if not output_dir:
-        default_root = os.path.expanduser(
-            '~/delivery/MasterProject/ros_ws/src/ActiveSlam/eval/runs')
-        output_dir = os.path.join(default_root, time.strftime('%Y%m%d_%H%M%S'))
+        output_dir = new_run_dir(time.strftime('%Y%m%d_%H%M%S'))
     os.makedirs(output_dir, exist_ok=True)
 
     benchmark_node = Node(
@@ -36,7 +37,8 @@ def _launch_eval_nodes(context, *args, **kwargs):
         output='screen',
         parameters=[{
             'output_dir': output_dir,
-            'rpe_delta': LaunchConfiguration('rpe_delta'),
+            'rpe_delta': ParameterValue(
+                LaunchConfiguration('rpe_delta'), value_type=float),
         }],
     )
 
@@ -51,7 +53,30 @@ def _launch_eval_nodes(context, *args, **kwargs):
         }],
     )
 
-    return [benchmark_node, map_metrics_node]
+    # The gt map mirrors the belief backend (gt_map.launch.py), so a gt octomap
+    # to snapshot exists only when mapper:=octomap. Under tsdf the belief map
+    # no longer runs any octomap_server (the frontier planning map is now
+    # derived from the TSDF grid), so blank the belief octomap service too —
+    # otherwise map_saver blocks up to 30 s per save shelling out to
+    # octomap_saver_node against a dead /octomap_binary.
+    mapper = LaunchConfiguration('mapper').perform(context)
+    is_octomap = mapper == 'octomap'
+    gt_octomap_service = '/gt/octomap_binary' if is_octomap else ''
+    belief_octomap_service = '/octomap_binary' if is_octomap else ''
+    map_saver_node = Node(
+        package='eval_tools',
+        executable='map_saver',
+        name='map_saver',
+        output='screen',
+        parameters=[{
+            'output_dir': output_dir,
+            'mapper': LaunchConfiguration('mapper'),
+            'gt_octomap_service': gt_octomap_service,
+            'belief_octomap_service': belief_octomap_service,
+        }],
+    )
+
+    return [benchmark_node, map_metrics_node, map_saver_node]
 
 
 def generate_launch_description():
@@ -60,8 +85,8 @@ def generate_launch_description():
         description='Directory to write TUM/CSV output to (default: timestamped dir under eval/runs)',
     )
     rpe_delta_arg = DeclareLaunchArgument(
-        'rpe_delta', default_value='1',
-        description='Number of matched pose pairs between RPE samples',
+        'rpe_delta', default_value='1.0',
+        description='Fixed temporal separation between RPE samples, in seconds',
     )
     mapper_arg = DeclareLaunchArgument(
         'mapper', default_value='octomap', choices=['octomap', 'tsdf'],

@@ -51,7 +51,8 @@ from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import Image, PointCloud2, PointField
 from std_msgs.msg import String
 
-from frontier_slam.control_utils import wrap_angle, yaw_from_quat
+from frontier_slam.control_utils import (
+    depth_hold_effort, LowPassRate, wrap_angle, yaw_from_quat)
 from frontier_slam.session_log import open_session_log
 
 
@@ -70,11 +71,18 @@ CSV_COLUMNS = [
 _NORMAL_FIELDS = ('x', 'y', 'z', 'normal_x', 'normal_y', 'normal_z')
 
 
-class WallFollower(Node):
+class WallLooking(Node):
     # P-gains
     KP_YAW      = 0.07   # same heading gain as waypoint_controller
     KP_STANDOFF = 0.50   # standoff-distance error → approach speed
     KP_HEAVE    = 0.40
+    KD_HEAVE    = 0.57       # damps the depth limit cycle P alone sustains
+    DEPTH_RATE_TAU = 0.20    # s, low-pass on the differentiated depth
+    # Depth is differentiated from a pose estimate that steps on graph
+    # corrections and stalls while the optimiser runs; neither is motion.
+    DEPTH_RATE_MAX = 0.6     # m/s — past this the sample is a correction
+    ODOM_GAP_S     = 0.5     # s — a longer gap carries no usable rate
+    ODOM_STALE_S   = 1.0     # s — past this the pose is too old to steer on
 
     MAX_SURGE           = 0.20   # approach/retreat clamp
     MAX_SWAY            = 0.25   # tangential clamp
@@ -94,7 +102,7 @@ class WallFollower(Node):
     LOG_EVERY_N_TICKS   = 10     # CSV row rate = CTRL_HZ / this → 1 Hz
 
     def __init__(self) -> None:
-        super().__init__('wall_follower')
+        super().__init__('wall_looking')
 
         self.declare_parameter('standoff_m',    1.5)
         self.declare_parameter('tangent_speed', 0.15)
@@ -119,6 +127,8 @@ class WallFollower(Node):
         self.declare_parameter('path_topic', '/frontier_slam/path')
         self.declare_parameter('status_topic', '/motion/status')
         self.declare_parameter('command_topic', '/motion/body_command')
+        self.declare_parameter('speed_factor', 1.0)
+        self.declare_parameter('turn_factor', 1.0)
 
         self._standoff   = float(self.get_parameter('standoff_m').value)
         self._tan_speed  = float(self.get_parameter('tangent_speed').value)
@@ -133,7 +143,11 @@ class WallFollower(Node):
         command_topic = str(self.get_parameter('command_topic').value)
 
         self._pose: np.ndarray | None = None
+        self._depth_rate = LowPassRate(
+            self.DEPTH_RATE_TAU, max_rate=self.DEPTH_RATE_MAX,
+            max_gap_s=self.ODOM_GAP_S)
         self._yaw  = 0.0
+        self._odom_at: float | None = None
         self._min_front_dist = float('inf')
         self._wall_pts: np.ndarray | None = None   # (N,3) world
         self._wall_nrm: np.ndarray | None = None   # (N,3) unit
@@ -155,7 +169,7 @@ class WallFollower(Node):
         self._switched_for_goal = False
         self._tick = 0
 
-        self._log = open_session_log('wall_follower', CSV_COLUMNS, _LOG_DIR)
+        self._log = open_session_log('wall_looking', CSV_COLUMNS, _LOG_DIR)
 
         self.create_subscription(PointCloud2, normals_topic,             self._cloud_cb, 1)
         self.create_subscription(Odometry,    odom_topic,                self._odom_cb,  10)
@@ -164,10 +178,14 @@ class WallFollower(Node):
         self.create_subscription(Path, path_topic, self._path_cb, 1)
         self._command_pub = self.create_publisher(Twist, command_topic, 1)
         self._status_pub = self.create_publisher(String, status_topic, 1)
+        # Same label the CSV `event` column carries — what the vehicle is
+        # doing, for the launcher's status panel.
+        self._activity_pub = self.create_publisher(
+            String, '/frontier_slam/activity', 1)
 
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
         self.get_logger().info(
-            f'wall_follower ready — standoff={self._standoff:.1f}m '
+            f'wall_looking ready — standoff={self._standoff:.1f}m '
             f'tangent_speed={self._tan_speed:.2f} direction={self._direction:+d} '
             f'goal_topic={goal_topic} path_topic={path_topic} '
             f'— logging to {self._log.path}'
@@ -190,6 +208,8 @@ class WallFollower(Node):
         p = msg.pose.pose.position
         self._pose = np.array([p.x, p.y, p.z])
         new_yaw = yaw_from_quat(msg.pose.pose.orientation)
+        self._odom_at = self._t_ros()
+        self._depth_rate.update(float(p.z), self._odom_at)
         if self._search_last_yaw is not None:
             self._search_turned_rad += abs(wrap_angle(new_yaw - self._search_last_yaw))
         self._yaw = new_yaw
@@ -372,9 +392,19 @@ class WallFollower(Node):
         if self._pose is None:
             return
 
+        now = self._t_ros()
+        if self._odom_at is not None and now - self._odom_at > self.ODOM_STALE_S:
+            # Steering on a pose seconds old is what makes the vehicle lurch.
+            self._send_thrust(0.0, 0.0, 0.0, 0.0)
+            self.get_logger().warn(
+                f'odometry {now - self._odom_at:.1f}s stale — holding',
+                throttle_duration_sec=5.0)
+            if write_csv:
+                self._write_csv(0.0, 0.0, 0.0, 0.0, 'ODOM_STALE')
+            return
+
         heave = self._heave_cmd()
         target_xy = self._target_xy()
-        now = self._t_ros()
 
         # At startup, and while changing walls, rotate to make the TSDF observe
         # the surroundings instead of holding a fixed view of empty water or
@@ -551,19 +581,31 @@ class WallFollower(Node):
         if self._depth_setpoint is None:
             return 0.0
         depth_err = self._pose[2] - self._depth_setpoint    # +ve = too deep
-        return float(np.clip(-self.KP_HEAVE * depth_err, -1.0, 1.0))
+        return depth_hold_effort(depth_err, self._depth_rate.value,
+                                 self.KP_HEAVE, self.KD_HEAVE)
+
+    # Matches safety_gate.py's max_abs_command default (1.0): the gate rejects
+    # (and latches INVALID_COMMAND on) any out-of-range component, so a
+    # speed_factor/turn_factor above 1x must saturate here, not there.
+    MAX_ABS_COMMAND = 1.0
 
     def _send_thrust(self, surge: float, yaw: float, heave: float, sway: float) -> None:
+        """Single publish choke point — applies the operator speed/turn factors
+        (live-tunable from the launcher TUI) uniformly to every caller."""
+        speed_factor = float(self.get_parameter('speed_factor').value)
+        turn_factor = float(self.get_parameter('turn_factor').value)
+        cap = self.MAX_ABS_COMMAND
         msg = Twist()
-        msg.linear.x = float(surge)
-        msg.linear.y = float(sway)
-        msg.linear.z = float(heave)
-        msg.angular.z = float(yaw)
+        msg.linear.x = float(np.clip(surge * speed_factor, -cap, cap))
+        msg.linear.y = float(np.clip(sway * speed_factor, -cap, cap))
+        msg.linear.z = float(np.clip(heave * speed_factor, -cap, cap))
+        msg.angular.z = float(np.clip(yaw * turn_factor, -cap, cap))
         self._command_pub.publish(msg)
 
     def _write_csv(self, surge, sway, yaw_cmd, heave, event,
                    wall_pt=None, n=None, d=float('nan'),
                    hdg_err_deg=float('nan'), n_pts=0) -> None:
+        self._activity_pub.publish(String(data=event or 'FOLLOW_PATH'))
         p  = self._pose
         depth_err = ((p[2] - self._depth_setpoint)
                      if self._depth_setpoint is not None else float('nan'))
@@ -631,7 +673,7 @@ def _parse_normals_cloud(msg: PointCloud2) -> 'tuple[np.ndarray, np.ndarray] | t
 
 def main(args=None) -> None:
     rclpy.init(args=args)
-    node = WallFollower()
+    node = WallLooking()
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):

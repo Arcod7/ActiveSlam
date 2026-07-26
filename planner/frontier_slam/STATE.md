@@ -1,6 +1,6 @@
 # frontier_slam — Current State
 
-Mutable snapshot. Overwrite, never append. Last updated: 2026-07-02.
+Mutable snapshot. Overwrite, never append. Last updated: 2026-07-03.
 
 Change log → `Progress.md` | Session findings → `Sessions.md`
 
@@ -45,6 +45,26 @@ Change log → `Progress.md` | Session findings → `Sessions.md`
 | `STUCK_MOVE_MIN` | 0.25 m | Min movement expected in STUCK_WINDOW |
 | `CTRL_HZ` | 10.0 Hz | Control loop rate |
 
+### wall_follower.py (Ch55)
+| Parameter | Value | Purpose |
+|---|---|---|
+| `KP_YAW` | 0.07 | Heading P-gain (face wall normal) |
+| `KP_STANDOFF` | 0.50 | Standoff-distance error → approach speed |
+| `KP_HEAVE` | 0.40 | Depth-hold P-gain |
+| `MAX_SURGE` | 0.20 | Approach/retreat clamp |
+| `MAX_SWAY` | 0.25 | Tangential strafe clamp |
+| `standoff_m` | 1.5 m | Perpendicular distance to hold off the wall (launch param) |
+| `tangent_speed` | 0.15 | Strafe speed along the wall (launch param) |
+| `direction` | +1 | Strafe direction: +1 = starboard, −1 = port (launch param) |
+| `MAX_SURFACE_DIST_M` | 8.0 m | Ignore surface farther than this in XY |
+| `Z_BAND_M` | 1.5 m | Only surface points within ±this of robot depth |
+| `NORMAL_Z_MAX` | 0.7 | |n_z| above this = floor/ceiling, not a wall |
+| `NORMAL_EMA_ALPHA` | 0.3 | EMA smoothing on tracked normal |
+| `CLOUD_STALE_S` | 5.0 s | No normals cloud for this long → SCAN |
+| `EMERGENCY_STOP_DIST` | 0.4 m | Front camera floor; below: forced back-off |
+| `SCAN_YAW` | 0.08 | Rotation speed while no wall in range |
+| `CTRL_HZ` | 10.0 Hz | Control loop rate |
+
 ### path_planner.py
 | Parameter | Value | Purpose |
 |---|---|---|
@@ -77,3 +97,4 @@ Change log → `Progress.md` | Session findings → `Sessions.md`
 |---|---|
 | Ch43 | Frontier definition: occ↔unknown (was free↔unknown). Not yet run in a session. |
 | Ch45 | Stonefish vFOV fix — requires stonefish rebuild + colcon rebuild before it takes effect. |
+| Ch55 | Wall-normal follower — closed-loop kinematic test passes; needs end-to-end Stonefish session. |

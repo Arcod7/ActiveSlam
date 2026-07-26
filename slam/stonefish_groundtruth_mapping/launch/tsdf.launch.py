@@ -7,8 +7,13 @@ Full TSDF mapping stack: Stonefish + TF + point cloud + tsdf_mapper.
          tsdf_mapper (VDBFusion) → /tsdf/surface_cloud          (marching-cubes surface)
                                   → /tsdf/surface_normals        (sampled normals, MarkerArray)
                                   → /tsdf/surface_normals_cloud  (points+normals, PointCloud2 —
-                                                                  input for wall_follower)
+                                                                  input for wall_looking)
                                   → /tsdf/voxels                 (weight/sign-coded MarkerArray)
+
+tsdf_octomap:=true additionally rebuilds the grid into an octomap::OcTree on
+/tsdf/octomap_binary (tsdf_to_octomap) — the octree interface for 3-D frontier
+detection and 3-D A*. Kept off /octomap_binary so RViz's OcTree displays stay
+octomap_server's alone (see mapper_only.launch.py).
 
 Thin composition of pointcloud.launch.py and mapper_only.launch.py
 (mapper:=tsdf) — parallel structure to octomap.launch.py, same core, different
@@ -37,6 +42,39 @@ def generate_launch_description():
         description='Reset+re-integrate this TSDF instance after a big loop closure',
     )
 
+    carve_no_return_arg = DeclareLaunchArgument(
+        'carve_no_return', default_value='false',
+        description='Free the voxels along no-return sonar rays',
+    )
+
+    publish_projected_map_arg = DeclareLaunchArgument(
+        'publish_projected_map', default_value='false',
+        description='Publish a 2-D /projected_map derived from this TSDF grid '
+        'for the frontier planner + A*',
+    )
+    target_depth_m_arg = DeclareLaunchArgument(
+        'target_depth_m', default_value='-1.0',
+        description='Cruise depth (world_ned Z) the /projected_map band centres on',
+    )
+    tsdf_octomap_arg = DeclareLaunchArgument(
+        'tsdf_octomap', default_value='false',
+        description='Rebuild an octomap::OcTree from this TSDF grid and publish '
+        'it on /tsdf/octomap_binary (tsdf_to_octomap)',
+    )
+    voxel_size_arg = DeclareLaunchArgument(
+        'voxel_size', default_value='0.2',
+        description='TSDF cell size in metres; the truncation band follows at 3x',
+    )
+    voxel_min_weight_arg = DeclareLaunchArgument(
+        'voxel_min_weight', default_value='10.0',
+        description='How many times a voxel must be observed to count as a wall',
+    )
+    voxel_min_solid_confidence_arg = DeclareLaunchArgument(
+        'voxel_min_solid_confidence', default_value='0.80',
+        description='How far behind the zero crossing a voxel must sit to count '
+        'as a wall — 0.5 = at the surface, 1.0 = fully saturated',
+    )
+
     pointcloud = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(_LAUNCH_DIR, 'pointcloud.launch.py'))
     )
@@ -46,7 +84,19 @@ def generate_launch_description():
         launch_arguments={
             'mapper': 'tsdf',
             'map_rebuild': LaunchConfiguration('map_rebuild'),
+            'carve_no_return': LaunchConfiguration('carve_no_return'),
+            'publish_projected_map': LaunchConfiguration('publish_projected_map'),
+            'target_depth_m': LaunchConfiguration('target_depth_m'),
+            'tsdf_octomap': LaunchConfiguration('tsdf_octomap'),
+            'voxel_size': LaunchConfiguration('voxel_size'),
+            'voxel_min_weight': LaunchConfiguration('voxel_min_weight'),
+            'voxel_min_solid_confidence': LaunchConfiguration(
+                'voxel_min_solid_confidence'),
         }.items(),
     )
 
-    return LaunchDescription([map_rebuild_arg, pointcloud, tsdf_mapper])
+    return LaunchDescription([map_rebuild_arg, carve_no_return_arg,
+                              publish_projected_map_arg, target_depth_m_arg,
+                              tsdf_octomap_arg, voxel_size_arg,
+                              voxel_min_weight_arg, voxel_min_solid_confidence_arg,
+                              pointcloud, tsdf_mapper])

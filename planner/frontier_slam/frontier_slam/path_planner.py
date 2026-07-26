@@ -22,11 +22,11 @@ import math
 import numpy as np
 from scipy.ndimage import binary_dilation
 
-HARD_INFLATION_M = 0.20   # hard A* wall — must clear actual obstacles
-INFLATION_M      = 0.75   # soft zone — high cost, last-resort passage
-PLAN_INFLATION_M = 1.50   # planning margin — moderate cost, steers paths away
-SOFT_COST        = 8.0    # cost multiplier inside soft zone   (0.20 m … 0.75 m)
-PLAN_COST        = 3.0    # cost multiplier inside planning zone (0.75 m … 1.50 m)
+HARD_INFLATION_M = 1.00   # hard A* wall — must clear actual obstacles
+INFLATION_M      = 1.50   # soft zone — high cost, last-resort passage
+PLAN_INFLATION_M = 3.00   # planning margin — moderate cost, steers paths away
+SOFT_COST        = 8.0    # cost multiplier inside soft zone   (1.00 m … 1.50 m)
+PLAN_COST        = 3.0    # cost multiplier inside planning zone (1.50 m … 3.00 m)
 PAD_CELLS        = 5      # unknown-cell border added around the grid before planning
 
 
@@ -64,11 +64,16 @@ class CostGrid:
     raw:          np.ndarray   # int8, original h×w — for visualisation
 
 
-def build_cost_grid(grid_msg) -> CostGrid:
+def build_cost_grid(grid_msg, hard_m: float = HARD_INFLATION_M,
+                     soft_m: float = INFLATION_M,
+                     plan_m: float = PLAN_INFLATION_M) -> CostGrid:
     """Pad the OccupancyGrid and build the three-zone A* cost grid.
 
     Call once per replan tick.  The returned CostGrid can be passed to
     find_path() and reused for visualisation — no redundant inflation.
+    hard_m/soft_m/plan_m override the module-level zone radii (metres);
+    callers that expose these as ROS parameters (see frontier_extractor.py)
+    pass them through here instead of relying on the constants directly.
     """
     info   = grid_msg.info
     res    = info.resolution
@@ -79,9 +84,9 @@ def build_cost_grid(grid_msg) -> CostGrid:
     ox   = info.origin.position.x - PAD_CELLS * res
     oy   = info.origin.position.y - PAD_CELLS * res
 
-    hard_r = max(1, int(round(HARD_INFLATION_M / res)))
-    soft_r = max(1, int(round(INFLATION_M      / res)))
-    plan_r = max(1, int(round(PLAN_INFLATION_M / res)))
+    hard_r = max(1, int(round(hard_m / res)))
+    soft_r = max(1, int(round(soft_m / res)))
+    plan_r = max(1, int(round(plan_m / res)))
     hard_blocked = inflate_occupied(grid, hard_r) == 100
     soft_zone    = inflate_occupied(grid, soft_r) == 100
     plan_zone    = inflate_occupied(grid, plan_r) == 100

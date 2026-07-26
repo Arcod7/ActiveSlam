@@ -8,9 +8,12 @@ On each tick it:
   3. Publishes the goal on /frontier_slam/goal and the A*-planned path on
      /frontier_slam/path.  Visualisation is delegated to FrontierVisualizer.
 
-The goal's Z is set to the robot's current Z — but only for marker placement.
-The waypoint controller maintains its own fixed depth setpoint and ignores
-goal.point.z.
+The goal's Z is the cruise depth (`depth_setpoint` launch arg, locked from
+the first odom reading if unset) — never the robot's own live Z (Change 12:
+that was a feedback loop that let the robot sink undetected). waypoint_
+controller drives depth off whichever goal is active, this one included, so
+that value has to be a real, externally-anchored target, not a moving copy
+of the robot's own position.
 
 /frontier_slam/suspend (std_msgs/Bool) lets an external planner (see
 revisit_planner.py) take over goal publication temporarily: while suspended,
@@ -38,10 +41,14 @@ from std_msgs.msg import Bool, String
 from frontier_slam.control_utils import yaw_from_quat
 from frontier_slam.frontier_detection import (
     find_frontier_clusters,
+    frontier_cell_points,
     standoff_point_from_tsdf_surface,
 )
 from frontier_slam.goal_manager import GoalManager
-from frontier_slam.path_planner import CostGrid, build_cost_grid, find_path
+from frontier_slam.path_planner import (
+    CostGrid, HARD_INFLATION_M, INFLATION_M, PLAN_INFLATION_M,
+    build_cost_grid, find_path,
+)
 from frontier_slam.session_log import open_session_log
 from frontier_slam.visualizer import FrontierVisualizer
 
@@ -70,13 +77,32 @@ class FrontierExtractor(Node):
         super().__init__('frontier_extractor')
 
         self.declare_parameter('odom_topic', '/StoneFish/Odometry')
+        self.declare_parameter('depth_setpoint', -1.0)
         self.declare_parameter('motion_status_topic', '/motion/status')
         self.declare_parameter('tsdf_solid_points_topic', '/tsdf/occupied_voxels')
         self.declare_parameter('tsdf_solid_containment_radius_m', 0.20)
         self.declare_parameter('tsdf_surface_normals_topic', '/tsdf/surface_normals_cloud')
         self.declare_parameter('tsdf_frontier_standoff_m', 1.0)
         self.declare_parameter('tsdf_surface_normal_max_distance_m', 1.0)
+        # Display only: the Z range one /projected_map cell collapses, drawn as
+        # the band_columns marker. Must match the mapper that publishes the map
+        # (tsdf_mapper's projected_map_band_m, or octomap's occupancy_min/max_z).
+        self.declare_parameter('projected_map_band_m', 3.0)
+        self.declare_parameter('hard_inflation_m', HARD_INFLATION_M)
+        self.declare_parameter('inflation_m', INFLATION_M)
+        self.declare_parameter('plan_inflation_m', PLAN_INFLATION_M)
         odom_topic = str(self.get_parameter('odom_topic').value)
+        depth_arg = float(self.get_parameter('depth_setpoint').value)
+        # Same value, same launch arg, as waypoint_controller's own
+        # depth_setpoint (frontier_slam.launch.py passes both from a single
+        # `depth` argument) — the goal Z this node publishes for its own
+        # picks, so waypoint_controller's depth control (goal.point.z) has a
+        # real, non-self-referential target to drive to instead of the
+        # robot's own live Z (Change 12: that was a feedback loop that let
+        # the robot sink undetected). -1 (unset) locks to the first odom
+        # reading here, independently of waypoint_controller's own lock —
+        # both start from the same odom stream, so they converge regardless.
+        self._cruise_z: float | None = None if depth_arg < 0 else depth_arg
         motion_status_topic = str(self.get_parameter('motion_status_topic').value)
         tsdf_solid_points_topic = str(
             self.get_parameter('tsdf_solid_points_topic').value)
@@ -88,6 +114,11 @@ class FrontierExtractor(Node):
             self.get_parameter('tsdf_frontier_standoff_m').value))
         self._tsdf_surface_normal_max_distance = max(0.0, float(
             self.get_parameter('tsdf_surface_normal_max_distance_m').value))
+        self._projected_map_band = abs(float(
+            self.get_parameter('projected_map_band_m').value))
+        self._hard_inflation_m = float(self.get_parameter('hard_inflation_m').value)
+        self._inflation_m = float(self.get_parameter('inflation_m').value)
+        self._plan_inflation_m = float(self.get_parameter('plan_inflation_m').value)
 
         self._map: OccupancyGrid | None = None
         self._robot_pos: np.ndarray | None = None
@@ -152,6 +183,8 @@ class FrontierExtractor(Node):
         self._robot_yaw   = yaw_from_quat(msg.pose.pose.orientation)
         v = msg.twist.twist.linear
         self._robot_speed = math.hypot(v.x, v.y)
+        if self._cruise_z is None:   # first odom, no depth_setpoint launch arg
+            self._cruise_z = float(p.z)
 
     def _tsdf_solid_cb(self, msg: PointCloud2) -> None:
         points = _parse_xyz_cloud(msg)
@@ -267,8 +300,11 @@ class FrontierExtractor(Node):
         # Put a TSDF frontier goal in free space, offset along the outward
         # surface normal.  The nearest normal is queried at the vehicle depth;
         # vertical surfaces give no horizontal offset and keep the old target.
+        raw_centroids = [(c.wx, c.wy) for c in clusters]
         for c in clusters:
             c.wx, c.wy = self._tsdf_surface_standoff(np.array([c.wx, c.wy]))
+
+        self._publish_frontier_debug(clusters, raw_centroids)
 
         # Tag each cluster with its distance from the robot.
         for c in clusters:
@@ -347,12 +383,26 @@ class FrontierExtractor(Node):
 
     # ------------------------------------------------------------------
     # Publishing
+    def _publish_frontier_debug(self, clusters: list, raw_centroids: list) -> None:
+        """Show what a frontier was derived from, before selection filters it."""
+        frontier_xy, border_xy = frontier_cell_points(self._map)
+        pairs = [(raw, (c.wx, c.wy))
+                 for raw, c in zip(raw_centroids, clusters)
+                 if math.hypot(c.wx - raw[0], c.wy - raw[1]) > 1e-3]
+        self._viz.publish_frontier_debug(
+            frontier_xy, border_xy, pairs, self._robot_pos,
+            float(self._map.info.resolution), self._projected_map_band)
+
     def _publish_goal(self, gx: float, gy: float, clusters: list) -> None:
         self._current_goal_xy = np.array([gx, gy])
+        # _cruise_z, not self._robot_pos[2]: waypoint_controller drives depth
+        # off this goal's Z now, and the robot's own live Z is exactly the
+        # self-referential value Change 12 stopped using for that.
+        gz = self._cruise_z if self._cruise_z is not None else float(self._robot_pos[2])
         goal = PointStamped()
         goal.header.stamp    = self.get_clock().now().to_msg()
         goal.header.frame_id = 'world_ned'
-        goal.point.x, goal.point.y, goal.point.z = gx, gy, float(self._robot_pos[2])
+        goal.point.x, goal.point.y, goal.point.z = gx, gy, gz
         self._goal_pub.publish(goal)
         self._viz.publish_markers(clusters, gx, gy, self._robot_pos)
 
@@ -360,7 +410,9 @@ class FrontierExtractor(Node):
         if self._map is None or self._robot_pos is None:
             return
 
-        self._cg = build_cost_grid(self._map)
+        self._cg = build_cost_grid(
+            self._map, hard_m=self._hard_inflation_m,
+            soft_m=self._inflation_m, plan_m=self._plan_inflation_m)
 
         path = Path()
         path.header.stamp    = self.get_clock().now().to_msg()
@@ -407,7 +459,7 @@ class FrontierExtractor(Node):
                     )
         self._path_pub.publish(path)
         self._viz.publish_inflated_map(self._cg, self._map)
-        self._viz.publish_debug_image(
+        self._viz.publish_planning_dashboard(
             self._cg, self._map,
             self._robot_pos, self._robot_yaw, self._robot_speed,
             self._current_path, self._current_goal_xy, self._last_stuck_pct,

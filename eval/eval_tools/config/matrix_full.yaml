@@ -1,5 +1,5 @@
-# Full evaluation matrix: 8 configs x 5 seeds = 40 runs, ~8 min each
-# (480s sim + ~50s launch/teardown/plot + 15s settle) -> ~6h total.
+# Full evaluation matrix: 7 configs x 5 seeds = 35 runs, ~8 min each
+# (480s sim + ~50s launch/teardown/plot + 15s settle) -> ~5h total.
 #
 #   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_full.yaml
 batch_name: full
@@ -8,6 +8,8 @@ settle_s: 15
 seeds: [101, 102, 103, 104, 105]
 
 common_args:
+  # Motion gate is fail-closed; headless runs never arm it otherwise.
+  safety_start_enabled: 'true'
   slam: slam
   mode: frontier
   rviz: 'false'
@@ -35,12 +37,6 @@ runs:
   # pose_graph.py) -- itself a benchmark axis, off by default elsewhere.
   - name: tsdf_rebuild
     args: {mapper: tsdf, map_rebuild: 'true'}
-
-  # Next-pose-choice axis: frontier (baseline's mode) vs wall-following.
-  # wallfollow consumes /tsdf/surface_normals_cloud, so it requires
-  # mapper:=tsdf (validated by run_matrix.py at load time).
-  - name: wallfollow
-    args: {mapper: tsdf, motion: wallfollow}
 
   # Noise-profile sweep: ideal (near-perfect sensors) and degraded (turbid
   # water / magnetic interference / bad bottom-lock) bracket the baseline's

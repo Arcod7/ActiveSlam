@@ -33,6 +33,14 @@ project (~250 MB checkout) that isn't part of this repo.
    parsed materials anyway (Stonefish takes them from the scenario XML), so the
    parse now uses `MaterialLibrary::Ignore()`. **Required** — without it the
    simulator aborts while parsing the scenario.
+5. `0005-feat-chase-cam-trackball-can-follow-entity-orientati.patch` — adds an
+   opt-in `followOrientation` argument to `OpenGLTrackball::GlueToMoving()`. The
+   glued GUI camera previously tracked only the entity's position, keeping a
+   fixed world orientation however the vehicle pitched/rolled/yawed; the flag
+   layers the entity's per-frame orientation delta onto the current view, giving
+   a third-person chase camera that turns with the robot. Zoom (orbit radius,
+   mouse scroll) and manual orbiting still work. **Required** —
+   `stonefish_ros2` calls the two-argument overload.
 
 ## Building
 

@@ -78,7 +78,9 @@ The current extractor works on the 2-D projected OctoMap (`/projected_map`).
 This collapses the Z dimension: the robot only seeks frontiers in the XY plane
 and maintains its current depth.
 
-True 3-D frontier detection would subscribe to `/octomap_binary`, deserialize
+True 3-D frontier detection would subscribe to the octree the active backend
+publishes (`/octomap_binary` under `mapper:=octomap`, `/tsdf/octomap_binary`
+under `mapper:=tsdf`), deserialize
 with the Python `octomap` bindings, and find occupied voxels adjacent to unknown
 voxels in all 6 directions.  This enables:
 - Vertical exploration (above/below the structure)

@@ -131,6 +131,11 @@ class DeadReckoningNode(Node):
         T[2, 3] = self.latest_depth
 
         odom_msg = matrix_to_odom(T, msg.header.stamp, self.world_frame)
+        # Yaw slot only. The filter's posterior is the sole uncertainty here that
+        # varies at runtime, and the pose graph priors this fused yaw -- so it has
+        # to be told how good the fusion actually was, not the input sensor's spec.
+        if np.isfinite(self._yaw_filter.variance):
+            odom_msg.pose.covariance[35] = float(self._yaw_filter.variance)
         self.pub.publish(odom_msg)
 
 

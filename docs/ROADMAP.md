@@ -34,6 +34,48 @@ Everything below is ordered to serve #1 first. The current code optimises #2 und
 `docs/SLAM_PLAN.md` for the design). `slam:=none` (default) keeps the
 Week-0 baseline above byte-for-byte. Detail under Weeks 1–2 below.
 
+**Update, 2026-07-22.** Weeks 1–3 have landed: TSDF mapping, the
+uncertainty-triggered revisit planner, map rebuild after large closures, the
+batch orchestrator, and six noise profiles are all in and benchmarked
+(`Progress.md` Phases 1–28). Two things since have changed how runs behave and
+what the remaining schedule looks like:
+
+- **A fail-closed motion gate** now sits between every executor and the
+  thrusters, with an ArduSub MAVLink adapter behind it (Phase 27). This is the
+  opportunistic real-robot path; bench acceptance passed, no physical vehicle
+  yet.
+- **Scanning sweeps instead of spinning** (Phase 28), which is tether-safe, and
+  the sim's thruster calibration was corrected by ~11x. Any velocity or timing
+  figure recorded before 2026-07-21 is not comparable with later runs.
+
+**Remaining before the 2026-08-01 code freeze** is organised as a **4-day
+parallel push (2026-07-23 → 26)** across seven file-disjoint tracks — full
+spec in `docs/plans/plan.md`, one file per track in `docs/plans/tracks/`. In
+priority order:
+
+1. **Spine (priority #1):** re-run the benchmark matrix on the corrected
+   baseline — every number the dissertation quotes must come from after the
+   2026-07-21 calibration fix. Includes the loop-closure A/B (`matrix_lc_ab`)
+   and a fresh-machine reproducibility install.
+2. **Reference-trajectory mission** (Track 1) — follow a known loop / go to a
+   point, break off to close a loop when uncertain, resume the path. Replaces
+   the parked shipwreck demo as the presentation centrepiece.
+3. **Demo scene** (Track 4) — TUI scene selection with per-object xyz / scale /
+   roll-pitch-yaw at launch (not the 289 MB wreck, which stalls Stonefish in
+   the sonar's view; not a live editor).
+4. **Control-centre TUI + RViz** (Tracks 2, 3) — live metrics + robot-state
+   dashboard, camera-follow, param exposure.
+5. **Three algorithmic features in parallel** (Tracks 5, 6): 3-D frontier on
+   the TSDF → info-gain exploration of low-information regions; and FPFH submap
+   saliency for revisit target selection (now unblocked on aarch64).
+6. **Validation** (Track 7) — rosbag vs noise-model, a localisation-uncertainty
+   measure beyond D-optimality, an architecture-modularity review.
+
+Out of this window: `motion:=walllooking` stays work-in-progress
+(loop-closure-inversion finding, `docs/FUTURE_WORK.md`) and out of the evaluated
+matrix; `motion:=walloriented` is supported. The `wall_looking` motion-only
+reshape and the sonar/camera fusion build are deferred past the freeze.
+
 ---
 
 ## Week 1 — Make "lost" measurable + unify the cost layer
@@ -57,7 +99,7 @@ the band-aids caused by using Euclidean distance as if it were travel cost.
       path-length score, (b) Euclidean stuck metric → remaining-path-length progress,
       (c) A*-fail reachability heuristic (unreachable = ∞ cost), (d) `nearest_free` scan.
       Lets you delete the Ch39 displacement-reset and the A*-fail-count blacklist.
-- [x] **Wall-normal + standoff targeting** (Ch55, `wall_follower.py`) — closed-loop kinematic
+- [x] **Wall-normal + standoff targeting** (Ch55, `wall_looking.py`) — closed-loop kinematic
       test passes; still needs an end-to-end Stonefish session per `Sessions.md`.
 
 Done when: a session reports coverage %, ATE, and map error; selection/stuck use path length;
@@ -100,29 +142,34 @@ comparison on one fixed path is still open.
 
 Goal: choose actions using uncertainty, not just information gain.
 
-- [ ] **Propagate pose covariance** along candidate paths; reduce to a scalar (D-optimality).
-- [ ] **Utility = info-gain(frontier) traded against expected uncertainty.** Revisit
-      candidates = previously-seen distinctive areas.
-- [ ] **Submap saliency v0**: FPFH → k-means dictionary → idf rarity (GloSSy-lite). Start
-      with plain geometric distinctiveness if the full pipeline runs long.
-- [ ] Decision rule: explore while uncertainty is bounded; trigger a revisit when the
-      propagated covariance crosses a threshold.
+- [x] **Scalar uncertainty (D-optimality)** published live from the pose graph and consumed
+      by the planner. Per-candidate covariance *propagation* was cut — the planner reacts to
+      the live value instead (Phase 20).
+- [x] **Utility trade-off + decision rule**: `revisit:=true` breaks off exploration when
+      D-optimality crosses a threshold, drives to a previously-seen target, and resumes.
+- [~] **Submap saliency v0** (FPFH → k-means → idf rarity): **now in scope** for the
+      4-day push (Track 6). Was thought platform-blocked; it is not — the
+      `external/open3d` submodule builds on aarch64 and `compute_fpfh_feature` runs
+      once `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2097152` is set. Target
+      scoring still uses keyframe density until Track 6 lands.
 
 Done when: the robot autonomously breaks off exploration to close a loop and the logged
-uncertainty drops afterward.
+uncertainty drops afterward. — **Met** (Phase 20): forced-trigger run completes the full
+suspend → drive → closure → dopt-drop → resume cycle. The natural-trigger A/B is a mechanism
+demo, not an ATE-improvement claim (n=2, mixed).
 
 ## Week 4 — 3D + benchmark + consolidation
 
 Goal: one dimensional extension + the comparison the thesis needs.
 
-- [ ] **Pick ONE** (time-boxed): 3-D frontier detection on octomap voxels, **or** TSDF map
-      (the poster's map-representation axis; gives surface normals for free → helps Week 1
-      wall-normal targeting and local nav).
-- [ ] **Benchmark matrix**: open-loop vs frontier-coverage vs saliency-active, across
-      turbidity / current / obstacle density. Report the 4 metrics.
-- [ ] Buffer for slippage + poster figures.
+- [x] **Picked TSDF** (`mapper:=tsdf`, VDBFusion): surface reconstruction, normals, solid-voxel
+      goal safety, and rebuild-on-large-closure. OctoMap stays as the planning map source.
+- [~] **Benchmark matrix**: the orchestrator, six noise profiles and the metric set are in and
+      have been run; the numbers now need re-running on the post-calibration baseline.
+- [ ] Poster/presentation figures + demo scene (see the code-freeze list above).
 
-Done when: a table compares the three policies on drift / coverage / time / uncertainty.
+Done when: a table compares the policies on drift / coverage / time / uncertainty, from runs
+made after the 2026-07-21 thruster calibration fix.
 
 ---
 

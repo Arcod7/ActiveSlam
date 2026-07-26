@@ -2,11 +2,14 @@
 
 Run: python3 -m pytest planner/frontier_slam/test/ -q
 """
+import math
+
 import numpy as np
 import pytest
 
 from frontier_slam.revisit_planner import (
-    RevisitConfig, RevisitState, RevisitStateMachine, select_revisit_target,
+    RevisitConfig, RevisitState, RevisitStateMachine, dopt_allowable,
+    select_revisit_target, uncertainty_ratio,
 )
 
 
@@ -67,8 +70,15 @@ def test_select_target_recent_keyframes_never_picked():
 # RevisitStateMachine
 # ----------------------------------------------------------------------
 
+# Equal per-axis sigmas make D(Sigma_allow) exactly sigma^2, so this config
+# trips at dopt 0.02 and resumes at 0.01 — the thresholds these tests were
+# written against, now expressed as an allowable covariance.
+_SIGMA_ALLOW = math.sqrt(0.02)
+
+
 def _cfg(**overrides):
-    base = dict(dopt_trigger=0.02, dopt_resume=0.01, min_keyframes=15,
+    base = dict(sigma_allow_xy_m=_SIGMA_ALLOW, sigma_allow_yaw_rad=_SIGMA_ALLOW,
+                ratio_trigger=1.0, ratio_resume=0.5, min_keyframes=15,
                 min_index_gap=10, candidate_radius_m=5.0, min_target_dist_m=3.0,
                 w_density=1.0, w_travel=0.2, revisit_timeout_s=120.0,
                 arrival_radius_m=2.5, arrival_dwell_s=30.0, cooldown_s=60.0)
@@ -80,7 +90,7 @@ def _kf_for_trigger(n=20):
     return _line_keyframes(n, spacing=1.0)
 
 
-def test_no_trigger_below_dopt_threshold():
+def test_no_trigger_below_trigger_ratio():
     sm = RevisitStateMachine(_cfg())
     kf = _kf_for_trigger()
     event = sm.tick(now=0.0, dopt=0.01, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
@@ -136,7 +146,7 @@ def test_exit_on_loop_closure_success():
     assert sm.suspended is False
 
 
-def test_exit_on_dopt_resume():
+def test_exit_on_resume_ratio():
     sm = RevisitStateMachine(_cfg())
     kf = _kf_for_trigger()
     robot_xy = np.array([19.0, 0.0])
@@ -224,3 +234,48 @@ def test_suspended_flag_per_state(state, expected_suspended):
     sm = RevisitStateMachine(_cfg())
     sm.state = state
     assert sm.suspended is expected_suspended
+
+
+# ----------------------------------------------------------------------
+# Uncertainty ratio (Suresh et al. 2020 eq. 5)
+# ----------------------------------------------------------------------
+
+def test_dopt_allowable_is_sigma_squared_for_equal_axes():
+    # D-opt is the geometric mean of the eigenvalues, so equal sigmas collapse
+    # to sigma^2 — the property _cfg relies on to state thresholds directly.
+    assert dopt_allowable(0.2, 0.2) == pytest.approx(0.04)
+
+
+def test_dopt_allowable_weights_all_three_axes():
+    # x and y both count, so the yaw term cannot dominate on its own.
+    assert dopt_allowable(0.1, 0.4) == pytest.approx((0.01 * 0.01 * 0.16) ** (1 / 3))
+
+
+def test_uncertainty_ratio_is_one_at_the_allowable_covariance():
+    allow = dopt_allowable(0.1, 0.1)
+    assert uncertainty_ratio(allow, allow) == pytest.approx(1.0)
+
+
+def test_uncertainty_ratio_none_without_a_reading():
+    assert uncertainty_ratio(None, 0.02) is None
+
+
+def test_uncertainty_ratio_none_for_degenerate_allowance():
+    assert uncertainty_ratio(0.05, 0.0) is None
+
+
+def test_state_machine_ratio_matches_its_config():
+    sm = RevisitStateMachine(_cfg())
+    assert sm.dopt_allow() == pytest.approx(0.02)
+    assert sm.ratio(0.05) == pytest.approx(2.5)
+
+
+def test_trigger_scales_with_the_allowable_covariance():
+    # The same D-opt reading is tolerable under a loose allowance and not
+    # under a tight one — the point of expressing the threshold as a ratio.
+    kf = _kf_for_trigger()
+    robot_xy = np.array([19.0, 0.0])
+    loose = RevisitStateMachine(_cfg(sigma_allow_xy_m=0.5, sigma_allow_yaw_rad=0.5))
+    assert loose.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=robot_xy) is None
+    tight = RevisitStateMachine(_cfg(sigma_allow_xy_m=0.05, sigma_allow_yaw_rad=0.05))
+    assert tight.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=robot_xy) == 'TRIGGER'

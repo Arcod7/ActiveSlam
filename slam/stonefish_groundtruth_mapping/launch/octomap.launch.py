@@ -18,8 +18,9 @@ Verify with:
 """
 import os
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from ament_index_python.packages import get_package_share_directory
 
 _LAUNCH_DIR = os.path.join(
@@ -27,13 +28,29 @@ _LAUNCH_DIR = os.path.join(
 
 
 def generate_launch_description():
+    depth_arg = DeclareLaunchArgument(
+        'depth', default_value='-1.0',
+        description=(
+            'Target depth in NED metres, used to centre the /projected_map Z-band. '
+            '-1 = auto-lock (unknown at launch time, so the map stays full-column).'),
+    )
+
+    voxel_size_arg = DeclareLaunchArgument(
+        'voxel_size', default_value='0.2',
+        description='octomap_server resolution in metres',
+    )
+
     pointcloud = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(_LAUNCH_DIR, 'pointcloud.launch.py'))
     )
 
     octomap = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(_LAUNCH_DIR, 'mapper_only.launch.py')),
-        launch_arguments={'mapper': 'octomap'}.items(),
+        launch_arguments={
+            'mapper': 'octomap',
+            'depth': LaunchConfiguration('depth'),
+            'voxel_size': LaunchConfiguration('voxel_size'),
+        }.items(),
     )
 
-    return LaunchDescription([pointcloud, octomap])
+    return LaunchDescription([depth_arg, voxel_size_arg, pointcloud, octomap])

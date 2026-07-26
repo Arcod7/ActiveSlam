@@ -60,6 +60,36 @@ def standoff_point_from_tsdf_surface(surface_xyz: np.ndarray,
     return surface[:2] + max(0.0, standoff_m) * horizontal / length
 
 
+def _frontier_masks(grid_msg) -> tuple:
+    """Return (frontier, unknown) boolean masks, row=y/col=x."""
+    w, h = grid_msg.info.width, grid_msg.info.height
+    grid = np.array(grid_msg.data, dtype=np.int8).reshape(h, w)
+    unknown = grid < 0
+    return (grid == 100) & binary_dilation(unknown), unknown
+
+
+def _mask_to_world(mask: np.ndarray, info) -> np.ndarray:
+    """Return the world XY of every set cell, in the cluster centroid convention."""
+    rows, cols = np.where(mask)
+    return np.column_stack((
+        info.origin.position.x + cols * info.resolution,
+        info.origin.position.y + rows * info.resolution,
+    ))
+
+
+def frontier_cell_points(grid_msg) -> tuple[np.ndarray, np.ndarray]:
+    """Return (frontier_xy, bordering_unknown_xy) for display.
+
+    The same cells find_frontier_clusters clusters, before clustering and
+    before any inflation: the raw occupied <-> unknown boundary the planner
+    saw, which the inflation overlay covers up.
+    """
+    frontier, unknown = _frontier_masks(grid_msg)
+    border = unknown & binary_dilation(frontier)
+    return (_mask_to_world(frontier, grid_msg.info),
+            _mask_to_world(border, grid_msg.info))
+
+
 def find_frontier_clusters(grid_msg, min_cluster_cells: int = 5) -> list:
     """Return clusters of frontier cells in the OccupancyGrid.
 
@@ -71,10 +101,7 @@ def find_frontier_clusters(grid_msg, min_cluster_cells: int = 5) -> list:
     oy = grid_msg.info.origin.position.y
     w, h = grid_msg.info.width, grid_msg.info.height
 
-    grid = np.array(grid_msg.data, dtype=np.int8).reshape(h, w)
-    occupied = grid == 100
-    unknown = grid < 0
-    frontier = occupied & binary_dilation(unknown)
+    frontier, unknown = _frontier_masks(grid_msg)
 
     labeled, n = label(frontier)
     if n == 0:

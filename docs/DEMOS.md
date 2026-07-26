@@ -6,9 +6,11 @@ ROS2 workspace after `colcon build --symlink-install` and `source install/setup.
 Noise profiles: `ideal` (near-perfect everything), `sonar_only` (realistic sonar,
 near-ideal nav sensors), `odom_pos_only` (realistic DVL/pressure position,
 exact Stonefish orientation and sonar), `odom_only` (ground-truth sonar,
-realistic nav sensors), `realistic` (datasheet values everywhere), `degraded`
-(turbid water / magnetic interference). Add `noise_seed:=42` to any SLAM run
-for reproducibility.
+realistic nav sensors), `realistic` (datasheet values everywhere),
+`realistic_no_reverb` (`realistic` without the near-field volume reverberation,
+so no spray around the vehicle while close geometry is still reported),
+`degraded` (turbid water / magnetic interference). Add `noise_seed:=42` to any
+SLAM run for reproducibility.
 
 ## 1. Base demo — teleop + OctoMap, ground-truth pose
 
@@ -69,7 +71,7 @@ the planner if no mapped wall can make the requested route progress. Drop
 `motion:=walllooking` from any later command to compare against direct motion.
 
 `wall_standoff:=1.5` is the desired wall distance in metres. The live node
-parameter is also adjustable during a run: `ros2 param set /wall_follower
+parameter is also adjustable during a run: `ros2 param set /wall_looking
 standoff_m 2.0`. When a nearby goal cannot be reached along the current wall,
 wall-follow performs an odometry-confirmed 180° sweep to inspect and select
 another wall; set its distance gate at launch with
@@ -169,9 +171,15 @@ ros2 launch bringup demo.launch.py slam:=slam mode:=frontier mapper:=tsdf \
 `revisit:=true` is the default for `slam:=slam mode:=frontier`. It suspends
 exploration, selects a previously mapped keyframe likely to form a loop, and
 uses the normal A* path planner to return to it when pose uncertainty
-(D-optimality) exceeds the threshold. It resumes only after a loop closure,
+exceeds what the mission allows. The trigger is the ratio
+`U_r = D(Σ)/D(Σ_allow)` of Suresh et al. (2020) eq. 5, so the threshold is
+stated as an allowable covariance in metres and radians
+(`sigma_allow_xy_m`, `sigma_allow_yaw_rad`) rather than as a bare determinant.
+`D(Σ)` is scored over the drifting DoF only — x, y and heading — since depth,
+pitch and roll are directly observed. It resumes only after a loop closure,
 reduced uncertainty, timeout, or sterile arrival; use `revisit:=false` to
-disable it. Force it early: `ros2 param set /revisit_planner dopt_trigger 0.002`.
+disable it. Force it early by tightening the allowance:
+`ros2 param set /revisit_planner sigma_allow_xy_m 0.02`.
 
 ## 10. Belief-map rebuild after large closures
 
@@ -208,7 +216,7 @@ ros2 launch bringup demo.launch.py slam:=slam mode:=frontier mapper:=tsdf \
 | `wall_normal_offset_deg` | `0.0` | `motion:=walllooking`; turn wall-derived look heading toward path |
 | `wall_path_heading_weight` | `0.35` | `motion:=walllooking`; look blend: 0=wall-derived, 1=path-derived |
 | `slam` | `none`, `slam` | |
-| `noise_profile` | `realistic`, `ideal`, `sonar_only`, `odom_pos_only`, `odom_only`, `degraded` | `slam:=slam` |
+| `noise_profile` | `realistic`, `realistic_no_reverb`, `ideal`, `sonar_only`, `odom_pos_only`, `odom_only`, `degraded` | `slam:=slam` |
 | `loop_closure` | `true`, `false` | `slam:=slam` |
 | `noise_seed` | `-1` (profile default), any int | `slam:=slam` |
 | `scenario` | `none`, `drift_return` | `mode:=frontier` |

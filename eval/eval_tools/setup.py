@@ -20,12 +20,12 @@ setup(
     maintainer_email='ave4000@hw.ac.uk',
     description='Benchmark node + TUM writer + offline plotting',
     license='MIT',
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'benchmark    = eval_tools.benchmark:main',
             'plot_results = eval_tools.plot_results:main',
             'map_metrics  = eval_tools.map_metrics:main',
+            'map_saver    = eval_tools.map_saver:main',
         ],
     },
 )

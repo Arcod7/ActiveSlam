@@ -1,0 +1,101 @@
+From c753d06d04ef2027c13251e50c7c7f1eb057ac0a Mon Sep 17 00:00:00 2001
+From: Arcod7 <antoine.esman@epitech.eu>
+Date: Sat, 25 Jul 2026 02:37:03 +0100
+Subject: [PATCH] feat: chase-cam trackball can follow entity orientation
+
+GlueToMoving() previously only tracked a glued entity's position, so
+the free-look GUI camera kept a fixed world orientation regardless of
+how the vehicle pitched/rolled/yawed. Add an opt-in followOrientation
+flag that layers the entity's per-frame orientation delta onto the
+existing view in UpdateCenterPos(), giving a proper chase-cam feel
+without touching zoom (orbit radius / mouse scroll stays untouched)
+and without hardcoding the entity's local forward/up axes.
+---
+ Library/include/graphics/OpenGLTrackball.h | 10 +++++++--
+ Library/src/graphics/OpenGLTrackball.cpp   | 24 ++++++++++++++++++++--
+ 2 files changed, 30 insertions(+), 4 deletions(-)
+
+diff --git a/Library/include/graphics/OpenGLTrackball.h b/Library/include/graphics/OpenGLTrackball.h
+index ac7fc37..77d2508 100644
+--- a/Library/include/graphics/OpenGLTrackball.h
++++ b/Library/include/graphics/OpenGLTrackball.h
+@@ -70,8 +70,11 @@ namespace sf
+         //! A method to glue the trackball to a moving body.
+         /*!
+          \param ent a pointer to a moving body
++         \param followOrientation if true, the view also turns as the body rotates,
++                on top of any manual mouse orbiting (chase-cam behaviour); if false
++                (default) only the orbit centre follows, as before
+          */
+-        void GlueToMoving(MovingEntity* ent);
++        void GlueToMoving(MovingEntity* ent, bool followOrientation = false);
+         
+         //! A method saving the new centre for update.
+         void UpdateCenterPos();
+@@ -131,7 +134,10 @@ namespace sf
+         GLfloat calculateZ(GLfloat x, GLfloat y);
+         
+         MovingEntity* holdingEntity;
+-        
++        bool followEntityOrientation;
++        bool hasLastEntityRotation;
++        glm::quat lastEntityRotation;
++
+         glm::vec3 tempCenter;
+         glm::mat4 trackballTransform;
+         glm::quat rotation;
+diff --git a/Library/src/graphics/OpenGLTrackball.cpp b/Library/src/graphics/OpenGLTrackball.cpp
+index fcd5a58..a56db6e 100644
+--- a/Library/src/graphics/OpenGLTrackball.cpp
++++ b/Library/src/graphics/OpenGLTrackball.cpp
+@@ -51,6 +51,8 @@ OpenGLTrackball::OpenGLTrackball(glm::vec3 centerPosition, GLfloat orbitRadius,
+     transMode = false;
+     continuous = true;
+     holdingEntity = nullptr;
++    followEntityOrientation = false;
++    hasLastEntityRotation = false;
+ 
+     outlineShader[0] = new GLSLShader("outline.frag");
+     outlineShader[0]->AddUniform("color", ParameterType::VEC4);
+@@ -102,8 +104,24 @@ void OpenGLTrackball::UpdateCenterPos()
+ {
+     if(holdingEntity != nullptr)
+     {
+-        Vector3 org = holdingEntity->getOTransform().getOrigin();
++        Transform trans = holdingEntity->getOTransform();
++        Vector3 org = trans.getOrigin();
+         tempCenter = glm::vec3((GLfloat)org.x(), (GLfloat)org.y(), (GLfloat)org.z());
++
++        if(followEntityOrientation)
++        {
++            Quaternion q = trans.getRotation();
++            glm::quat entityRotation((GLfloat)q.w(), (GLfloat)q.x(), (GLfloat)q.y(), (GLfloat)q.z());
++
++            //Apply only the per-frame orientation delta, layered on the existing view, so we don't need to know the entity's local forward/up axes.
++            if(hasLastEntityRotation)
++            {
++                glm::quat delta = entityRotation * glm::inverse(lastEntityRotation);
++                rotation = rotation * glm::inverse(delta);
++            }
++            lastEntityRotation = entityRotation;
++            hasLastEntityRotation = true;
++        }
+     }
+ }
+ 
+@@ -189,9 +207,11 @@ void OpenGLTrackball::MoveCenter(glm::vec3 step)
+     center += step;
+ }
+ 
+-void OpenGLTrackball::GlueToMoving(MovingEntity* ent)
++void OpenGLTrackball::GlueToMoving(MovingEntity* ent, bool followOrientation)
+ {
+     holdingEntity = ent;
++    followEntityOrientation = followOrientation;
++    hasLastEntityRotation = false;
+ 
+     //Clear ocean quadtree to avoid holes in the ocean rendering because of the sudden jump of camera origin
+     Ocean* ocean = ((GraphicalSimulationApp*)SimulationApp::getApp())->getSimulationManager()->getOcean();
+-- 
+2.55.0
+

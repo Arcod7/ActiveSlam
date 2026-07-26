@@ -1,4 +1,4 @@
-"""RViz and debug-image publishers for the frontier exploration system.
+"""RViz and planning-dashboard-image publishers for the frontier exploration system.
 
 All rendering state is derived from parameters — the class only owns
 the three ROS publishers it creates on construction.
@@ -20,11 +20,11 @@ from frontier_slam.path_planner import CostGrid, PAD_CELLS
 #   Path     set on the Path display in frontier.rviz   |  Background dark (kept)
 C_FRONTIER = (0.000, 0.659, 0.757)   # teal-cyan
 C_GOAL     = (0.961, 0.761, 0.157)   # amber
-C_OCCUPIED = (16,  65,  158)         # blue   (debug-image, 0-255)
+C_OCCUPIED = (16,  65,  158)         # blue   (planning dashboard, 0-255)
 C_FREE     = (245, 245, 245)         # near-white
 C_UNKNOWN  = (208, 217, 238)         # light blue
 C_PATH     = (38,  174, 96)          # green
-C_GOAL255  = (245, 194, 40)          # amber  (debug-image, 0-255)
+C_GOAL255  = (245, 194, 40)          # amber  (planning dashboard, 0-255)
 
 
 class FrontierVisualizer:
@@ -32,7 +32,10 @@ class FrontierVisualizer:
         self._node = node
         self._viz_pub          = node.create_publisher(MarkerArray,   '/frontier_slam/frontiers',    1)
         self._inflated_map_pub = node.create_publisher(OccupancyGrid, '/frontier_slam/inflated_map', 1)
-        self._debug_img_pub    = node.create_publisher(Image,         '/frontier_slam/debug_image',  1)
+        self._dashboard_img_pub = node.create_publisher(
+            Image, '/frontier_slam/planning_dashboard', 1)
+        self._debug_pub = node.create_publisher(
+            MarkerArray, '/frontier_slam/frontier_debug', 1)
 
     # ------------------------------------------------------------------
     def publish_markers(self, clusters, gx: float, gy: float,
@@ -58,6 +61,60 @@ class FrontierVisualizer:
         self._viz_pub.publish(markers)
 
     # ------------------------------------------------------------------
+    def publish_frontier_debug(self, frontier_xy: np.ndarray, border_xy: np.ndarray,
+                               standoff_pairs: list, robot_pos: np.ndarray,
+                               resolution: float, band_m: float) -> None:
+        """Publish the evidence behind each frontier, one RViz namespace per question.
+
+        `frontier_cells`  the un-inflated occupied cells that border unknown —
+                          the boundary the inflation overlay covers up.
+        `unknown_border`  the unknown cells that made them frontiers.
+        `band_columns`    the Z range a single 2-D cell collapses. The planning
+                          map is a column projection, so the voxel answering for
+                          a cell may sit anywhere in this box, not at cruise
+                          depth — the usual reason a frontier floats in water
+                          that looks empty. band_m must match the mapper's own
+                          projection band or the box lies about the extent.
+        `standoff`        cluster centroid → the goal after the TSDF push-off,
+                          which is why a goal sits off the wall by design.
+        """
+        now      = self._node.get_clock().now().to_msg()
+        lifetime = Duration(sec=4)
+        z        = float(robot_pos[2])
+        markers  = MarkerArray()
+
+        markers.markers.append(_cube_list(
+            ns='frontier_cells', points=frontier_xy, z=z,
+            scale=(resolution, resolution, resolution * 0.5),
+            rgba=(*C_FRONTIER, 0.9), stamp=now, lifetime=lifetime))
+        markers.markers.append(_cube_list(
+            ns='unknown_border', points=border_xy, z=z,
+            scale=(resolution, resolution, resolution * 0.5),
+            rgba=(0.60, 0.60, 0.68, 0.45), stamp=now, lifetime=lifetime))
+        markers.markers.append(_cube_list(
+            ns='band_columns', points=frontier_xy, z=z,
+            scale=(resolution, resolution, max(2.0 * band_m, resolution)),
+            rgba=(*C_FRONTIER, 0.10), stamp=now, lifetime=lifetime))
+
+        line = Marker()
+        line.header.stamp    = now
+        line.header.frame_id = 'world_ned'
+        line.ns     = 'standoff'
+        line.id     = 0
+        line.type   = Marker.LINE_LIST
+        line.action = Marker.ADD if standoff_pairs else Marker.DELETE
+        line.pose.orientation.w = 1.0
+        line.scale.x = 0.06
+        line.color   = ColorRGBA(r=C_FRONTIER[0], g=C_FRONTIER[1], b=C_FRONTIER[2], a=0.9)
+        line.lifetime = lifetime
+        for (raw_x, raw_y), (out_x, out_y) in standoff_pairs:
+            line.points.append(Point(x=float(raw_x), y=float(raw_y), z=z))
+            line.points.append(Point(x=float(out_x), y=float(out_y), z=z))
+        markers.markers.append(line)
+
+        self._debug_pub.publish(markers)
+
+    # ------------------------------------------------------------------
     def publish_inflated_map(self, cg: CostGrid | None, grid_msg) -> None:
         """Publish the three-zone inflation overlay as an OccupancyGrid."""
         if cg is None or grid_msg is None:
@@ -81,7 +138,7 @@ class FrontierVisualizer:
         self._inflated_map_pub.publish(msg)
 
     # ------------------------------------------------------------------
-    def publish_debug_image(self, cg: CostGrid | None, grid_msg,
+    def publish_planning_dashboard(self, cg: CostGrid | None, grid_msg,
                             robot_pos: np.ndarray, robot_yaw: float,
                             robot_speed: float, path: list,
                             goal_xy: np.ndarray | None, stuck_pct: int) -> None:
@@ -152,7 +209,7 @@ class FrontierVisualizer:
         msg.is_bigendian    = False
         msg.step            = w * 3
         msg.data            = out.tobytes()
-        self._debug_img_pub.publish(msg)
+        self._dashboard_img_pub.publish(msg)
 
 
 # ------------------------------------------------------------------
@@ -175,6 +232,27 @@ def _arrow(*, ns, mid, x, y, z, dx, dy, length, rgba, stamp, lifetime) -> Marker
     m.scale.y = 0.28   # head diameter
     m.color   = ColorRGBA(r=rgba[0], g=rgba[1], b=rgba[2], a=rgba[3])
     m.lifetime = lifetime
+    return m
+
+
+MAX_DEBUG_CELLS = 20_000   # one cube each; past this RViz stalls on the array
+
+
+def _cube_list(*, ns, points, z, scale, rgba, stamp, lifetime) -> Marker:
+    """CUBE_LIST over an (N,2) world-XY array, all cubes at height `z`."""
+    m = Marker()
+    m.header.stamp    = stamp
+    m.header.frame_id = 'world_ned'
+    m.ns     = ns
+    m.id     = 0
+    m.type   = Marker.CUBE_LIST
+    m.action = Marker.ADD if len(points) else Marker.DELETE
+    m.pose.orientation.w = 1.0
+    m.scale.x, m.scale.y, m.scale.z = scale
+    m.color   = ColorRGBA(r=rgba[0], g=rgba[1], b=rgba[2], a=rgba[3])
+    m.lifetime = lifetime
+    shown = points[:MAX_DEBUG_CELLS]
+    m.points = [Point(x=float(p[0]), y=float(p[1]), z=z) for p in shown]
     return m
 
 

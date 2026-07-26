@@ -837,3 +837,1580 @@ x86_64-only.
 Note: rosdep's `gtsam` key resolves to `ros-jazzy-gtsam`, which ships the
 C++ libraries and no Python module, so it cannot replace the PyPI wheel
 that `slam_backend` imports. Left on pip deliberately.
+
+## Phase 27 — Fail-closed motion gate, RViz arming panel, and ArduSub adapter
+
+**Date**: 2026-07-17 (acceptance evidence 2026-07-21)
+**Files**: `planner/frontier_slam/frontier_slam/safety_gate.py` (new),
+`planner/frontier_slam/frontier_slam/safety_logic.py` (new),
+`planner/frontier_slam/frontier_slam/ardusub_adapter.py` (new),
+`planner/frontier_slam/frontier_slam/ardusub_control.py` (new),
+`planner/frontier_slam/config/ardusub.yaml` (new),
+`planner/frontier_slam/launch/ardusub_adapter.launch.py` (new),
+`planner/frontier_slam/frontier_slam/{control_utils,heavy_sim_mixer,wall_follower,wall_oriented_controller,waypoint_controller}.py`,
+`planner/frontier_slam/launch/{frontier_slam,wall_follow}.launch.py`,
+`planner/frontier_slam/test/{test_safety_logic,test_heavy_mixer}.py`,
+`tools/motion_safety_rviz/` (new package),
+`bringup/launch/demo.launch.py`, `bringup/rviz/*.rviz`,
+`sim/world/data/robot/bluerov2_unphy.scn`, `IRL_TEST.md` (new),
+`docs/INSTALL.md`, `planner/frontier_slam/README.md`
+
+Every executor now publishes body commands through a single gate node
+(`safety_gate.py`, pure decision logic in `safety_logic.py`) instead of
+driving the vehicle directly. The gate is **fail-closed**: `start_enabled`
+defaults to false, so nothing moves until `/motion/enable` is published, and
+it zeroes output on a stale command, a non-finite or out-of-range value, or
+a missing odometry heartbeat. `/motion/safety_status` reports the reason.
+An RViz panel (`tools/motion_safety_rviz`) arms and disarms it without a
+terminal, and is loaded by all four RViz configs.
+
+`ardusub_adapter.py` translates the same gated body command into MAVLink
+`MANUAL_CONTROL` for an ArduSub vehicle, with its own arming, mode and
+failsafe handling in `ardusub_control.py` and per-vehicle scaling in
+`config/ardusub.yaml`. `IRL_TEST.md` is the staged bring-up procedure for
+taking the stack to a physical BlueROV2.
+
+**Caveat: the adapter has not been accepted against a physical vehicle.**
+Phase 0 Part 1 of `IRL_TEST.md` (bench acceptance of the gate itself, no
+vehicle) passed 18/18 on 2026-07-21 — evidence in
+`eval/runs/irl_phase0_20260721/` (`gate.log` plus two recorded bags), which
+shows the gate rejecting malformed commands, holding DISABLED until armed,
+and dropping to STALE_COMMAND when the command stream stops. Part 2 needs an
+operator at the RViz panel and is not yet run.
+
+Sim consequence, only understood later: because `frontier_slam.launch.py`
+instantiates the gate for *every* `mode:=frontier` launch, headless
+evaluation batches also started fail-closed — see Phase 28.
+
+## Phase 28 — Cable-safe sweep scanning, thruster calibration, and armed eval batches
+
+**Date**: 2026-07-21 / 2026-07-22
+**Files**: `planner/frontier_slam/frontier_slam/scan_sweep.py` (new),
+`planner/frontier_slam/frontier_slam/waypoint_controller.py`,
+`planner/frontier_slam/test/test_scan_sweep.py` (new),
+`planner/frontier_slam/launch/frontier_slam.launch.py`,
+`bringup/launch/demo.launch.py`, `sim/world/data/robot/bluerov2_unphy.scn`,
+`eval/eval_tools/scripts/run_matrix.py`,
+`eval/eval_tools/config/matrix_*.yaml`
+
+Scanning in place no longer spins a full revolution. `scan_sweep.py` drives
+an odometry-confirmed right-half → left-full → return-to-start cycle whose
+net cumulative yaw is zero, so a tethered vehicle cannot wind its cable up;
+progress is measured from actual yaw rather than elapsed time, and a
+per-cycle timeout (including the return phase) bounds the worst case at
+twice the configured deadline. It replaces the spin at all three sites —
+initial scan, no-goal `SCAN`, and `GOAL_REACHED` — leaving the CSV state
+labels untouched for the eval scripts. `scan_style` (`sweep` default,
+`spin` = previous behaviour) and `scan_sweep_deg` are launch arguments on
+both launch files.
+
+Two calibration errors surfaced while validating it. The BlueROV2's
+thruster `max_setpoint` had been 340 RPM since the simulator was first
+imported, roughly 11x below a real T200's ~3800-4000, suppressing achievable
+thrust by close to two orders of magnitude and making `CTRL_STUCK_ESCAPE`
+fire during ordinary drives; it is now 3800 on all eight thrusters, with
+rotor dynamics switched from `zero_order` to `first_order` (0.4 s) so
+setpoints ramp instead of stepping. `SCAN_YAW` was then recalibrated 0.08 →
+0.026 (~15°/s), which gives the 5 Hz sonar proper frame overlap.
+**Velocity and timing figures recorded before this fix are not comparable
+with anything after it.**
+
+The headless evaluation path needed one further change: the Phase 27 gate
+is instantiated for every `mode:=frontier` launch, and `run_matrix.py` had
+no way to arm it, so batches were silently benchmarking a motionless
+vehicle (yaw pinned within ±3.5°, under 1 cm of travel over 90 s).
+`safety_start_enabled` is now a valid matrix key and is set true in the sim
+configs, leaving the gate's fail-closed default intact for real hardware.
+
+**Measured counter-result.** The sweep was expected to *lower* the loop
+closure count relative to a spin, on the theory that spinning piles up
+keyframes. It does the opposite, and the reasoning behind the expectation
+was wrong: loop-closure candidacy in `pose_graph.py` is positional
+(`loop_closure_radius_m`, `loop_closure_min_gap`) and never looks at
+heading. Over a 78 s seed-42 A/B, the sweep produced fewer keyframes (84 vs
+107) but more accepted closure edges (101 vs 47, i.e. 3.6 vs 2.0 per closing
+node) and better localisation on every metric — ATE 0.122 vs 0.192, mean
+absolute error 0.102 vs 0.170, D-optimality 0.0036 vs 0.0062. The likely
+mechanism is that re-traversing headings gives a new keyframe better cloud
+overlap with an in-radius earlier one, so ICP accepts where a monotonic spin
+is rejected. Sweep therefore stays the default on its own merits; the
+tether-safety argument was never contingent on the closure count.
+
+Tests: 117 pass in `planner/frontier_slam/test/`, including
+`test_scan_sweep.py`'s phase-sequence, net-zero-yaw (with wraparound),
+timeout-guard, return-phase-deadline and `spin`-bypass cases.
+
+## Phase 29 — Batch-validity guards, rebuild A/B, free-space carving, uv + Open3D
+
+**Date**: 2026-07-22
+**Files**: `eval/eval_tools/scripts/run_matrix.py`,
+`eval/eval_tools/test/test_run_validity.py` (new),
+`eval/eval_tools/config/matrix_rebuild.yaml`,
+`eval/eval_tools/config/matrix_carve.yaml` (new),
+`planner/frontier_slam/frontier_slam/tsdf_mapper.py`,
+`planner/frontier_slam/test/test_carve_no_return.py` (new),
+`slam/stonefish_groundtruth_mapping/launch/{mapper_only,tsdf}.launch.py`,
+`bringup/launch/demo.launch.py`, `bootstrap.sh`, `.gitmodules`,
+`external/open3d` (new submodule), `docs/INSTALL.md`, `README.md`,
+`requirements.txt`, `.gitignore`
+
+**Batch-validity guards.** A run whose vehicle never moves still writes a full
+`metrics.csv`, `map_metrics.csv` and TUM trajectory, so the failure is
+invisible in the outputs. A six-run batch was lost to it: orphaned node stacks
+from earlier killed launches were still alive, and their duplicate motion gates
+and TF broadcasters pinned the vehicle at 0.05 m of travel and 1.7° of yaw over
+480 s. `run_matrix.py` now refuses to start while such nodes are alive (listing
+their PIDs), kills any run that has neither travelled 1 m nor swept 20° after
+90 s, and aborts the whole batch on the first motionless run, since the cause
+is environmental and applies to every run that follows. Ground-truth path
+length and yaw range are recorded per run and in `summary.csv`. The floors are
+low enough that a run still doing its initial in-place scan passes on yaw
+alone.
+
+**Rebuild A/B (`matrix_rebuild.yaml`, 3 seeds × 480 s, post-calibration).**
+All six runs clean; `eval/runs/rebuild_20260722_0157/`.
+
+| run | seed | ATE | coverage | chamfer | rebuilds |
+|---|---|---|---|---|---|
+| tsdf | 101 / 102 / 103 | 0.158 / 0.188 / 0.151 | 0.966 / 0.955 / 0.960 | 0.361 / 0.351 / 0.340 | 0 |
+| tsdf_rebuild | 101 / 102 / 103 | 0.182 / 0.156 / 0.569 | 0.958 / 0.964 / 0.742 | 0.366 / 0.372 / 0.640 | 0 / 0 / 1 |
+
+The rebuild fired in one seed of three, so five of six runs compare the
+mechanism against itself; excluding that seed the arms are indistinguishable
+(ATE 0.166 vs 0.169, coverage 0.961 vs 0.961, chamfer 0.351 vs 0.369). Where it
+did fire everything was worse, but n=1 and confounded — a rebuild only triggers
+on a large correction, i.e. on a run that had already drifted. Two arms are
+also not identical when no rebuild fires: `map_rebuild:=true` switches on
+per-scan caching regardless, and those runs show ~3.5x the final absolute error
+at matched seeds. **No rebuild-fidelity claim is made from this**; measuring it
+needs a forced trigger or a policy that reliably produces large closures.
+
+**Free-space carving (`carve_no_return`, default false).** No-return pixels
+carry information — the ray reached maximum range without hitting anything —
+but were dropped with the other NaNs, leaving open water unknown. The
+parameter synthesizes a pseudo-point along each such pixel's ray so VDBFusion's
+space carving frees the voxels it traverses, with ray directions recovered from
+intrinsics fitted to the cloud itself rather than restating the sensor's FoV.
+vdbfusion has no carve-only ray API, so each pseudo-point's endpoint also
+writes a surface; `carve_range_m` (16 m) was meant to keep that artefact past
+the 15 m sensor maximum and outside the mapped envelope.
+
+**It does not, and the reasoning was wrong.** One-seed A/B
+(`eval/runs/carve_20260722_1207/`, 300 s): coverage fell 0.952 → 0.446, chamfer
+rose 0.349 → 8.33 m, and belief-to-ground-truth RMSE 0.30 → 9.25 m. On a
+vehicle that travels ~80 m in a run, 16 m from one pose is well inside the
+volume already mapped from another, so no fixed carve range can park the
+artefact outside the map. The parameter stays off and is kept only as the
+record of a measured negative result; making this work needs carve-only rays,
+which is a vdbfusion change, not a tuning one.
+
+**Python dependencies.** `bootstrap.sh`'s `pip install` failed under PEP 668 on
+Ubuntu 24.04 — ROS 2 Jazzy's own target — so the documented one-command setup
+did not work on the platform it documents. Dependencies now install into a
+uv-managed virtualenv (`--python /usr/bin/python3` so Debian's dist-packages
+stay visible to `rclpy`, `--allow-existing` so re-runs stay idempotent). Open3D
+joins Stonefish and vdbfusion as a pinned submodule (v0.19.0) built by
+`--with-open3d`, since PyPI publishes no aarch64 wheel for it; the build needs
+CMake pointed at the venv interpreter, and pulls VTK from source because no
+aarch64 binary is published for that either. `docs/INSTALL.md` records the two
+aarch64 pitfalls: the static-TLS import failure and its glibc tunable, and
+VTK's download needing a host-side fetch behind a container that cannot
+complete the TLS handshake.
+
+Tests: 127 in `planner/frontier_slam/` and `eval/eval_tools/`, including 10 new
+run-validity cases and 8 for the carving geometry.
+
+## Phase 30 — Geometry-aware sonar noise: grazing dropout, correlated speckle, sound-speed scale
+
+**Date**: 2026-07-22
+**Files**: `slam/slam_backend/slam_backend/sensor_models/sonar_noise.py`,
+`slam/slam_backend/slam_backend/sensor_models/noise_profiles.py`,
+`slam/slam_backend/config/noise_{ideal,realistic,degraded,sonar_only,odom_only,odom_pos_only}.yaml`,
+`slam/slam_backend/test/test_sonar_noise.py` (new)
+
+**Objective**: Every term in the Phase 15 sonar noise model was drawn
+independently per point, and none of them looked at the geometry being
+measured. Two consequences. First, dropouts fell as uniform per-beam confetti
+at a rate set only by range, whereas the dominant real no-return mechanism is
+specular: a smooth surface at oblique incidence reflects energy away from the
+transducer and an edge-on wall returns almost nothing. Second, independent
+noise is precisely the kind a pose graph averages out, so the model flattered
+the pipeline — real speckle is partly frozen between pings and real dropouts
+arrive in patches.
+
+**What changed**: Three additions, all inside `sonar_noise`.
+
+*Grazing-incidence dropout.* The node now estimates a per-pixel surface normal
+from the organized cloud and adds `dropout_p_grazing * (1 - cos θ)^n` to the
+dropout probability. Degenerate normals (borders, NaN neighbours) fall back to
+normal incidence; depth discontinuities yield edge-on normals and so a grazing
+penalty, which matches real sonar dropping returns at object edges. The
+unorganized-cloud path falls back to the previous range-only behaviour.
+
+*Correlated noise fields.* Range error and dropout are drawn from smooth
+Gaussian random fields (white noise filtered at `corr_length_px`, rescaled by
+the analytic `2s*sqrt(pi)` so variance stays unit) rather than per point, with
+AR(1) correlation `corr_rho_time` between consecutive pings. `range_corr_frac`
+splits the range error between an independent and a correlated draw with
+weights that keep total variance at sigma^2, so enabling correlation changes
+the structure of the error without changing its magnitude. Dropout thresholds
+the field at its own quantile, so the dropout *rate* is unchanged and only its
+spatial arrangement becomes patchy.
+
+*Speed-of-sound scale error.* One `sos_scale_error_pct` draw per run
+multiplies every range. Unlike every other term it is systematic, so no amount
+of averaging removes it; it is the mechanism behind map-scale drift.
+
+**Observed impact**: 19 tests in `slam/slam_backend/`, and a live node probe
+against synthetic walls at controlled incidence. Grazing dropout on the
+`realistic` profile rises 0.024 (head-on) to 0.151 (75°), and 0.245 on
+`degraded`. With outliers rejected, speckle std at 3 m is 0.00859 m against a
+predicted `sigma0 + k*r` of 0.008; ping-to-ping correlation is +0.426 against
+~0.35 predicted by `range_corr_frac * corr_rho_time`; spatial lag-1 correlation
+is +0.559 where the old model gave ~0. The `ideal` profile remains an exact
+passthrough (0.000 dropout, 0.0000 m error) end to end.
+
+**Worth recording for anyone reading the raw statistics**: the multipath
+outlier term dominates them. At `outlier_p` 0.002 with 0.3-3.0 m excursions it
+contributes ~0.077 m of range-error std against ~0.008 m of speckle, so
+uncorrected frame-to-frame correlation reads +0.002 and hides the effect
+entirely. Any future check of the correlation terms has to reject outliers
+first.
+
+**Not validated against hardware.** No real Sonar 3D-15 range images have been
+recorded, so these terms are geometrically motivated, not fitted. The numbers
+in the profiles are argued from the datasheet and from the physics, and should
+be treated as a stress test rather than a calibrated sensor model. Fitting
+them needs a tank session: a flat wall swept through incidence angles gives
+the dropout-vs-incidence curve directly, and a 90° corner exposes multipath.
+
+Tests: 19 in `slam/slam_backend/`, 12 of them new.
+
+## Phase 31 — Strongest-return ranging, projection-aware jitter, reverberation, geometric multipath
+
+**Date**: 2026-07-22
+**Files**: `slam/slam_backend/slam_backend/sensor_models/sonar_noise.py`,
+`slam/slam_backend/slam_backend/sensor_models/noise_profiles.py`,
+`slam/slam_backend/config/noise_{ideal,realistic,degraded,sonar_only,odom_only,odom_pos_only}.yaml`,
+`slam/slam_backend/test/test_sonar_noise.py`
+
+**Objective**: The Phase 30 model was still geometry-blind in four ways that
+separate a z-buffer from an imaging sonar. The depth camera reports the nearest
+surface per pixel; the real device (`RangeImage` in the WaterLinked 3D-15
+protocol) reports the strongest echo per beam. Its beams are one contiguous
+concave structure away from the sim's independent pixels, and there was no
+mechanism for volume backscatter or for geometry-dependent multipath.
+
+**What changed**: An organized-image stage now runs ahead of the per-point
+noise, skipped for unorganized clouds and for the `ideal` profile.
+
+*Strongest-return ranging (`argmax_window_px`).* A beam is wider than a pixel,
+so within a small window each candidate surface is scored by a beam-pattern
+weight times cos(incidence)/range^2, candidates are grouped by range, and the
+range of the strongest group wins. A structure thin in both image dimensions
+fills few window pixels and is outvoted by the broad surface behind it (it
+fades); a bright near surface pulls neighbouring beams toward its range
+(edges bleed). A one-pixel-wide vertical wire does **not** fade — the beam
+integrates its whole column — which is physically correct and worth
+remembering when reading results.
+
+*Projection-aware lateral jitter (`lat_sigma_beam_frac`).* The scenario's depth
+camera is a 90-degree pinhole, so the per-pixel angular step runs from
+~0.45 deg at the image centre to ~0.22 deg at the 45-degree edge (cos^2 law),
+not the uniform separation the old constant `lat_sigma_*_per_m` assumed. Each
+pixel is one beam in this approximation, so the cross-range jitter is now the
+measured local beam width times range times the fraction, and it varies across
+the image as the real per-pixel footprint does. **This changes the lateral
+error magnitude across the image and so breaks strict comparability with
+pre-Phase-31 benchmark runs**; `realistic` keeps the image-centre jitter near
+the old value so the change is a redistribution, not a global inflation. The
+per-metre constants remain as the fallback when the fraction is zero.
+
+*Volume reverberation (`reverb_p`, `reverb_max_m`, `reverb_weak_boost`).*
+Particles, bubbles and the tether backscatter sound; because the device reports
+the strongest echo, a near-field volume return can beat a weak surface return.
+Fired on a spatially correlated field so returns clump, at a rate elevated
+where the surface echo is weak (its strength falls as cos(incidence)/range^2),
+with the replaced range drawn from a 1/r^2 backscatter density over
+[0.2, reverb_max_m]. Off in clear-water `ideal`, small in `realistic`, a
+defining feature of `degraded`.
+
+*Geometric multipath (`multipath_p`).* Screen-space second bounce: reflect each
+beam about its surface normal and march the depth buffer (intrinsics recovered
+from the cloud's own pinhole layout); a re-intersection reports the late path
+length r + t_hit, fired with probability rising as the direct return weakens.
+A flat wall reflects away from all geometry and produces no phantom; a concave
+corner does. Replaces the geometry-blind `outlier_p` term for the corner case
+(that term is kept, additive, and unchanged). **Limitation**: a single
+rasterized view cannot see a bounce off geometry outside the frustum (notably
+the water surface behind the sensor), so only in-frustum multipath is modelled.
+
+**Observed impact**: 29 tests (10 new), all passing, plus a live node probe
+against a synthetic corner with a floated blob. `ideal` remains a byte-exact
+passthrough end to end (0 dropout, 0 multipath, 0 reverb, scale 1.0). On
+`realistic`: the blob fades to the background, multipath fires on ~0.4% of the
+image concentrated at the concave seam and nowhere on the open faces (every
+phantom a late arrival), reverberation injects ~250 near-field returns per
+ping, and degraded turbidity roughly triples the reverberation.
+
+**Still not fitted to hardware.** As with Phase 30, every value is argued from
+the datasheet and acoustics, not measured — no real 3D-15 range images exist on
+this project. A tank session (flat wall swept through incidence, a 90-degree
+corner, still vs. stirred water, a static scene held 30 s) would constrain
+nearly every parameter added across Phases 30 and 31.
+
+Tests: 29 in `slam/slam_backend/`, 22 of them for the sonar model.
+
+## Phase 32 — Near-field gate: a launch-tunable knob to clear the reverberation spray
+
+**Date**: 2026-07-23
+**Files**: `slam/slam_backend/slam_backend/sensor_models/sonar_noise.py`,
+`slam/slam_backend/slam_backend/sensor_models/noise_profiles.py`,
+`slam/slam_backend/config/noise_*.yaml`,
+`slam/slam_backend/test/test_sonar_noise.py`,
+`slam/stonefish_groundtruth_mapping/launch/pointcloud_only.launch.py`,
+`bringup/launch/demo.launch.py`
+
+**Objective**: In RViz the Phase 31 volume reverberation showed up as a fan of
+returns spraying off the vehicle into open water — ~430 near-field points per
+ping accumulating into a persistent junk cloud around every robot pose. That is
+the term behaving as designed (particles/bubbles/tether backscatter, and the
+device reports the strongest echo), but at `reverb_p=0.01` for clear water it
+dominates the near field and does not match the clean ground truth. The user
+wanted a single knob, settable per run over any noise profile, to pull the
+noised cloud back toward ground truth.
+
+**What changed**: A near-field gate. `min_range_m` drops any noised return
+nearer than the threshold (NaN, the existing dropout convention), applied after
+all other terms so it also removes reverberation, near multipath, and any other
+near-field return. It is exposed as a launch argument `near_cutoff` on
+`demo.launch.py`, threaded to the `sonar_noise` node the same way `noise_seed`
+is (declared at the top level, inherited by the nested pointcloud include). The
+node reads a `min_range_m` parameter that overrides the profile's own value when
+non-negative (-1 = use the profile, which ships at 0 = gate off), so the knob
+works over every profile without editing YAML:
+
+```
+ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic near_cutoff:=1.6
+```
+
+**Observed impact**: 31 tests (2 new), all passing. Live A/B on the `realistic`
+profile against a 6 m wall: `near_cutoff:=-1` (off) leaves 429 near-field
+returns per ping in open water; `near_cutoff:=1.6` leaves 0, while the 6 m wall
+is untouched. The gate is off by default, so existing runs are unchanged.
+
+**Note on the underlying value.** This gate hides the reverberation rather than
+retuning it. `reverb_p=0.01` may itself be high for a clear-water "realistic"
+profile — real clear water has little volume reverberation — so lowering
+`reverb_p` is the alternative to gating. The gate is the blunt, per-run knob;
+tuning `reverb_p` is the modelling fix. Neither is fitted to hardware.
+
+Tests: 31 in `slam/slam_backend/`, 24 of them for the sonar model.
+
+## Phase 33 — Expose the near-field gate in the launcher TUI ("Noise Attenuation")
+
+**Date**: 2026-07-23
+**Files**: `launcher_model.py`, `launcher_core.py`
+
+**Objective**: Phase 32 added the `near_cutoff` launch argument, but the TUI
+launcher (`launcher.py`) composes the individual launch files itself and never
+passed it, so the knob was invisible to the interface actually used to start
+runs.
+
+**What changed**: A `noise_attenuation` parameter (label **"Noise Attenuation"**,
+enum `none` / `cut_close`) in the SLAM section of the launcher model, visible
+under `slam:=slam` alongside the noise profile. The `cloud` group now maps it to
+the launch argument — `cut_close` -> `near_cutoff:=1.6`, `none` ->
+`near_cutoff:=-1.0` (profile default) — and lists `noise_attenuation` in its
+`depends`, so changing it restarts only the point-cloud layer.
+
+**Observed impact**: Smoke-tested — the parameter registers with the expected
+label and choices, and the emitted `pointcloud_only.launch.py` command carries
+`near_cutoff:=1.6` for `cut_close` and `near_cutoff:=-1.0` for `none`. The
+existing 31 sonar tests are unaffected.
+
+## Phase 34 — Range-image view of the SLAM input cloud in RViz
+
+**Date**: 2026-07-23
+**Files**: `slam/slam_backend/slam_backend/sensor_models/range_image.py` (new),
+`slam/slam_backend/setup.py`,
+`slam/stonefish_groundtruth_mapping/launch/pointcloud_only.launch.py`,
+`bringup/rviz/demo.rviz`, `bringup/rviz/demo_slam.rviz`, `bringup/rviz/demo_tsdf.rviz`
+
+**Objective**: The noised sonar data only existed as a PointCloud2 (/cloud_in),
+so there was no depth-camera-style 2D image of what SLAM actually consumes — no
+way to look at the noise profile and the near-field gate the way the clean depth
+camera (/sensor_msgs/image_depth) can be viewed.
+
+**What changed**: A `range_image` node renders any organized cloud back into a
+`sensor_msgs/Image` (32FC1, per-pixel euclidean range in metres, dropouts and
+no-returns = 0). `pointcloud_only.launch.py` runs two instances:
+`/cloud_in -> /cloud_in/range_image` (what SLAM receives: noise profile plus
+whatever Noise Attenuation is active) and `/cloud_in_raw -> /cloud_in_raw/range_image`
+(the clean reference). All three RViz layouts (`demo`, `demo_slam`, `demo_tsdf`)
+gain an Image display **"SLAM input (noised range)"** (enabled) and
+**"Clean cloud (range)"** (off by default), beside the existing DepthCamera
+display. The launcher TUI already loads these layouts and launches
+`pointcloud_only.launch.py`, so no launcher change was needed.
+
+**Observed impact**: Verified the node publishes a valid 32FC1 257x67 image —
+a 6 m wall renders as 6.00-8.61 m (euclidean range grows off-axis), frame_id
+preserved. Toggling Noise Attenuation none/cut_close changes the
+`SLAM input (noised range)` image live; the clean image stays put for
+comparison. 9 packages build, 31 sonar tests unaffected.
+
+## Phase 35 — Tunable cut distance for Noise Attenuation (advanced TUI param)
+
+**Date**: 2026-07-23
+**Files**: `launcher_model.py`, `launcher_core.py`
+
+**Objective**: The Phase 33 "Noise Attenuation: cut_close" hardcoded a 1.6 m
+gate, too short for profiles whose reverberation reaches further (degraded goes
+to ~2.5 m) and not adjustable from the interface.
+
+**What changed**: An advanced float parameter **"Cut distance (m)"**
+(`near_cutoff_m`, default 1.6, range 0.2-15.0) in the SLAM section, visible only
+in advanced mode when `noise_attenuation == cut_close`. The `cloud` group passes
+its value as `near_cutoff:=<m>` and lists it in `depends`, so editing it
+restarts only the point-cloud layer.
+
+**Observed impact**: Smoke-tested — the parameter is advanced, bounded, and
+visible only under slam + cut_close; the emitted command carries the chosen
+distance (`cut_close` at 2.5 -> `near_cutoff:=2.5`, `none` -> `-1.0`).
+
+## Phase 36 — Evaluation audit: time-uniform metrics and trustworthy structural validity
+
+**Date**: 2026-07-23
+**Files**: `eval/eval_tools/eval_tools/benchmark.py`,
+`eval/eval_tools/launch/eval.launch.py`,
+`eval/eval_tools/scripts/run_matrix.py`,
+`eval/eval_tools/test/{test_benchmark_metrics,test_run_validity}.py`,
+`slam/slam_backend/slam_backend/sensor_models/sonar_noise.py`,
+`slam/slam_backend/test/test_sonar_noise.py`, `STATE.md`, `docs/RUN.md`
+
+**Objective**: A live audit found that the benchmark scored only irregular
+`/slam/pose` keyframes. Initial turning generated many low-error samples while
+straight travel generated few, biasing cumulative ATE; RPE's sample-count delta
+also represented a different time span on every interval. The audit additionally
+reproduced a yaw-wrap false negative in the frozen-run guard, rejection of the
+current `near_cutoff` launch argument, cross-domain false positives in orphan
+detection, and expected all-NaN image borders warning inside the sonar model.
+
+**What changed**: `benchmark.py` now writes and scores continuously corrected
+`/slam/odometry` at the dead-reckoning rate, and `rpe_delta` now means a fixed
+number of seconds (default 1.0). `run_matrix.py` unwraps yaw before measuring its
+excursion, matches actual node executables instead of arbitrary command-line
+substrings, compares each candidate process's `ROS_DOMAIN_ID`, accepts
+`near_cutoff`, counts pre-shutdown child deaths and non-zero launch exits, and
+records `status_scope=structural_validity_only`. The pinhole fit skips fully
+invalid rows/columns before taking medians, eliminating normal all-NaN warnings.
+
+**Observed impact**: Two identical pre-fix 120 s runs on commit `4011d3b`, seed
+1 produced ATE 1.255 vs 0.709 m, endpoint error 2.258 vs 1.259 m, and 45 vs 25
+loop closures. This establishes that `noise_seed` repeats sensor RNG streams but
+does not make the asynchronous end-to-end experiment deterministic. After the
+fix, a 60 s isolated-domain live run completed `ok` with 520 continuous metric
+rows/520 SLAM poses (ATE 0.0736 m, endpoint error 0.175 m), zero tracebacks,
+zero child deaths, and no all-NaN warnings. The two modified packages build,
+the evaluation launch description parses, and all 173 focused project tests pass.
+
+## Phase 37 — Post-audit simulation matrix, rebuild-path exercise, and TF timing diagnosis
+
+**Date**: 2026-07-23
+**Files**: `STATE.md`, `Progress.md` (simulation artifacts under `eval/runs/`)
+
+**Objective**: Exercise the repaired continuous evaluator back-to-back, verify
+that TSDF reset/replay survives real loop-closure corrections, and investigate
+the mapper's recurring `TF unavailable` warnings.
+
+**Observed impact**: The isolated-domain 2x120 s smoke batch
+`eval/runs/smoke_20260723_0150/` completed both cells with structural status
+`ok`, dense metrics, no pre-shutdown process death, and no harmful traceback.
+Baseline finished at ATE 0.202 m / endpoint error 0.270 m; TSDF finished at
+ATE 0.346 m / endpoint error 0.472 m. These are single asynchronous trajectories,
+not a mapper-quality ranking. The normal rebuild-enabled smoke cell fired zero
+rebuilds, confirming that the preset does not cover the mechanism reliably.
+
+A 180 s seed-103 mechanism run in
+`eval/runs/forced_rebuild_20260723_0156/` lowered only the live trigger thresholds.
+It fired four genuine pose-graph rebuilds; all four TSDF cache replays completed
+(104, 107, 114, and 181 cached scans), exploration continued, the continuous
+metric stream's maximum gap was 0.384 s, and the manifest recorded zero harmful
+tracebacks/process deaths. This verifies execution and continuity, not quality
+benefit: the threshold intervention and trajectory make it unsuitable as an A/B.
+
+Finally, a read-only timing probe alongside the normal 70 s run
+`eval/runs/tf_probe_20260723_0202/` received 302 clouds: 151 had TF immediately,
+150 more obtained the exact capture-time TF within 0.5 s, and one expired. The
+mapper currently drops on the immediate lookup failure; its 0.1 s wait occurs
+inside the same single-threaded executor that must receive TF, so it cannot cure
+the arrival-order race. This is a real TSDF input-loss defect. A TF message
+filter or bounded deferred-cloud queue is the appropriate follow-up.
+
+## Phase 38 — Exact-time asynchronous TF deferral for TSDF input
+
+**Date**: 2026-07-23
+**Files**: `planner/frontier_slam/frontier_slam/tsdf_mapper.py`,
+`planner/frontier_slam/test/test_tsdf_tf_queue.py`, `STATE.md`, `docs/RUN.md`
+
+**Objective**: Fix the Phase 37 arrival-order defect without using latest-TF
+fallbacks (which would permanently misplace points during rotation), unbounded
+memory, or a home-grown transform-availability poller.
+
+**What changed**: The Python Jazzy binding has no `tf2_ros.MessageFilter`, so
+the mapper now uses the maintained `Buffer.wait_for_transform_async()` API.
+An immediate exact-time lookup remains the fast path. A miss returns control to
+the single-threaded executor and enters a capture-ordered FIFO backed by async
+TF futures. The queue is bounded to 10 clouds and 0.5 s; expiry and overflow
+cancel their futures explicitly. One recovered cloud is integrated per 20 ms
+tick to avoid starving TF reception, and periodic counters make received,
+integrated, deferred, recovered, expired, failed, overflow, and queued totals
+observable. Both belief and ground-truth TSDF instances use the same path.
+
+**Observed impact**: In the matched 70 s post-fix run
+`eval/runs/tf_probe_20260723_0215/`, the belief mapper had received 290 clouds
+at the final 60 s report, deferred 141, recovered 140, expired one, and
+overflowed none. The ground-truth instance recovered 85/90 deferred clouds;
+its five expiries were startup-only. This replaces Phase 37's behavior where
+151/302 transforms were unavailable at callback time and those usable-later
+clouds were discarded.
+
+The 180 s stress run `eval/runs/forced_rebuild_20260723_0217/` reached 843
+clouds by 170 s: belief deferred/recovered/expired = 417/408/9 and ground truth
+= 291/283/8, with zero overflow and zero future failures. Expiry totals stopped
+changing after startup. A natural 547-scan rebuild began 1.7 s before the run's
+fixed shutdown, so a deterministic early correction was tested separately in
+`eval/runs/rebuild_replay_20260723_0221/`: all 258 retained scans replayed in
+1.32 s, cloud processing continued for another 30 s, maximum metric gap was
+0.121 s, and no traceback/process death occurred. The full focused project
+suite passes (179 tests); `colcon test --packages-select frontier_slam` passes
+all 123 collected package tests, and `frontier_slam` builds cleanly.
+
+## Phase 39 — Three-seed TSDF matrix and rebuild/error attribution
+
+**Date**: 2026-07-23
+**Files**: `STATE.md`, `docs/RUN.md`, `Progress.md` (simulation artifacts under
+`eval/runs/`)
+
+**Objective**: Run a three-seed TSDF/rebuild matrix after the TF deferral fix,
+then reproduce the reported positional-error increase with SLAM + TSDF +
+frontier + wall-oriented motion + realistic noise and determine whether TSDF
+replay causes it.
+
+**Observed impact**: All six 180 s cells in
+`eval/runs/tf_fix_3seed_20260723_0233/` completed with structural status `ok`,
+zero harmful traceback/process death, zero TF-queue overflow, and zero async-TF
+future failure. Rebuild-minus-baseline final ATE deltas for seeds 101/102/103
+were -0.158, -1.906, and +1.650 m respectively. The sign reversal and large
+differences in path/yaw/loop-closure count confirm that seeded sensor noise does
+not make asynchronous closed-loop trajectories paired; final arm means are not
+causal rebuild estimates. Event alignment is more informative: rebuild seed
+101 improved over the following 10 s, seed 102 began replay at shutdown and is
+inconclusive, and seed 103's error increase began with the triggering pose-graph
+update, before TSDF replay.
+
+The targeted 2x240 s wall-oriented seed-103 batch is
+`eval/runs/walloriented_rebuild_ab_20260723_0254/`. The no-rebuild arm finished
+at ATE 0.119 m / endpoint error 0.490 m with 22 closures. In the rebuild arm,
+instantaneous error was stable near 0.35 m immediately before node 84 closed to
+node 51. It jumped 0.346520 -> 0.861994 m in one 109 ms metric step, 36 ms after
+the closure log and 139 ms **before** the mapper announced rebuild start. The
+graph update moved 40/85 existing keyframes (maximum 0.99 m), and re-detection
+raised the closure count 69 -> 72. TSDF then replayed all 606 cached scans in
+2.04 s. Mean absolute error was 0.323 m in the preceding 10 s and 0.795 m in the
+following 10 s; during replay it was 0.875 m and remained 0.752 m over the 10 s
+after replay. Map coverage was 0.891 before the event and 0.915 at the first
+post-replay sample, so replay did not create the pose jump and did not visibly
+corrupt the map at that instant.
+
+**Conclusion**: TSDF rebuild is temporally correlated because it is triggered
+by the same large graph correction, but it does not write pose-graph state and
+is downstream of the measured positional jump. The likely failure mode is an
+ambiguous/inconsistent loop closure: `pose_graph.py` accepts every locally good
+ICP candidate within 5 m, may add several correlated factors at once (including
+unlogged re-detected edges), and has no transform-innovation or cross-closure
+consistency gate. No behavioral threshold was changed: a simple maximum
+correction limit could also reject the legitimate large-drift closures rebuild
+exists to handle. The reliable next step is to log each candidate's inlier
+ratio/error and ICP-vs-prediction translation/yaw innovation, then validate a
+consistency policy across more true and false closure events.
+
+## Phase 40 — Split odometry/scan noise model; drift attributed to over-trusted scan-matching
+
+**Date**: 2026-07-23
+**Files**: `slam/slam_backend/slam_backend/pose_graph.py`, `STATE.md`, `Progress.md`
+(simulation artifacts under `eval/runs/`)
+
+**Objective**: Determine what drives the large positional error in the
+wall-oriented / realistic-noise runs and fix it.
+
+**Investigation**: Scored `/slam/odometry` (the pose-graph estimate) against the
+raw `/slam/sensors/dead_reckoned_odom` input, both versus `/StoneFish/Odometry`
+in `world_ned` with no SE3 alignment. Raw dead-reckoning stayed at ~0.1–0.3 m
+final error across all runs, with vertical error ~0.01 m: depth (pressure) and
+attitude (IMU+compass) are absolute, and only X/Y integrates DVL body velocity
+(`dead_reckoning.py`: `delta_world = R @ v_body·dt`; no accelerometer
+double-integration). The DVL error is realistically modelled — 0.2% per-run
+scale, 0.001 m/s bias, 1% white — producing that 0.1–0.3 m drift. The pose graph
+was often worse than this input. Two mechanisms, both from one cause: a single
+noise model (σ=0.05 m/0.05 rad) shared by the DVL BetweenFactor and all sonar
+scan-match/loop BetweenFactors. Because that σ was tighter than the DVL is
+accurate and looser than sonar GICP is noisy, GTSAM over-trusted registration —
+(1) sequential scan-match factors alone dragged the estimate ~2.6× worse than
+raw odometry (visible with loop closure off), and (2) an over-trusted loop
+closure occasionally warped the graph in one step (Phase 39's 0.35→0.86 m; other
+seeds to 2.0–2.4 m). An index-free ground-truth-proximity test showed the Phase
+39 closure fired at a genuine revisit (0.45 m true approach), so the defect is
+metric over-weighting of an inaccurate relative transform, not perceptual
+aliasing. This is dominated by run-to-run stochasticity — the same config/seed
+ranged 0.08–0.65 m — so the degradation is a tail risk, not the typical case.
+
+**What changed**: Replaced the shared `icp_sigma_*` model with three: a tight
+`odom_sigma` (0.02/0.02) applied non-robustly to the dead-reckoning BetweenFactor
+and the origin prior (so a bad closure cannot down-weight the reliable DVL), and
+a looser Huber-robust `scan_sigma` (0.08/0.12) for sequential scan-match,
+loop-closure, and re-detected-closure factors. All four sigmas are ROS
+parameters and are logged at startup. The 0.02 m odometry σ accumulates to
+√80·0.02 ≈ 0.18 m over ~80 keyframes, matching the observed DVL drift.
+
+**Observed impact**: A wall-oriented / frontier / realistic-noise, 4-arm × 3-seed
+batch was run before (`eval/runs/walloriented_cutclose_20260723_1057`) and after
+(`eval/runs/walloriented_cutclose_20260723_1201`) the change (mapper=tsdf,
+map_rebuild=false, 240 s). Mean final error, before→after: loop-closure-off
+0.454→0.150 m, clean-sonar (odom_only) 0.677→0.104 m, near_cutoff 0.265→0.137 m,
+baseline (already healthy) 0.176→0.180 m. Worst per-run peak error 1.30→0.30 m;
+largest single closure-induced step 1.23→0.11 m; every one of the 12 runs now
+degrades gradually with no jump. With loop closure off the estimate now ties raw
+odometry (0.154 vs 0.157 m) instead of drifting 2.6× worse, and clean-sonar SLAM
+beats raw dead-reckoning on all three seeds despite firing 111–456 closures.
+`colcon build --packages-select slam_backend` is clean and the gtsam model
+construction was smoke-tested.
+
+**Caveat**: n=3 per arm and asynchronous Stonefish/ROS/planner execution
+dominate run-to-run variance, so the arm means are directional, not precise —
+the tail elimination (peak 1.30→0.30 m, zero closure jumps) is the robust result.
+The sigmas are physically motivated but not tuned; a consistency/innovation gate
+on loop closures (Phase 39) remains available as a complementary safeguard.
+
+## Phase 41 — Launcher driving rework: always-live keys, AZERTY, follow-the-point
+
+**Date**: 2026-07-24
+**Files**: `launcher.py`, `launcher_core.py`, `launcher_model.py`,
+`bringup/rviz/demo.rviz`, `bringup/rviz/demo_slam.rviz`,
+`bringup/rviz/demo_tsdf.rviz`, `docs/RUN.md`, `STATE.md`, `README.md`,
+`Progress.md`
+
+**Objective**: Remove the `t` teleop mode key from the control screen, support
+AZERTY keyboards, and add a target-point follow mode (`y`) where the drive
+keys move a goal point the vehicle swims to autonomously.
+
+**What changed**: Driving is no longer a sub-mode. In teleop mode the launcher
+becomes the `/motion/body_command` source as soon as the gate/mixer group is
+up, and the QWEASD cluster (plus Space/X/F) drives immediately; in frontier
+mode the first drive keypress performs the old `t` flow — suspend the planner,
+bring up the teleop gate/mixer, take over — and `Esc` releases back to
+autonomy (first `Esc` drops the target point if one is active). Displaced
+option-screen keys moved: edit `e`→`i`, advanced `a`→`o`, stop stack `s`→`k`,
+quit is `Esc` only, and Space no longer cycles values (it is drive-up). The
+key table lives in `launcher_core.DRIVE_KEYS` per layout; AZERTY maps the same
+physical cluster (Z fwd, A strafe-left, Q yaw-left, W kept as a forward
+alias), selected by a new persisted `keyboard` option, applied live with no
+restart. The `y` toggle places a target point at the vehicle's current pose
+(so engaging never commands a jump), moves it in the vehicle's yaw frame with
+the same cluster (0.5 m/keypress × speed factor; yaw keys inert, `F` recalls
+the point to the vehicle), and runs a P-controller (surge ∝ distance ×
+cos heading error, yaw ∝ heading error with a 0.4 m dead zone, heave ∝
+vertical error, saturated at the gate's ±1.0) at the UI's 5 Hz tick so the
+fail-closed gate always sees a fresh command. The controller works in the
+odometry the operator sees: `/slam/odometry` under slam:=slam, ground truth
+otherwise. The point is drawn as a green sphere on
+`/activeslam/target_point`, with a Marker display added to all three RViz
+configs (fixed frame world_ned in each). Key translation, point motion and
+the controller are pure-stdlib functions in `launcher_core.py`.
+
+**Verification**: 60 headless checks pass (both layouts' key maps, command
+signs against `keyboard_control.py`, point translation in the yaw frame,
+surface clamping, controller tolerance/saturation/angle-wrap). RViz configs
+re-parsed as YAML with the new display present. Not yet exercised against the
+running simulator — the takeover/release and reset/apply interactions with
+the planner gate deserve a manual smoke run (drive in teleop, `y` follow,
+drive-key takeover and `Esc` release in frontier).
+
+## Phase 42 — TSDF as an OcTree, and an rqt layer in the launcher
+
+**Date**: 2026-07-25
+**Files**: `slam/tsdf_octomap/` (new package),
+`planner/frontier_slam/frontier_slam/tsdf_mapper.py`,
+`slam/stonefish_groundtruth_mapping/launch/mapper_only.launch.py`,
+`slam/stonefish_groundtruth_mapping/launch/tsdf.launch.py`,
+`slam/stonefish_groundtruth_mapping/package.xml`,
+`bringup/launch/demo.launch.py`, `bringup/rviz/demo_tsdf.rviz`,
+`launcher_core.py`, `launcher_model.py`,
+`eval/eval_tools/scripts/run_matrix.py`, `STATE.md`, `Progress.md`
+
+**Discovery**: Under `mapper:=tsdf` nothing publishes `/octomap_binary`,
+`/occupied_cells_vis_array` or `/octomap_point_cloud_centers` — Phase 21's
+dual-map `octomap_server` was later replaced by `tsdf_mapper` deriving
+`/projected_map` itself, and no octree source took its place. All three
+OctoMap displays in `demo_tsdf.rviz` were therefore bound to topics with no
+publisher (two also disabled), so the TSDF belief map had no occupancy view in
+RViz beyond the marker-based `TSDFVoxels`, which was off. `STATE.md` still
+described the dual-map arrangement and has been corrected.
+
+**TSDF → OcTree**: new `tsdf_octomap` package (ament_cmake) with
+`tsdf_to_octomap`, which rebuilds an `octomap::OcTree` from two clouds and
+publishes it on `/octomap_binary` (latched, `octomap_msgs/Octomap`, binary).
+`tsdf_mapper` gained `publish_free_voxels` → `/tsdf/free_voxels`, the
+observed-empty (d > 0) half that `/tsdf/occupied_voxels` cannot express;
+without it every unoccupied cell would be unknown and 3-D frontier detection
+impossible. Both come from the walk that already feeds `/projected_map`, so
+the extra cost is one cloud publish. The tree is rebuilt from scratch each
+cycle rather than accumulated: the TSDF is reset+re-integrated after a large
+loop closure (`map_rebuild:=true`), and an incrementally-updated octree would
+retain cells the TSDF has already corrected away. Free cells are written
+first so an occupied cell wins any coordinate claimed by both. Requires the
+pyopenvdb grid path; the surface-vertex fallback has no free space and the
+node logs an error and stays quiet.
+
+Wired as `tsdf_octomap:=true` (default) through `demo.launch.py` →
+`tsdf.launch.py` → `mapper_only.launch.py`, as a launcher option
+(`TSDF → OcTree`, visible under `mapper:=tsdf`, in the mapper group's
+`depends` so toggling restarts just that layer), and as a `run_matrix.py`
+matrix key so batches can turn it off. `demo_tsdf.rviz`'s two OctoMap
+displays are renamed `OcTree (occupied)` (now enabled, Z-axis coloured) and
+`OcTree (free)`, both switched to transient-local QoS to match the latched
+publisher.
+
+**Verification**: ✅ Live headless run `mode:=frontier mapper:=tsdf`:
+`/octomap_binary` publishes at 0.5 Hz (the cloud rate) with `id=OcTree`,
+`resolution=0.2`, `binary=true`, growing 4.8k→5.7k occupied and 46k→57k free
+cells into ~25k octree nodes; `tsdf_to_octomap` present exactly once in
+`ros2 node list`. Not yet confirmed in the RViz GUI — headless only.
+`/static_camera_tf` appears twice in `ros2 node list` on a single clean stack;
+pre-existing and unrelated to this change, but worth a look.
+
+**Launcher rqt layer**: new `rqt` bool option (default off) and a matching
+group after `rviz` in `GROUP_ORDER`, launching plain `rqt` — node graph, topic
+monitor, plots, parameter reconfigure. Like the RViz group it is killed
+outright rather than SIGINT-laddered (a viewer has nothing to flush) and has no
+`depends`, so it never restarts on a config change. `rqt` needs no install:
+`ros-jazzy-rqt-common-plugins` is already present in the container.
+
+## Phase 43 — One camera/sonar view per RViz config, and a docked eval metrics panel
+
+**Date**: 2026-07-25
+**Files**: `bringup/rviz/demo.rviz`, `bringup/rviz/demo_tsdf.rviz`,
+`bringup/rviz/demo_slam.rviz`, `bringup/package.xml`,
+`tools/eval_hud_rviz/` (new package), `STATE.md`, `Progress.md`
+
+**Discovery**: all three RViz configs enabled two or three `Image` displays
+at once (`DepthCamera`, `SLAM input (noised range)`, `Clean cloud (range)` in
+`demo_slam.rviz`), each opening its own dock window. Multiple `Image` dock
+windows tab together, and only the front tab renders — which one that is on
+launch is controlled entirely by the saved `QMainWindow State` blob (an
+opaque, hand-uneditable hex-encoded `QMainWindow::saveState()` binary), not by
+anything the launch args select. That is why the visible camera/sonar view
+appeared to change unpredictably between runs.
+
+**Fix**: each config now enables exactly one `Image` display —
+`DepthCamera` (ground truth depth camera) in `demo.rviz`/`demo_tsdf.rviz`
+(no SLAM, so there is no noise model to contrast against), `SLAM input
+(noised range)` in `demo_slam.rviz` (what the pose graph actually consumes).
+The other Image displays are left in the config, disabled, rather than
+deleted, so they stay one click away if needed.
+
+**Eval HUD panel**: the ATE/RPE/D-opt live text (`benchmark.py`'s `eval_hud`
+marker namespace on `/eval/markers`) was a `TEXT_VIEW_FACING` marker floating
+above the robot in world space — legible only when the camera happened to be
+pointed at it. New `tools/eval_hud_rviz` package (mirrors the structure of
+`tools/motion_safety_rviz`: a `pluginlib`-registered `rviz_common::Panel`)
+subscribes to `/eval/markers`, extracts the `eval_hud` namespace marker's
+text, and renders it in a panel docked at the bottom of the window — the slot
+the `Time` panel previously occupied in `demo_slam.rviz`. The `Time` panel
+entry is removed from that config (not from `demo.rviz`/`demo_tsdf.rviz`,
+which have no `ErrorHUD` display and so no metrics to show). The `eval_hud`
+marker namespace itself is disabled in the `ErrorHUD` `MarkerArray` display
+to avoid showing the same numbers twice; the `eval_drift` arrow in the same
+display is untouched.
+
+**Verification**: ✅ `eval_hud_rviz` builds cleanly against the existing
+`ros_ws` install as an overlay (`colcon build --packages-select
+eval_hud_rviz bringup`); its plugin is discoverable via the ament pluginlib
+index (`rviz_common__pluginlib__plugin` resource resolves to the package);
+`test_eval_hud_panel` (gtest, `QT_QPA_PLATFORM=offscreen`) passes — initial
+placeholder text, and the queued-signal update path from a marker callback to
+the label both verified. All three edited `.rviz` files parse as valid YAML.
+**Not yet verified**: live GUI confirmation that the panel actually docks
+where `Time` was — the saved `QMainWindow State` blob has no entry for the
+new panel name (it never existed when that state was saved), so Qt's
+`restoreState` will fall back to a default placement for it; may need
+dragging into place once, after which RViz will save the new geometry.
+
+## Phase 44 — One RViz config for every mode; the eval panel actually docks
+
+**Date**: 2026-07-25
+**Files**: `bringup/rviz/demo.rviz` (now the only config, renamed from
+`demo_slam.rviz`), `bringup/rviz/demo_slam.rviz` + `bringup/rviz/demo_tsdf.rviz`
+(deleted), `bringup/launch/demo.launch.py`, `bringup/setup.py`,
+`bringup/package.xml`, `launcher_core.py`, `launcher_model.py`,
+`docs/TROUBLESHOOTING.md`,
+`slam/stonefish_groundtruth_mapping/launch/gt_map.launch.py`, `STATE.md`,
+`Progress.md`
+
+**Report**: after Phase 43, RViz still showed the ROS-time bar, the eval
+metrics were nowhere on screen, and the ground-truth TSDF was missing.
+
+**Discovery**: Phase 43 edited `demo_slam.rviz` only, but the config in use
+was one of the other two — the picker in `demo.launch.py` (mirrored, a second
+time, in `launcher_core.py`) selects `demo_slam.rviz` only under `slam:=slam`.
+`demo.rviz` and `demo_tsdf.rviz` therefore still carried the `rviz_common/Time`
+panel, had no `eval_hud_rviz/EvalHudPanel`, and — since the ground-truth
+displays were only ever added to `demo_slam.rviz` — no GT map at all. Three
+hand-maintained ~700-line configs meant every RViz change had to be applied
+three times, and this one was applied once.
+
+**Second defect, in `demo_slam.rviz` itself**: Phase 43 flagged that the saved
+`QMainWindow State` blob had no entry for the new panel and might need
+dragging into place. It is worse than that — the blob still named `Time` in
+the bottom dock slot. Qt's `restoreState` turns a name it cannot match into a
+`QPlaceHolderItem` and leaves the real, unnamed dock wherever `addPane` put
+it, so the panel would not have appeared at the bottom even under
+`slam:=slam`. The blob is hex-encoded `QMainWindow::saveState()` output and
+the dock name inside it is a length-prefixed UTF-16BE string, so it is
+patchable by hand after all: `fb 00000008 "Time"` became
+`fb 00000010 "Eval HUD"`, in place, keeping the surrounding geometry ints.
+
+**Open, and not caused by this change — `Image` displays ignore `Enabled` on a
+fresh launch**: live runs showed `SLAM input (noised range)` coming up
+unchecked with no image dock, despite `Enabled: true`. Bisected against
+unmodified configs from `HEAD`: Phase 43's `demo_slam.rviz` does the same, and
+so does the *old* `demo.rviz` with its `DepthCamera` — which nonetheless shows
+as enabled in a long-running session (that window's title carries RViz's `*`
+modified marker, i.e. it was switched on by hand). Removing the
+`QMainWindow State` blob entirely does not change it either, so the saved
+layout is not the cause. RViz ties an `Image` display's enabled state to its
+dock widget's visibility (`Display::associatedPanelVisibilityChange` calls
+`setEnabled`), and on this machine the dock is created while the main window
+is still hidden, so the display disables itself before the config's value can
+take effect. Consequence: which `Image` display a config enables cannot be
+honoured at startup here — it takes one click in the Displays tree after
+launch, which then shows the dock. No regression either way: the previous
+default (`DepthCamera`) came up disabled too.
+
+**Fix**: the three configs are collapsed into a single `bringup/rviz/demo.rviz`
+(git-renamed from `demo_slam.rviz`, the superset), used unconditionally by
+both `demo.launch.py` and the launcher — the `PythonExpression` picker and
+`launcher_core._rviz_config`'s branch are gone. A display whose topic has no
+publisher in the current mode draws nothing, which is what the per-mode
+configs were working around. The two `OccupancyGrid` displays keep
+`demo_tsdf.rviz`'s clearer `OcTree (free)` / `OcTree (occupied)` names, with
+occupied enabled.
+
+**Ground-truth TSDF comparison**: the belief and truth surfaces were being
+shown in different representations — `TSDFSurface_GroundTruth` (points) on,
+`TSDFSurface` (points) off since Phase 42, with only the marker-based
+`TSDFVoxels` on for the belief side. Both surface clouds are now enabled in
+contrasting flat colours (belief orange `255;140;30`, truth green
+`40;220;40`); both voxel views stay present and off, one click away. The GT
+stack only publishes under `slam:=slam`, so `slam:=slam mapper:=tsdf` remains
+the combination that shows both.
+
+**Verification** (live GUI, `QT_QPA_PLATFORM=xcb`, screenshot of the running
+window): ✅ the `Eval HUD` panel docks along the bottom, full width, showing
+its `no eval data yet (requires slam:=slam)` placeholder — the thing Phase 43
+could not confirm; ✅ no ROS-time bar anywhere; ✅ `TSDFSurface` renders
+orange against the OcTree, `TSDFVoxels` off, GT counterparts present;
+✅ `Displays` and `Motion Safety` keep their left-dock placement; ✅ RViz
+loads the config with no plugin load failures and subscribes to both
+`/tsdf/surface_cloud` and `/gt/tsdf/surface_cloud`; ✅ `colcon build --paths
+bringup` succeeds and installs exactly one `rviz/demo.rviz`; ✅ the config
+parses as valid YAML with no `Time` entry in `Panels:`; ✅ no
+`demo_slam`/`demo_tsdf` references remain in code, launch files or docs.
+⚠️ The image dock still has to be enabled by hand after launch — see the
+`Image` display note above; unchanged from before this phase.
+
+The blob was rebuilt from the one config whose layout is known to work rather
+than hand-repaired: the old `demo.rviz` blob, with its `DepthCamera` slot
+renamed to `SLAM input (noised range)` and its `Time` slot to `Eval HUD`.
+Docks absent from a blob are appended and shown normally (that is how
+`Motion Safety` has always been placed), so dropping the stale entries costs
+nothing.
+
+
+## Phase 45 — /projected_map Z-band, configurable A* inflation zones, dashboard rename
+
+**Date**: 2026-07-25
+**Files**: `slam/stonefish_groundtruth_mapping/stonefish_groundtruth_mapping/z_band.py`
+(new), `slam/stonefish_groundtruth_mapping/launch/mapper_only.launch.py`,
+`slam/stonefish_groundtruth_mapping/launch/octomap.launch.py`,
+`bringup/launch/demo.launch.py`, `planner/frontier_slam/frontier_slam/path_planner.py`,
+`planner/frontier_slam/frontier_slam/frontier_extractor.py`,
+`planner/frontier_slam/frontier_slam/visualizer.py`,
+`planner/frontier_slam/launch/frontier_slam.launch.py`,
+`planner/frontier_slam/README.md`, `launcher_model.py`, `launcher_core.py`
+
+`/projected_map` was a flat "Z-sheet": `octomap_server`'s stock
+`occupancy_min_z`/`occupancy_max_z` were never set, so the whole water
+column collapsed into one 2D cell per XY position (`FutureWork.md` item 5's
+documented limitation). A single-Z assumption at the robot's exact depth is
+unsafe anyway — depth-hold isn't precise and the hull has vertical extent —
+so `z_band.py` centres the projection on a band of `2 x ROBOT_HEIGHT_M`
+(0.25 m, BlueROV2 Heavy datasheet height) around the commanded cruise
+depth, applied to every `octomap_server` instance that feeds
+`/projected_map` (`mapper_only.launch.py`'s primary instance and
+`demo.launch.py`'s dual-map planning-only instance under
+`mode:=frontier mapper:=tsdf`). When `depth` is auto-locked (`-1`, the
+default — unknown at launch time), the band is skipped and the map stays
+full-column, same as before.
+
+`path_planner.py`'s three-zone A* inflation radii (`HARD_INFLATION_M`,
+`INFLATION_M`, `PLAN_INFLATION_M`) were Python constants with no ROS
+parameter, launch argument, or TUI control anywhere — `build_cost_grid()`
+now takes `hard_m`/`soft_m`/`plan_m` overrides, `frontier_extractor.py`
+exposes them as `hard_inflation_m`/`inflation_m`/`plan_inflation_m` ROS
+parameters (module constants remain the defaults), and both new depth/zone
+parameters are threaded through `frontier_slam.launch.py`,
+`demo.launch.py`, and `launcher.py` (as `depth_m` + the three zone params,
+advanced/frontier section).
+
+`/frontier_slam/debug_image` is renamed to `/frontier_slam/planning_dashboard`
+(`publish_debug_image` -> `publish_planning_dashboard`) — it was never a raw
+debug passthrough, always the composite map+zones+path+robot-state overhead
+view, so the old name undersold what it shows.
+
+Verified in the ROS Jazzy container: `colcon build` clean on `bringup`,
+`stonefish_groundtruth_mapping`, `frontier_slam` and their dependents;
+`ros2 launch <pkg> <file> --show-args` confirms the new arguments resolve
+on `mapper_only.launch.py`, `octomap.launch.py`, `frontier_slam.launch.py`
+and `demo.launch.py`; `octomap_z_band_params(1.0)` /
+`octomap_z_band_params(-1.0)` return the expected band / empty dict;
+`colcon test --packages-select frontier_slam` passes all 109 existing
+tests unchanged. Not yet live-run in simulation — the Z-band's effect on
+frontier/A* behaviour with a real moving robot is still unconfirmed.
+
+**Merged after Phase 42/44 (this entry was written against a pre-Phase-28
+base; renumbered from 27 on merge).** Two adjustments were needed where this
+work overlapped what landed on `dev` in the meantime:
+
+- Phase 42 removed `demo.launch.py`'s dual-map planning-only `octomap_server`
+  instance — under `mode:=frontier mapper:=tsdf` the TSDF mapper now derives
+  `/projected_map` from its own grid, banded around `target_depth_m`. The
+  Z-band wiring for that now-deleted node is dropped; the band still applies
+  to `mapper_only.launch.py`'s primary `octomap_server`, i.e. to
+  `mapper:=octomap`, which nothing on `dev` covers.
+- Both branches independently added a cruise-depth knob: `depth`/`depth_m`
+  here, `depth`/`robot_depth_target` on `dev`. Unified onto `dev`'s (launch
+  arg `depth`, default 8.0, launcher param `robot_depth_target`), which now
+  feeds both bands — `octomap_server`'s through `z_band.py` and the TSDF
+  mapper's through `target_depth_m`. The duplicate `depth_m` launcher param
+  and the second `depth:=` the auto-merge left in the planner group are gone.
+
+## Phase 46 — `goto` as a mode, live telemetry on the side panel, one-row safety gate
+
+**Date**: 2026-07-25
+**Files**: `launcher.py`, `launcher_core.py`, `launcher_model.py`,
+`planner/frontier_slam/frontier_slam/waypoint_controller.py`,
+`planner/frontier_slam/frontier_slam/wall_oriented_controller.py`,
+`planner/frontier_slam/frontier_slam/wall_looking.py`,
+`eval/eval_tools/eval_tools/map_metrics.py`,
+`tools/motion_safety_rviz/src/motion_safety_panel.cpp`, `docs/RUN.md`,
+`bootstrap.sh`, `STATE.md`
+
+Phase 41's follow-the-point was a `y` toggle layered on top of whatever mode
+was already selected — a second, hidden piece of mode state that the Mode
+option did not describe and the planner group's visibility did not account
+for. It becomes `goto`, a third value of `mode` alongside `teleop` and
+`frontier`, so who picks the goal is one decision read from one place. The
+drive keys stay always-live in every mode; what they move is what changes.
+
+`goto` is not a new controller. The launcher publishes the operator's point
+on `/frontier_slam/goal` with frontier goal picking suspended, so A* and the
+path executor reach it exactly as they would reach a frontier — the mode is
+a goal *source*, which is why the planner layer and every wall-following
+parameter are now shared by both planner modes (`_frontier` becomes
+`_planner`, true for frontier or goto; the `frontier` section title drops to
+`Planner`). It runs without `revisit` so nothing preempts the operator's
+goal. `demo.launch.py` has no `goto` argument and does not need one: the mode
+is the launcher publishing a goal, not a different launch graph.
+
+The side panel showed configuration but not consequence — the run's own
+numbers were only on disk. It now reads three topics, none of which required
+new computation, only publishing values the nodes already had in hand for
+their CSV logs: `/frontier_slam/activity` (the `event` label, from all three
+executors) and `/eval/map_coverage` + `/eval/map_accuracy` (from
+`map_metrics.py`, already computed per tick). Map accuracy has no
+backend-independent definition — IoU under octomap, belief->GT RMSE under
+TSDF — so the panel labels it from the selected mapper instead of showing a
+bare number that means different things in different runs.
+
+The motion safety gate panel was a tall vertical stack whose height pushed
+the eval metrics panel docked in Phase 44 out of the bottom strip. Status and
+both buttons now sit on one 28 px row; the ROS-gate-not-ArduSub warning and
+the topic names move to tooltips, and the warning also stays in the enable
+confirmation dialog where it is read at the moment it matters.
+
+Also: `POINT_KEYS` gains an AZERTY variant (it was one QWERTY string, so
+AZERTY users saw wrong key hints while moving the point), and `bootstrap.sh`
+stops printing the two `source` lines it told the user to run — `launcher.py`
+resolves the virtualenv and workspace itself.
+
+Verified: `launcher_model.py` and `launcher_core.py` import clean, every
+`Group.depends` key resolves to a real `Param`, and the planner group's
+visibility evaluates to true under `goto`/`frontier` and false under
+`teleop`. Not yet live-run in simulation — the side panel's telemetry has
+not been observed against a moving robot, so the activity labels and the
+coverage/accuracy feeds are unconfirmed end-to-end.
+
+---
+
+## Phase 47 — One octree topic per backend, and an RViz view that reads at a glance
+
+**Date**: 2026-07-25
+**Files**: `bringup/rviz/demo.rviz`,
+`slam/stonefish_groundtruth_mapping/launch/mapper_only.launch.py`,
+`slam/stonefish_groundtruth_mapping/launch/tsdf.launch.py`,
+`slam/tsdf_octomap/src/tsdf_to_octomap.cpp`, `bringup/launch/demo.launch.py`,
+`eval/eval_tools/eval_tools/benchmark.py`, `launcher_model.py`, `docs/RUN.md`,
+`planner/frontier_slam/FutureWork.md`, `STATE.md`
+
+Phase 42 gave the TSDF backend an octree by publishing it on `/octomap_binary`
+— the topic `octomap_server` owns and the two RViz `OcTree` displays are bound
+to. Under `mapper:=tsdf` that put octree voxels on top of `/tsdf/voxels`: two
+renderings of the same cells, from two different reconstructions, fighting for
+the same pixels. The octree is a planning interface (3-D frontier detection,
+3-D A*), not a view, and nothing subscribes to it yet, so it moves to
+`/tsdf/octomap_binary` via a node remap. `mapper:=octomap` is untouched, the
+`OcTree` displays simply draw nothing under TSDF, and `eval_tools/map_saver`
+already blanked its octomap service under TSDF so no consumer changes.
+
+Ground truth is now always shown in a representation that does not occlude the
+belief map it is being compared against: `Octopoints_GroundTruth` (green
+points, `/gt/octomap_point_cloud_centers`) against the belief `Octomap`
+voxels, alongside the existing `TSDFSurface_GroundTruth` against `TSDFVoxels`.
+A solid GT voxel map hid exactly the divergence it was there to show.
+
+`Sonar DepthMap` is enabled and its dock marked visible in the saved
+`QMainWindow State` — the display was on a topic published in every mode but
+was saved disabled, so it "disappeared" depending on which session last wrote
+the config. `ProjectedMapSlice` (`/projected_map`) is added, off by default:
+the same 2-D band rqt shows, available without a second tool.
+
+The live drift marker becomes a `LINE_LIST` labelled `error x.xx m` at its
+midpoint. As an `ARROW` the head and shaft are scaled independently of the
+length, so at the sub-metre drift that matters it rendered as a blob rather
+than a distance, and the number was only readable in the HUD panel.
+
+**Verified**: `ros2 launch stonefish_groundtruth_mapping mapper_only.launch.py
+mapper:=tsdf tsdf_octomap:=true` lists `/tsdf/octomap_binary` and no
+`/octomap_binary`, with `tsdf_to_octomap` logging the resolved topic name.
+`demo.rviz` parses as YAML with every display's topic as listed above; the
+four touched packages build clean. Not yet live-run: the drift line label and
+the ground-truth point overlay have not been watched against a moving robot
+under `slam:=slam`.
+
+## Phase 48 — D-optimality on the drifting DoF, an allowable-covariance trigger, and consistency metrics
+
+The revisit trigger was reading a signal that could not mean what it was being
+asked to mean. `/slam/dopt` was `det(Σ)^(1/3)` over the translation block
+`[x, y, z]`, but Suresh et al. (2020) eq. 4 scores **XYH** — x, y and heading —
+because depth, pitch and roll are directly observed by the pressure sensor and
+IMU and do not accumulate drift. Folding the centimetre-scale depth variance
+into a geometric mean deflates the result, which is the low-variance-term
+failure the criterion is documented to have (Placed et al. 2023, §V-C).
+`pose_graph.dopt_xyh()` now scores rows/cols `[3, 4, 2]` of the GTSAM
+`[rot|trans]` marginal.
+
+The threshold was a bare determinant, `dopt_trigger: 0.02`, with no
+interpretable scale — and sat roughly 6x above anything the estimator ever
+reported, which is why revisit never fired in the 2026-07-24 ablation. It is
+replaced by eq. 5's ratio, `U_r = D(Σ)/D(Σ_allow)`, with `Σ_allow` stated as
+per-axis sigmas (`sigma_allow_xy_m`, `sigma_allow_yaw_rad`) and the trigger at
+`U_r > 1` — "revisit exactly when the estimate is less certain than the mission
+allows". Equal sigmas make `D(Σ_allow)` exactly `σ²`, which is what the unit
+tests use to state thresholds directly. Published on
+`/frontier_slam/uncertainty_ratio`.
+
+Neither of those says whether the covariance is *right*, so the run now
+measures it. `eval_tools/consistency.py` scores NEES over the same XYH DoF the
+trigger consumes, and `benchmark.py` accumulates ANEES with a chi-square
+acceptance region and logs a verdict at shutdown. NEES needs ground truth, so
+it can never be an online trigger input; the GT-free counterparts are
+`/slam/nis` (per-closure normalised innovation against the scan-matching noise
+model, chi-square 6 DoF) and `/slam/chi2_normalized` (whole-graph chi-square
+per DoF, ~1.0 when the assumed sigmas match the residuals). All four land in
+`metrics.csv` alongside the existing columns. `session_log` gained
+per-column precision, because its 2-decimal default had been rounding
+every logged D-optimality to `0.00` — the column was empty in every
+revisit log written to date, including the 2026-07-24 ablation's.
+
+NIS omits the estimate's own covariance from its denominator, so a single high
+reading is not evidence against the noise model — a correct closure after real
+drift carries that drift in its innovation. Only the distribution over a run is
+diagnostic. A 300 s realistic run gives median NIS 1.4 against an expectation of
+6 and a normalised graph chi-square of 0.17 against 1.0: the *relative* sigmas
+are looser than the residuals need. ANEES over the same run is 17 against an
+expectation of 3, i.e. the *absolute* marginal is far too tight. Internally
+consistent and globally wrong at once is the signature of unmodelled bias, not
+of noise.
+
+Launcher: the option list gained `Space` as a Right-arrow synonym, so ascend
+moved off Space to the key left of X (`Z` on QWERTY, `W` on AZERTY, the same
+physical key). The value list is pinned to the bottom of the side panel under a
+rule instead of sliding with the content above it, and is capped at half the
+panel so a long enum cannot push the pose table off. The pose table gained a
+fourth column, the per-axis GT-minus-belief gap, grey below 0.25 m and
+coloured past 0.25 / 1.0 m. The `ros2 launch` preview row is a
+`copy launch command` button (click, or `C`) rather than a line far too long to
+read, copying via `wl-copy`/`xclip`/`xsel` with an OSC 52 fallback that works
+over SSH.
+
+**Verified**: NEES validated by Monte Carlo against a known covariance —
+2.98 for a calibrated estimator (95% band [2.93, 3.08]), 26.6 when sigma is 3x
+too small, 0.34 when 3x too large. NIS validated against chi-square 6 DoF —
+exactly 1.0 at a one-sigma offset, 9.0 at three sigma, mean 5.98 over 20k
+model-matched draws, 24.0 when sigma is assumed 2x too tight. 25 revisit-planner
+unit tests pass; the 3 pre-existing `test_tsdf_tf_queue` failures are unrelated
+(confirmed against a clean tree). Side-panel layout rendered headlessly at 24
+and 45 rows, including the empty-selection and short-panel cases. A 300 s
+`slam:=slam mode:=frontier revisit:=true` run publishes all four signals into
+`metrics.csv`; the `sigma_allow` defaults were then set from that run's measured
+XYH D-opt range (0.0002-0.0022, median 0.0010) rather than guessed, and a 240 s
+confirmation run fired 2 revisits with `U_r` median 1.02 / max 1.52 — the trigger
+that never fired in the 2026-07-24 ablation now engages. That run also reports
+ANEES 19.7 against an expectation of 3, so the overconfidence is now a measured
+number rather than an inference.
+
+## Phase 49 — The yaw prior was labelled with the wrong sensor's sigma
+
+Phase 48 ended with a measured ANEES of 19.7 against an expectation of 3 — the
+marginal covariance was ~6.6x too tight and the cause was open. It is the
+attitude+depth prior's yaw entry.
+
+The prior asserts an absolute world-frame pose at every keyframe, and its yaw
+sigma was `profile.imu.sigma_yaw_rad`. The value it asserts, though, is not the
+IMU's yaw — it is `T_odom`'s, the *fused* output of `YawKalmanFilter`. Those are
+not the same quantity. Replaying the exact sim sensor chain against a known
+ground truth measures the gap:
+
+```
+                          true RMS err   claimed sigma    ratio
+raw IMU message                0.00999         0.01000     1.00
+fused filter output            0.02922         0.03931     0.74
+pose graph prior               0.02922         0.01000     2.92
+```
+
+The IMU message really is absolute to its stated 0.01 rad — `imu_sim.py` builds
+it from ground-truth attitude plus white noise. But `predict_imu` treats each
+reading as an *increment* (`variance += 2σ²`), so the filter random-walks away
+from a 0.01 rad input and is pulled back only by the 0.05 rad compass, landing
+at a true error of 0.0292 rad. The graph then labelled that degraded value with
+the undegraded sensor's spec: 2.9x too tight. Heading error is what converts
+into cross-track position error over a path, so an over-tight yaw marginal is
+exactly what lets D-optimality stay flat while ATE climbs.
+
+The filter already computed the right number and nothing consumed it.
+`dead_reckoning.py` now publishes `YawKalmanFilter.variance` in the fused
+odometry's `pose.covariance[35]`, and `pose_graph.prior_sigmas_with_yaw()`
+substitutes it into the prior per keyframe. Roll/pitch/depth keep their profile
+sigmas — those are read straight off their sensors, so the spec is the right
+figure. Missing covariance falls back to the profile default, so the ideal
+profile and replayed bags are unchanged.
+
+Same scene, same seed, same 240 s as the Phase 48 confirmation run:
+
+| | before | after | target |
+|---|---|---|---|
+| ANEES (final) | 19.69 | 2.37 | 3.0 |
+| NEES (median) | 11.00 | 1.45 | 3.0 |
+| ATE (final) | 0.248 m | 0.103 m | — |
+| abs_error (max) | 0.693 m | 0.177 m | — |
+| D-opt XYH (median) | 0.0021 | 0.0048 | — |
+
+The estimator is consistent now, marginally on the conservative side. ATE fell
+58% as well: the over-tight prior was not only mislabelling the uncertainty, it
+was over-constraining the solve and fighting the loop closures. D-opt roughly
+doubled, which is the honest value — any `sigma_allow_*` tuned before this
+change is now calibrated against a signal half the size and must be re-measured.
+
+**Left open.** Every noise profile labels its IMU block "gyro-integrated
+attitude" and Phase 34 recorded that the profiles "reinterpret
+`imu.sigma_yaw_rad` as short-term gyro noise (with heading error now carried by
+the compass)". `imu_sim.py` never followed: it still adds noise to ground-truth
+yaw, so the topic is an absolute heading, which is what `STATE.md` documents it
+as. The simulator and the stated design disagree, and no real IMU knows absolute
+heading to 0.01 rad underwater. Resolving it means changing what the simulated
+sensor is, which moves every recorded run number, so it is left as a decision
+rather than folded into this change.
+
+## Phase 50 — A depth limit cycle, and a planner that could not see what it hit
+
+Two vehicle-behaviour faults, found by watching a run rather than reading a
+metric.
+
+**The vehicle was bouncing.** Depth hold was `heave = -KP * (pose_z - setpoint)`
+with no rate term. The vehicle is effectively a double integrator and the loop
+runs at 10 Hz, so once Phase 39's thruster-calibration fix restored the real
+actuator authority there was no phase margin left. Ground truth over a 900 s
+run:
+
+```
+z: mean 6.023 m (setpoint 6.0)  std 0.371  peak-to-peak 1.265 m
+237 zero crossings / 730 s -> sustained 6.14 s period (FFT peak 0.163 Hz)
+```
+
+A clean limit cycle, not noise. `control_utils` gains `depth_hold_effort()` and
+`LowPassRate`, a filtered finite difference; `wall_oriented_controller`,
+`waypoint_controller` and `wall_looking` all feed a damped depth rate into the
+law. Same scene afterwards: std **0.371 -> 0.038 m**, peak-to-peak **1.265 ->
+0.230 m**, and no periodic component left at all.
+
+**The vehicle was colliding.** The controller's own logs had been recording it:
+233 `EMERG_STOP` events in a 10 min run with clearance pinned at the depth
+sensor's 0.2 m floor. Two independent causes. The A* hard-wall radius was
+0.20 m, so a planned path was permitted to graze structure. More seriously,
+`/projected_map` projected only a +/-1.0 m Z-band around the cruise depth into
+the 2-D planning grid, so wreck geometry above and below the cruise plane was
+invisible to the planner — it was not avoiding those obstacles because it never
+knew they existed.
+
+```
+hard_inflation_m      0.20 -> 1.00
+inflation_m (soft)    0.75 -> 1.50
+plan_inflation_m      1.50 -> 3.00
+projected_map_band_m  1.0  -> 3.0     (the collision-relevant one)
+wall_z_band_m         1.5  -> 3.0
+```
+
+Measured over the first ~550 s of a run under each setting:
+
+| | EMERG_STOP | ticks < 0.4 m | median clearance | travel |
+|---|---|---|---|---|
+| hard 0.20, band +/-1.0 | 233 | 230 | 0.48 m | 136 m |
+| hard 1.00, band +/-3.0 | 17 | 16 | 2.32 m | 322 m |
+
+Travel distance is in that table deliberately: a robot that stops moving also
+stops colliding, and the wider margins had to be shown not to strand it. They
+do not — it covers more ground than before, because it is no longer spending
+its time in emergency stop.
+
+One coupling this introduces: a 1.0 m hard radius means a frontier goal placed
+1.0 m off a surface lands exactly on the blocked boundary and A* can never
+reach it. `tsdf_frontier_standoff_m` must now be >= 2.0; batches that pin it
+lower will stall.
+
+## Phase 51 — What loop closure and revisit are each worth on the shipwreck
+
+Three arms — `nolc` (open loop), `lc` (passive loop closure), `lc_revisit`
+(closure plus uncertainty-triggered revisit) — 4 seeds each, 20 min per run, on
+the shipwreck scene, under the corrected yaw prior of Phase 49 and the safety
+margins of Phase 50.
+
+**Raw ATE is not comparable across these runs.** Path lengths differ by 4x
+(171 m to 710 m), because a run that spends its time in emergency stop near
+structure both travels less and drifts less. Scoring ATE per metre travelled is
+what makes the arms comparable; the raw figures are kept alongside.
+
+```
+arm             seed   path m   ATE m  drift %/m    ANEES     LCs
+nolc             101      710   2.335      0.329    219.7       0
+nolc             102      608   1.194      0.197     69.0       0
+nolc             103      264   0.335      0.127      4.5       0
+nolc             104      171   0.989      0.579     34.6       0
+lc               101      499   0.235      0.047     31.6   16678
+lc               102      432   0.119      0.028     12.1   17091
+lc               103      408   0.645      0.158    226.1    7822
+lc               104      218   0.676      0.310     15.4     141
+lc_revisit       101      479   0.261      0.054     15.1   21478
+lc_revisit       102      489   0.247      0.051     13.0    4797
+lc_revisit       103      272   0.164      0.060     10.2    6783
+lc_revisit       104      436   0.905      0.208     47.7    1946
+```
+
+**Loop closure is worth a median 66% of the drift rate** (mean 48%), 0.308 ->
+0.136 %/m, improving 3 of 4 seeds. That is consistent with the ~64% measured on
+the 2026-07-24 off-shore-station ablation, on a different and larger scene.
+
+**Revisit adds no measurable drift reduction on top of it.** `lc -> lc_revisit`
+is a median +8.7% / mean -1.1% on drift rate and a median -22.5% on raw ATE,
+improving 2 of 4 seeds. With n=4 and this much seed variance the difference is
+not distinguishable from zero in either direction, and it should not be reported
+as a benefit.
+
+Two things survive that null result and are worth keeping.
+
+*It fires now, and it fires selectively.* Revisit triggered 3-5 times per run
+with `U_r` median 0.21-0.70 and max 1.45-2.05 against a threshold of 1. In the
+2026-07-24 ablation it never fired at all because `dopt_trigger` sat ~6x above
+anything the estimator reported. The Phase 48 ratio formulation plus a
+`sigma_allow` set from this scene's measured D-opt p75 is what changed that.
+
+*It repairs the failure case.* Seed 103 is where passive closure went wrong —
+ATE 0.645 m with ANEES 226, the signature of bad closures warping the graph
+rather than of closures not firing. Revisit took that seed to ATE 0.164 m and
+ANEES 10.2, a 74.6% improvement, the one seed where it clearly helped. Across
+the arm, ANEES improves 71.3 -> 21.5 on average. And `lc_revisit` is the only
+arm that beat the open-loop baseline on *every* seed (4/4, median 69.2%), where
+plain closure lost on one.
+
+So the defensible claim is that revisit buys covariance calibration and
+worst-case robustness, not average accuracy. Establishing whether the
+worst-case effect is real needs more seeds than four.
+
+**Consistency, unresolved.** NIS medians sit at 0.9-1.7 against a chi-square
+expectation of 6, and normalised graph chi-square at 0.06-0.22 against 1. The
+relative noise models are too loose while the absolute marginal is still
+optimistic on the high-drift seeds (ANEES tracks ATE across all 12 runs). Phase
+49 removed the yaw component of that; what remains is the odometry sigma, a
+hand-set constant that cannot represent accumulating DVL scale and bias error.
+
+## Phase 52 — Odometry noise derived from the profile instead of hand-set
+
+`odom_sigma_trans` was a single 0.02 m applied to every keyframe edge whatever
+its length, its duration, or which noise profile was loaded. The 12-run Phase 51
+ablation measured both consequences.
+
+Normalised graph chi-square came out at 0.06-0.22 against an expectation of 1 --
+the assumed sigma was 2.1-4.1x larger than the residuals justified. Deriving it
+from the DVL datasheet terms instead gives 0.0039 m for a typical 1 m / 1 s edge,
+5.2x tighter, independently landing where the residuals said it should.
+
+The second consequence matters more for the planned degraded-noise work. Because
+the constant never read the profile, realistic -> degraded raises true DVL error
+3-5x while leaving D-optimality unmoved -- and D-optimality is what the revisit
+trigger reads. The mechanism was structurally blind to the degradation such an
+experiment is meant to introduce. The derived model moves a typical edge 3.8x
+between those profiles.
+
+`odom_noise.py` folds the three terms with their proper exponents: random
+velocity noise as sqrt(time), scale error linear in distance, velocity bias
+linear in time. `odom_sigma_trans` survives as a floor for near-stationary
+edges, default 0.002.
+
+Verified against `lc_s105` -- same seed, scene and duration, old model vs new:
+
+| | before | after | target |
+|---|---|---|---|
+| chi2/dof | 0.120 | 0.386 | 1.0 |
+| NIS median | 1.228 | 2.026 | 6.0 |
+| ANEES final | 115.65 | 36.65 | 3.0 |
+| ATE final | 0.406 m | 0.376 m | — |
+| drift | 0.083 %/m | 0.086 %/m | — |
+
+About a 3x move toward consistency on all three statistics, and no accuracy
+change worth claiming: one seed, and a 7% ATE difference sits well inside the
+seed variance Phase 51 measured.
+
+**The estimator is still not consistent, and the reason is known.** Scale error
+and velocity bias are perfectly correlated across consecutive edges, while a
+BetweenFactor treats each edge as independent evidence, so a per-edge Gaussian
+understates their accumulation by construction. The same objection now applies
+more forcefully to loop closures: these runs carry ~11000 of them over ~1000
+keyframes, each contributing as if independent, which is the most likely
+remaining source of the ANEES gap. Fixing that needs correlated noise or closure
+sparsification, not another sigma.
+
+## Phase 53 — rqt pinned to the planning dashboard
+
+**Date**: 2026-07-25
+**Files**: `bringup/rqt/planning_dashboard.perspective` (new), `bringup/setup.py`,
+`launcher_core.py`, `docs/RUN.md`, `Progress.md`
+
+**Discovery**: the launcher's rqt layer ran plain `rqt`, which reopens the
+perspective named `current-perspective` in `~/.config/ros.org/rqt_gui.ini`. That
+key is global to the machine and is claimed by any standalone plugin run:
+`ros2 run rqt_image_view rqt_image_view` and `rqt_tf_tree` each create a hidden
+perspective and leave it as current. On this machine it held
+`@rqt_image_view__ImageView` with its topic set to `/frontier_slam/debug_image`
+— the pre-Phase-45 name of the planning dashboard — so the layer opened as an
+Image View on a topic nothing publishes any more.
+
+**Fix**: the view ships as `bringup/rqt/planning_dashboard.perspective` and the
+launcher passes `--perspective-file`. rqt imports that file into a *hidden*
+perspective on every start, which (a) is wiped and re-imported each run, so it
+cannot drift, (b) is never written to `current-perspective`, so nothing outside
+can capture it, and (c) is read-only — session state goes to the ini, never back
+to the file, unlike the RViz config the launcher has to hand out as a scratch
+copy. A missing file falls back to plain `rqt`; rqt refuses to start on a
+`--perspective-file` that does not exist.
+
+One plugin: an Image View on `/frontier_slam/planning_dashboard`, filling a
+1280x900 window. Perspective files are JSON, keyed by the same settings tree the
+ini uses — `pluginmanager/running-plugins` (plugin ids come from the `class name`
+in each `plugin.xml`, so `rqt_image_view/ImageView`), then
+`plugin__<plugin_id>__<serial>/plugin/<key>` for the plugin's own settings, and
+`mainwindow/geometry`+`state` as hex-encoded QByteArrays. Values are
+`{"type": "repr", "repr": "<python repr>"}`, eval'd on import.
+
+**Verified**: `rqt --perspective-file <installed path>` under
+`QT_QPA_PLATFORM=offscreen` logs `switching to perspective
+"@planning_dashboard.perspective"`, `_load_plugin(rqt_image_view/ImageView#1)
+successful` and `MainWindow.restore_state()`, and `ros2 topic info
+/frontier_slam/planning_dashboard` then reports `Subscription count: 1`.
+Repeated against a topic with no publisher: still `Subscription count: 1`, so
+rqt does not need the planner up first. `current-perspective` in the user ini is
+unchanged after both runs. `bringup` clean-rebuilds, the launcher emits the
+installed `--perspective-file` path, and the 13 launcher tests pass. Not yet
+watched on screen with a display attached.
+
+## Phase 54 — Planned work named in the launcher, next to the option it changes
+
+**Date**: 2026-07-26
+**Files**: `launcher_model.py`, `launcher.py`, `Progress.md`
+
+**Why**: the roadmap and `docs/FUTURE_WORK.md` are the only places the planned
+extensions exist, and neither is open while the system is being driven. Someone
+at the control screen sees frontier exploration and a revisit planner with no
+indication that the frontier set is a 2-D projection of a volumetric map, or
+that revisit targets are scored by keyframe count rather than by whether the
+geometry there is distinctive enough to register against.
+
+**Change**: five enum options whose implemented value is the current behaviour
+and whose remaining values name planned work, marked `(soon)`:
+
+| Option | Now | Planned |
+|---|---|---|
+| Frontier space (Planner) | `2d` — cells on the projected band | `3d` — frontier voxels on the TSDF |
+| Exploration policy (Planner) | `frontier` | `infogain`, `nbv` |
+| Goal ordering (Planner) | `greedy` per tick | `route` — 2-opt tour over the top-k |
+| Revisit scoring (SLAM) | `keyframe_density` | `keypoint_density`, `fpfh` |
+| Revisit trigger (SLAM) | `live_dopt` | `propagated` — virtual factors per candidate |
+
+`Param` gained a `soon` set of choice values and `is_soon()`; `unimplemented()`
+returns the selected ones. A planned value carries `(soon)` in the value list,
+a `(soon)` tag on its own row — not gated on the stack running, since it blocks
+apply on a stopped stack too — and a description in the warning colour rather
+than the green used for a runnable value. Enter is refused as a whole while one
+is selected, with the footer saying so, instead of applying the rest and
+leaving the unimplemented option looking applied. All five are in
+`LAUNCH_ARG_SKIP` and in no group's `depends`, so they reach neither
+`demo.launch.py` nor the restart planner. A "Coming next" block on the info
+screen lists them together with the option each one changes.
+
+**Verified**: defaults select no planned value and `launch_command()` is
+unchanged over the defaults; with `frontier_space:=3d` and
+`revisit_scoring:=fpfh` selected, `unimplemented()` names both and neither
+reaches the launch command. All five are visible without the advanced toggle
+under `mode:=frontier slam:=slam`. The option row, value list, description head
+and blocked-apply footer were drawn in a real curses screen on a 120x40 pty and
+dumped back: `(soon)` renders on the planned values and on the row, the
+description takes the warning colour for a planned value and the ok colour for
+an implemented one, and the footer names the two blocked options. The 7 tests
+in `test/` pass. The full control screen has not been driven end to end on this
+change — the refusal path was exercised through `unimplemented()`, not through
+a keypress.
+
+## Phase 55 — A near-field filter that thins instead of cuts
+
+**Objective**: `near_cutoff` (Phase 32) clears the reverberation spray by
+deleting everything inside a radius, which also deletes any real surface the
+vehicle is close to. Driving up to an obstacle is exactly when the map most
+needs it. The user asked for the probabilistic form: make a near return
+*unlikely* rather than impossible, so a sparse spray disappears while a solid
+surface — which fills every beam it subtends — still comes through thinned.
+
+**What changed**: A near-field fade in `sonar_noise.py`, applied beside the
+existing gate. `near_fade_drop_p()` returns a per-point drop probability
+
+```
+p_drop(r) = near_fade_p * clip(1 - r / near_fade_range_m, 0, 1) ** near_fade_exp
+```
+
+— full strength at the sensor, zero at `near_fade_range_m`, exactly zero beyond
+it. Three new `SonarNoise` fields carry it; all ship at 0 (off), so every
+existing profile and run is unchanged.
+
+The draw is `rng.random(n)`, deliberately **not** the spatially correlated field
+the other dropouts are thresholded against. Patch-correlated removal is right
+for real dropouts but wrong here: with `corr_rho_time=0.7` a small obstacle
+could vanish coherently for several consecutive pings. Drawn per beam, the
+survivors stay scattered across the surface, and because they are re-drawn each
+ping the outline fills back in — at `near_fade_p=0.8` a beam is missed for 12
+straight pings with probability 0.8^12.
+
+Exposed as `near_fade` / `near_fade_range` launch arguments on `demo.launch.py`,
+inherited by the nested pointcloud include exactly as `near_cutoff` is, and
+overriding the profile when non-negative:
+
+```
+ros2 launch bringup demo.launch.py slam:=slam noise_profile:=realistic near_fade:=0.8 near_fade_range:=1.6
+```
+
+In the launcher TUI, **Noise Attenuation** gains a third value `fade_close`
+alongside `none` / `cut_close`. "Cut distance (m)" is now "Near-field distance
+(m)" and serves both modes (the cut radius, or the range the fade reaches zero
+at); `fade_close` adds an advanced **"Fade strength"** (`near_fade_p`, default
+0.8).
+
+**Observed impact**: 34 sonar tests (6 new) and the 27 launcher tests pass.
+Measured through the real node on the `realistic` profile, 10 pings against a
+6 m wall: near-field returns per ping 245 with no filter, 0 under
+`near_cutoff:=1.6`, 53 under `near_fade:=0.8` — 78% of the spray gone. Against a
+wall the vehicle has closed on, the difference the fade exists for: at 0.5 m the
+cut leaves 0.1% of the surface and the fade leaves 43%; at 1.0 m, 0.1% vs 65%.
+On the `ideal` profile (no reverberation to relocate into the near field) a wall
+at 2 m and at 5 m returns all 8192 points with the fade on, confirming it is an
+exact no-op beyond its range.
+
+So `cut_close` remains the choice for the cleanest possible cloud in open water,
+and `fade_close` trades ~20% of the spray for keeping close geometry mappable.
+Like the gate, this hides reverberation rather than retuning it — lowering
+`reverb_p` is still the modelling fix, and none of it is fitted to hardware.
+
+**Not verified**: no full sim run. The measurements above drive
+`SonarNoiseNode` in-process with synthetic organized clouds; the effect on a
+TSDF built while approaching an obstacle has not been observed end to end.
+
+## Phase 56 — The near field cleared at its source instead of gated
+
+**Objective**: Phases 32 and 55 both ended on the same caveat — the gate and the
+fade *hide* reverberation rather than retune it, and lowering `reverb_p` is the
+modelling fix. The user asked for a realistic profile without the returns that
+land very close to the vehicle, so this is that fix: a profile where the near
+field is empty because nothing puts returns there, not because a filter deletes
+whatever does.
+
+**What changed**: `slam/slam_backend/config/noise_realistic_no_reverb.yaml`, a
+copy of `noise_realistic.yaml` differing in exactly one field, `reverb_p: 0.0`.
+No `min_range_m`, no `near_fade_p` — the near-field filters stay off and stay
+available as launch overrides. Volume reverberation is the only term in the
+model that can report a range where no surface is: the outlier and multipath
+terms both add *late* arrivals, so they push returns outward, never inward.
+
+Selectable everywhere a profile is: `demo.launch.py`'s `choices` list (which
+would otherwise reject it), the three nested launch descriptions, and all six
+launcher enums — as a master profile and, through `noise_profile_sonar`, as a
+sonar-only override over any nav-sensor profile.
+
+**Observed impact**: 36 sonar tests (2 new) pass. Measured through the real
+node, 10 pings against a 6 m wall on a 67x257 organized cloud:
+
+| profile | near returns/ping (r < 1.6 m) | surface returns |
+|---|---|---|
+| `realistic` | 372.9 | 16151 |
+| `realistic` + `near_cutoff:=1.6` | 0.0 | 15778 |
+| `realistic` + `near_fade:=0.8` | 112.0 | 15881 |
+| `realistic_no_reverb` | **0.0** | **16436** |
+
+The near field is as empty as under the gate, and the surface comes back
+*stronger* than under plain `realistic` (16436 vs 16151): reverberation was not
+only adding phantoms, it was relocating genuine surface returns into the near
+field, since a fired beam reports the volume echo instead of its surface.
+
+The difference the gate could never give, a wall the vehicle has closed on —
+fraction of the surface still returned:
+
+| wall range | `realistic` | `near_cutoff:=1.6` | `near_fade:=0.8` | `realistic_no_reverb` |
+|---|---|---|---|---|
+| 0.5 m | 96.1% | 0.1% | 47.3% | 96.8% |
+| 1.0 m | 96.3% | 0.2% | 74.4% | 96.6% |
+
+So the ordering is now: `realistic_no_reverb` for a clean near field at no cost
+to close geometry, `fade_close` when reverberation should stay modelled but
+thinned, `cut_close` for the harshest clean-up. Because the profile differs from
+`realistic` in one parameter, an A/B against it also isolates what the
+reverberation term alone is worth.
+
+**Not verified**: no full sim run — the measurements drive `SonarNoiseNode`
+in-process on synthetic organized clouds, as in Phase 55. Setting `reverb_p` to
+zero is a modelling choice about the water, not a hardware-fitted value; like
+every other term here it is argued from acoustics rather than measured.
