@@ -41,6 +41,14 @@ project (~250 MB checkout) that isn't part of this repo.
    a third-person chase camera that turns with the robot. Zoom (orbit radius,
    mouse scroll) and manual orbiting still work. **Required** —
    `stonefish_ros2` calls the two-argument overload.
+6. `0006-fix-apply-mesh-scale-to-OBJ-files-that-carry-no-norm.patch` — makes
+   `<mesh scale="...">` take effect on OBJ files that ship no `vn` records.
+   `LoadOBJ` writes scaled positions up front, then its no-normals branch
+   `memcpy`'d the raw positions back over them, discarding the scale; such a
+   mesh always loaded at its native size. Another consequence of upstream's
+   move to `rapidobj`. **Required** for `obj_mesh:=shipwreck.obj` — that is the
+   one mesh in `sim/world/data/obj` exporting UVs but no normals, so it was the
+   only one whose `obj_scale` was ignored.
 
 ## Building
 

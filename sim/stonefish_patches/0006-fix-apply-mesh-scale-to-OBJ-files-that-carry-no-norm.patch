@@ -1,0 +1,33 @@
+From 53bd14bc69a3e4e47bf2b8c98723acf590b3f153 Mon Sep 17 00:00:00 2001
+From: Arcod7 <antoine.esman@epitech.eu>
+Date: Sun, 26 Jul 2026 17:33:22 +0100
+Subject: [PATCH] fix: apply mesh scale to OBJ files that carry no normals
+
+LoadOBJ writes scaled vertex positions up front, then the no-normals
+branch memcpy'd the raw positions back over them, silently discarding
+the scale argument. Meshes exporting positions and UVs but no vn
+records loaded at their native size however <mesh scale="..."> was set.
+
+The overwrite was redundant as well as wrong, so drop it.
+---
+ Library/src/utils/GeometryFileUtil.cpp | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/Library/src/utils/GeometryFileUtil.cpp b/Library/src/utils/GeometryFileUtil.cpp
+index 7b52870..65589c9 100644
+--- a/Library/src/utils/GeometryFileUtil.cpp
++++ b/Library/src/utils/GeometryFileUtil.cpp
+@@ -255,9 +255,7 @@ Mesh* LoadOBJ(const std::string& path, GLfloat scale)
+         }
+         else // No normals
+         {
+-            for (size_t i=0; i<pmesh->vertices.size(); ++i)
+-                memcpy(&pmesh->vertices[i].pos.x, &objData.attributes.positions[i*3], sizeof(glm::vec3));
+-                
++            //Positions were already written scaled above; rewriting them here would drop the scale.
+             for (size_t i=0; i<objData.shapes.size(); ++i) // Fuse all shapes together
+             {
+                 for (size_t h=0; h<objData.shapes[i].mesh.indices.size()/3; ++h) // 3 vertices per face
+-- 
+2.55.0
+
