@@ -53,7 +53,7 @@ MOTION_EXECUTOR_NODE = {
 class Param:
     def __init__(self, id, label, kind, default, section, description,
                  choices=None, choice_help=None, advanced=False, step=None,
-                 visible=lambda v: True, lo=None, hi=None):
+                 visible=lambda v: True, lo=None, hi=None, soon=()):
         self.id = id
         self.label = label
         self.kind = kind                  # enum, bool, int, float, text
@@ -67,6 +67,11 @@ class Param:
         self.visible = visible
         self.lo = lo
         self.hi = hi
+        # Choices that name planned work rather than a runnable configuration.
+        self.soon = frozenset(soon)
+
+    def is_soon(self, value):
+        return value in self.soon
 
     @property
     def live(self):
@@ -253,6 +258,45 @@ PARAMS = [
           "when leaving this control screen. When off, teleop motion is display-only "
           "and the configured launch pose is kept."),
 
+    Param("frontier_space", "Frontier space", "enum", "2d", "frontier",
+          "Where frontiers — the boundary between known-free and unknown — are "
+          "detected. Today that is the 2-D occupancy grid projected around the "
+          "cruise depth, so exploration reasons about one horizontal band even "
+          "when the map underneath it is volumetric. Detecting them directly on "
+          "the map's own voxels would extend exploration to full 3-D structure "
+          "and retire the projection.",
+          ["2d", "3d"],
+          {"2d": "Frontier cells on /projected_map, the depth band around the "
+                 "cruise altitude.",
+           "3d": "Soon — frontier voxels straight off the TSDF, no projection, "
+                 "goals anywhere in the volume."},
+          soon=["3d"], visible=_frontier),
+    Param("exploration", "Exploration policy", "enum", "frontier", "frontier",
+          "What the planner drives toward. Frontier search stops having "
+          "anything to say once the frontier set empties, even where the map is "
+          "thin; scoring candidate views by the information they are expected "
+          "to add keeps exploration going and biases it toward the parts of the "
+          "map that are worst reconstructed.",
+          ["frontier", "infogain", "nbv"],
+          {"frontier": "Frontier clusters only — explore until none are left.",
+           "infogain": "Soon — fall through to the lowest-information TSDF "
+                       "regions once frontiers are exhausted.",
+           "nbv": "Soon — sample viewpoints and score expected sonar coverage "
+                  "(receding-horizon next-best-view)."},
+          soon=["infogain", "nbv"], visible=_frontier),
+    Param("goal_order", "Goal ordering", "enum", "greedy", "frontier",
+          "How the next goal is picked out of the candidate set. Greedy takes "
+          "the best-scoring cluster each tick and commits to it, which "
+          "backtracks over ground it has already crossed. Ordering the top few "
+          "into a short tour cuts mission time without touching the mapping or "
+          "SLAM layers.",
+          ["greedy", "route"],
+          {"greedy": "Best cluster per tick (size/path-cost), commit until "
+                     "reached.",
+           "route": "Soon — order the top-k clusters into a short tour "
+                    "(TARE-style 2-opt)."},
+          soon=["route"], visible=_frontier),
+
     Param("motion", "Path executor", "enum", "default", "frontier",
           "How the planned path is followed. default drives straight down the "
           "path. walloriented follows it while yawing toward the nearest "
@@ -383,6 +427,37 @@ PARAMS = [
           "revisit interrupts the run to the target point and the launcher "
           "resends the point once the detour finishes.",
           visible=lambda v: _slam(v) and _planner(v)),
+    Param("revisit_scoring", "Revisit scoring", "enum", "keyframe_density", "slam",
+          "How a revisit target is chosen once the trigger fires. Keyframe "
+          "density is a proxy for 'somewhere the graph already knows well'; it "
+          "says nothing about whether the geometry there is distinctive enough "
+          "to register against. Suresh et al. score submap saliency instead, so "
+          "the detour goes where a loop closure is likely to succeed rather "
+          "than merely where the robot has been.",
+          ["keyframe_density", "keypoint_density", "fpfh"],
+          {"keyframe_density": "Count past keyframes within the candidate "
+                               "radius, minus a travel penalty.",
+           "keypoint_density": "Soon — score by geometric keypoint density: "
+                               "featureful submaps register more reliably than "
+                               "flat ones.",
+           "fpfh": "Soon — FPFH descriptors into a k-means vocabulary with idf "
+                   "rarity weighting, so the target is distinctive, not just "
+                   "busy."},
+          soon=["keypoint_density", "fpfh"],
+          visible=lambda v: _slam(v) and _planner(v) and v["revisit"]),
+    Param("revisit_trigger", "Revisit trigger", "enum", "live_dopt", "slam",
+          "What decides that it is time to break off and close a loop. The "
+          "live D-optimality scalar crossing a threshold is reactive: it fires "
+          "on uncertainty already accumulated and cannot compare one candidate "
+          "against another. Propagating covariance along each candidate path "
+          "would turn the decision into a cost/benefit one — expected "
+          "uncertainty reduction against the detour it costs.",
+          ["live_dopt", "propagated"],
+          {"live_dopt": "Live D(Sigma)/D(Sigma_allow) above the trigger ratio.",
+           "propagated": "Soon — virtual factors on a mirrored graph project "
+                         "uncertainty forward per candidate before choosing."},
+          soon=["propagated"],
+          visible=lambda v: _slam(v) and _planner(v) and v["revisit"]),
     Param("sigma_allow_xy_m", "Allowable XY sigma", "float", 0.045, "slam",
           "Largest horizontal position uncertainty the mission tolerates, in "
           "metres. With the yaw sigma it defines D(Sigma_allow), the level the "
@@ -514,10 +589,26 @@ DEFAULTS[HIDDEN_SECTIONS_KEY] = list(DEFAULT_HIDDEN_SECTIONS)
 
 # demo.launch.py's name for an option, where it differs from the launcher's id.
 LAUNCH_ARG_ALIASES = {"robot_depth_target": "depth"}
-# Options demo.launch.py has no argument for: launcher-only UI state, and the
-# noise attenuation switch, which it expresses as a near_cutoff distance.
+# Options demo.launch.py has no argument for: launcher-only UI state, the
+# noise attenuation switch (which it expresses as a near_cutoff distance), and
+# the roadmap options below, whose implemented value is the only behaviour
+# there is — nothing downstream reads them.
 LAUNCH_ARG_SKIP = {"keyboard", "robot_save_pose_on_exit", "rqt", "rqt_depthmap",
-                   "thrust_boost", "noise_attenuation", "near_cutoff_m"}
+                   "thrust_boost", "noise_attenuation", "near_cutoff_m",
+                   "frontier_space", "exploration", "goal_order",
+                   "revisit_scoring", "revisit_trigger"}
+
+
+def unimplemented(values):
+    """Selected options that name planned work, as (param, value) pairs.
+
+    These choices exist so the roadmap is visible where the system is actually
+    driven, next to the option they will change. They are not runnable, so the
+    launcher refuses to apply a configuration holding one rather than starting
+    a stack that quietly does something else.
+    """
+    return [(p, values[p.id]) for p in PARAMS
+            if p.soon and p.is_soon(values.get(p.id))]
 
 
 def launch_command(values):
@@ -621,5 +712,22 @@ INFOS = [
         "                 and coverage (TSDF), against a ground-truth map",
         "                 built from the exact pose in parallel.",
         "TUM export       trajectories written to eval/runs/<timestamp>/.",
+    ]),
+    ("Coming next", [
+        "Marked (soon) in the option list, at the option each one",
+        "changes. Selecting one describes it; applying is refused.",
+        "",
+        "3-D frontiers    detect frontiers on TSDF voxels instead of",
+        "                 the projected 2-D band (Frontier space).",
+        "Info-gain / NBV  keep exploring past the last frontier by",
+        "                 expected information (Exploration policy).",
+        "Route ordering   a short tour over the top-k clusters rather",
+        "                 than greedy per tick (Goal ordering).",
+        "Submap saliency  keypoint density, then FPFH descriptors with",
+        "                 idf rarity, to pick revisit targets that will",
+        "                 actually register (Revisit scoring).",
+        "Propagated cov.  project uncertainty along each candidate path",
+        "                 instead of thresholding the live scalar",
+        "                 (Revisit trigger).",
     ]),
 ]

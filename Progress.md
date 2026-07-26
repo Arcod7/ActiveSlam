@@ -2251,3 +2251,50 @@ rqt does not need the planner up first. `current-perspective` in the user ini is
 unchanged after both runs. `bringup` clean-rebuilds, the launcher emits the
 installed `--perspective-file` path, and the 13 launcher tests pass. Not yet
 watched on screen with a display attached.
+
+## Phase 54 — Planned work named in the launcher, next to the option it changes
+
+**Date**: 2026-07-26
+**Files**: `launcher_model.py`, `launcher.py`, `Progress.md`
+
+**Why**: the roadmap and `docs/FUTURE_WORK.md` are the only places the planned
+extensions exist, and neither is open while the system is being driven. Someone
+at the control screen sees frontier exploration and a revisit planner with no
+indication that the frontier set is a 2-D projection of a volumetric map, or
+that revisit targets are scored by keyframe count rather than by whether the
+geometry there is distinctive enough to register against.
+
+**Change**: five enum options whose implemented value is the current behaviour
+and whose remaining values name planned work, marked `(soon)`:
+
+| Option | Now | Planned |
+|---|---|---|
+| Frontier space (Planner) | `2d` — cells on the projected band | `3d` — frontier voxels on the TSDF |
+| Exploration policy (Planner) | `frontier` | `infogain`, `nbv` |
+| Goal ordering (Planner) | `greedy` per tick | `route` — 2-opt tour over the top-k |
+| Revisit scoring (SLAM) | `keyframe_density` | `keypoint_density`, `fpfh` |
+| Revisit trigger (SLAM) | `live_dopt` | `propagated` — virtual factors per candidate |
+
+`Param` gained a `soon` set of choice values and `is_soon()`; `unimplemented()`
+returns the selected ones. A planned value carries `(soon)` in the value list,
+a `(soon)` tag on its own row — not gated on the stack running, since it blocks
+apply on a stopped stack too — and a description in the warning colour rather
+than the green used for a runnable value. Enter is refused as a whole while one
+is selected, with the footer saying so, instead of applying the rest and
+leaving the unimplemented option looking applied. All five are in
+`LAUNCH_ARG_SKIP` and in no group's `depends`, so they reach neither
+`demo.launch.py` nor the restart planner. A "Coming next" block on the info
+screen lists them together with the option each one changes.
+
+**Verified**: defaults select no planned value and `launch_command()` is
+unchanged over the defaults; with `frontier_space:=3d` and
+`revisit_scoring:=fpfh` selected, `unimplemented()` names both and neither
+reaches the launch command. All five are visible without the advanced toggle
+under `mode:=frontier slam:=slam`. The option row, value list, description head
+and blocked-apply footer were drawn in a real curses screen on a 120x40 pty and
+dumped back: `(soon)` renders on the planned values and on the row, the
+description takes the warning colour for a planned value and the ok colour for
+an implemented one, and the footer names the two blocked options. The 7 tests
+in `test/` pass. The full control screen has not been driven end to end on this
+change — the refusal path was exercised through `unimplemented()`, not through
+a keypress.

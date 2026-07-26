@@ -1100,10 +1100,13 @@ def choice_lines(p, value):
 
     Enums list their values; the numeric kinds have no list, so they show the
     bounds and the arrow-key step instead. Bools have none at all — [x]/[ ] on
-    the row already says both states.
+    the row already says both states. A planned-work value carries (soon) here
+    rather than only in the description, so the list itself reads as the
+    roadmap.
     """
     if p.kind == "enum":
-        return [(c, c == value) for c in p.choices]
+        return [(f"{c} (soon)" if p.is_soon(c) else c, c == value)
+                for c in p.choices]
     if p.kind == "bool":
         return []
     if p.kind == "text":
@@ -1585,6 +1588,10 @@ def control_screen(stdscr, sup, values, link, session):
             # before anything is drawn: where the value list starts decides
             # whether it fits, and that decides what the row itself says.
             tags = []
+            # Not gated on `running`: a planned-work value blocks apply, so it
+            # has to be findable on a stopped stack too.
+            if p.is_soon(values[p.id]):
+                tags.append(("(soon)", curses.color_pair(C_WARN) | curses.A_BOLD))
             if running:
                 if p.live:
                     tags.append(("(live)", curses.color_pair(C_OK)))
@@ -1645,9 +1652,12 @@ def control_screen(stdscr, sup, values, link, session):
                 drow += 1
         elif cur.kind == "enum" and values[cur.id] in cur.choice_help:
             head = f"{values[cur.id]}: {cur.choice_help[values[cur.id]]}"
-            for line in textwrap.wrap(head, width)[:2]:
-                put(stdscr, drow, 3, line, curses.color_pair(C_OK) | curses.A_BOLD,
-                    maxx=list_right)
+            # Planned work reads in the warning colour the (soon) tag and the
+            # refused apply use, so one value never looks runnable in green.
+            soon = cur.is_soon(values[cur.id])
+            attr = curses.color_pair(C_WARN if soon else C_OK) | curses.A_BOLD
+            for line in textwrap.wrap(head, width)[:3 if soon else 2]:
+                put(stdscr, drow, 3, line, attr, maxx=list_right)
                 drow += 1
         remaining = (dtop + desc_h) - drow
         if cur is not None and remaining > 0:
@@ -1659,6 +1669,7 @@ def control_screen(stdscr, sup, values, link, session):
         # -- pending changes / status
         _, to_start, to_restart = sup.plan(pending_values)
         pending = sorted(set(to_start + to_restart))
+        planned = model.unimplemented(values)
         foot = h - 2
         # The gate zeroes every command while disarmed, so the drive keys are
         # dead until it is armed — say that instead of listing them.
@@ -1697,6 +1708,14 @@ def control_screen(stdscr, sup, values, link, session):
                 curses.color_pair(C_OK) | curses.A_BOLD)
         elif status:
             put(stdscr, foot, 2, status[:w - 4], curses.color_pair(status_kind) | curses.A_BOLD)
+        elif planned:
+            # Said before the pending list: Enter is refused while one of these
+            # is selected, so promising a restart would be wrong.
+            put(stdscr, foot, 2,
+                ", ".join(p.label for p, _ in planned)
+                + (" is" if len(planned) == 1 else " are")
+                + " planned work — Enter is blocked until set back",
+                curses.color_pair(C_WARN))
         elif running and pending:
             put(stdscr, foot, 2, "Pending — Enter applies (restarts: "
                 + ", ".join(pending) + ")", curses.color_pair(C_WARN))
@@ -1931,6 +1950,16 @@ def control_screen(stdscr, sup, values, link, session):
             else:
                 set_status("Nothing running", C_INFO)
         elif key in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            # Nothing downstream implements these, so applying would start a
+            # stack doing something other than what the screen says. Refused as
+            # a whole rather than per option: a partial apply would leave the
+            # unimplemented one sitting there looking applied.
+            planned = model.unimplemented(values)
+            if planned:
+                names = ", ".join(f"{p.label} = {v}" for p, v in planned)
+                set_status(f"Not implemented yet: {names} — see Coming next on "
+                           f"the info screen", C_WARN)
+                continue
             # `core` is running whenever the stack is up, so its snapshot holds
             # the pose source the running stack was actually started with.
             last_slam = sup.applied.get("core", {}).get("slam")
