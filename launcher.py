@@ -489,6 +489,11 @@ class RosLink:
     def _slam_odom_cb(self, msg):
         self.slam_pose = self._pose_from_msg(msg)
 
+    def forget_pose(self):
+        """Drop the readback once the vehicle it describes is gone."""
+        self.robot_pose = None
+        self.slam_pose = None
+
     def control_pose(self):
         """Pose the drive/point controller works in: the SLAM estimate when
         that owns the TF frame the operator sees, ground truth otherwise —
@@ -1030,6 +1035,15 @@ def unapplied_ids(applied, values):
             and p.id in applied and applied[p.id] != values.get(p.id)}
 
 
+def slam_seed(live_pose, launch_pose):
+    """Where dead reckoning starts: the live vehicle, or the launch pose once
+    there is no vehicle — that is where the next run respawns, and a kept
+    readback would offset SLAM by the distance last driven. Outside every
+    group's `depends`, so a seed change never reads as a pending restart."""
+    live = live_pose or launch_pose
+    return {"slam_seed_x": live["robot_x"], "slam_seed_y": live["robot_y"]}
+
+
 def fmt_value(p, v):
     if p.kind == "bool":
         return "[x]" if v else "[ ]"
@@ -1328,13 +1342,7 @@ def control_screen(stdscr, sup, values, link, session):
         """
         merged = dict(values)
         merged.update(saved_robot_pose)
-        # The SLAM group is the exception: its dead reckoning integrates X/Y
-        # from wherever it is told to start, so a mid-run restart has to be
-        # seeded from the live pose or it re-anchors the world frame at spawn.
-        # Not in any group's `depends`, so it never reads as a pending restart.
-        live = link.robot_pose or saved_robot_pose
-        merged["slam_seed_x"] = live["robot_x"]
-        merged["slam_seed_y"] = live["robot_y"]
+        merged.update(slam_seed(link.robot_pose, saved_robot_pose))
         return merged
 
     def save_config():
@@ -1505,6 +1513,10 @@ def control_screen(stdscr, sup, values, link, session):
             if now in ("exited", "partial"):
                 set_status(f"{gid} {now} — see {os.path.basename(session.path)}",
                            C_ERR)
+        if "core" not in running:
+            # No simulator, no vehicle: a kept readback would seed the next SLAM
+            # launch where the stopped run ended, not where the respawn puts it.
+            link.forget_pose()
         if running:
             # Brought up as soon as the stack is, so discovery has connected
             # before the first arm/teleop keypress rather than dropping it.
@@ -1960,6 +1972,9 @@ def control_screen(stdscr, sup, values, link, session):
                 draw_busy(stdscr, f"Reset: respawning {name} at "
                                   f"({xyz[0]:g}, {xyz[1]:g}, {xyz[2]:g})...")
                 ok, msg = link.respawn(name, xyz, rpy)
+                # Nothing has spun since before the teleport, so the readback
+                # still describes the pre-reset pose — it must not seed SLAM.
+                link.forget_pose()
                 time.sleep(1.0)   # let the physics settle before mapping resumes
                 draw_busy(stdscr, "Reset: restarting mapper/SLAM/planner...")
                 # Snapshot the launch pose, not the odometry readback: the
