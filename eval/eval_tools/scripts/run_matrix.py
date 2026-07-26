@@ -67,6 +67,16 @@ VALID_KEYS = {
     'ratio_trigger', 'ratio_resume',
     'wall_orientation_offset_deg', 'wall_orientation_lookahead_m',
     'tsdf_frontier_standoff_m',
+    # Map resolution and wall thresholds, and the A* inflation radii: a batch
+    # that cannot set these cannot reproduce a tuned interactive config.
+    'voxel_size', 'voxel_min_weight', 'voxel_min_solid_confidence',
+    'hard_inflation_m', 'inflation_m', 'plan_inflation_m',
+    # The rest of the wall-oriented executor's geometry.
+    'wall_standoff', 'wall_switch_goal_distance', 'wall_switch_scan_angle',
+    'wall_switch_scan_yaw', 'wall_path_influence', 'wall_path_look_offset_deg',
+    'wall_normal_offset_deg', 'wall_path_heading_weight',
+    # Survey working area: bounds frontier exploration to the structure.
+    'survey_radius_m', 'survey_center_x', 'survey_center_y',
 }
 
 
@@ -596,6 +606,11 @@ def main():
     parser.add_argument('--aggregate-only', metavar='BATCH_DIR',
                          help='Re-aggregate an existing batch directory (reads manifest.json '
                               'files, no new runs)')
+    parser.add_argument('--seeds', type=int, nargs='+', metavar='SEED',
+                         help="Override the config's seed list. Extends an existing "
+                              'sweep with more samples without editing the YAML: the '
+                              'new runs land in their own batch directory, and the '
+                              'plotting script pools batch directories by arm.')
     args = parser.parse_args()
 
     if args.aggregate_only:
@@ -606,6 +621,8 @@ def main():
         parser.error('config is required unless --aggregate-only is given')
 
     cfg = load_matrix(args.config)
+    if args.seeds:
+        cfg['seeds'] = args.seeds
     run_matrix(cfg, args.batch_root, dry_run=args.dry_run)
 
 
