@@ -38,6 +38,29 @@ from slam_backend.odom_noise import odom_trans_sigma
 from slam_backend.scan_matcher import ScanMatcher
 
 
+def pose_delta(T_old: np.ndarray, T_new: np.ndarray) -> tuple:
+    """Translation (m) and rotation (rad) between two world poses."""
+    T_delta = np.linalg.inv(T_old) @ T_new
+    dist = float(np.linalg.norm(T_delta[:3, 3]))
+    angle = float(np.arccos(np.clip((np.trace(T_delta[:3, :3]) - 1) / 2, -1, 1)))
+    return dist, angle
+
+
+def worst_pose_drift(pairs) -> tuple:
+    """Largest translation/rotation over (T_old, T_new) pairs, and the count.
+
+    Returns (0.0, 0.0, 0) for an empty sequence, so a caller with nothing yet
+    corrected reads as "no drift" rather than raising."""
+    worst_dist = worst_angle = 0.0
+    n = 0
+    for T_old, T_new in pairs:
+        dist, angle = pose_delta(T_old, T_new)
+        worst_dist = max(worst_dist, dist)
+        worst_angle = max(worst_angle, angle)
+        n += 1
+    return worst_dist, worst_angle, n
+
+
 # Rows/cols of a GTSAM [rot|trans] 6x6 that hold the drifting DoF: x, y, yaw.
 XYH_INDICES = [3, 4, 2]
 
@@ -575,13 +598,16 @@ class PoseGraphNode(Node):
             if redetect:
                 self._redetect_and_apply(redetect)
 
+        # Measured against the last rebuild's baseline, not against this
+        # update: the correction the rebuild publishes is cumulative, so the
+        # threshold deciding whether to publish it has to be too. Gated on
+        # `moved` only as a cheap early-out — nothing moved, nothing changed.
         if self.map_rebuild_enabled and moved:
-            max_dist = max(dist for _, dist, _ in moved)
-            max_angle = max(angle for _, _, angle in moved)
+            max_dist, max_angle, n_drifted = self._drift_since_rebuild()
             rebuild_min_move_m = float(self.get_parameter('rebuild_min_move_m').value)
             rebuild_min_move_rad = float(self.get_parameter('rebuild_min_move_rad').value)
             if max_dist > rebuild_min_move_m or max_angle > rebuild_min_move_rad:
-                self._maybe_trigger_rebuild(max_dist, max_angle, len(moved))
+                self._maybe_trigger_rebuild(max_dist, max_angle, n_drifted)
 
         # Marginal covariance is queried only for the node just added — walking
         # every stored keyframe on each update would grow the per-keyframe cost
@@ -768,18 +794,31 @@ class PoseGraphNode(Node):
 
     def _find_moved_keyframes(self, result_values, threshold_m=0.1, threshold_rad=0.05):
         """Returns [(index, dist, angle), ...] for keyframes that shifted more
-        than the threshold; dist/angle are also read by the map-rebuild
-        trigger (a coarser threshold on the same numbers, see _add_keyframe)."""
+        than the threshold *in this update* — the trigger for re-detecting
+        loop closures on keyframes whose pose just changed.
+
+        Deliberately NOT the map-rebuild trigger: see _drift_since_rebuild."""
         moved = []
         for kf in self._keyframes:
             T_new = result_values.atPose3(kf.symbol).matrix()
-            T_delta = np.linalg.inv(kf.T_world) @ T_new
-            dist = np.linalg.norm(T_delta[:3, 3])
-            angle = np.arccos(np.clip((np.trace(T_delta[:3, :3]) - 1) / 2, -1, 1))
+            dist, angle = pose_delta(kf.T_world, T_new)
             if dist > threshold_m or angle > threshold_rad:
                 moved.append((kf.index, dist, angle))
             self._refresh_pose(kf, T_new)
         return moved
+
+    def _drift_since_rebuild(self):
+        """Worst keyframe correction accumulated since the last re-integration.
+
+        This, not the per-update movement, is what the map is stale by: the
+        rebuild publishes its corrections against _rebuild_old_poses, so the
+        trigger has to be measured against the same baseline. With loop
+        closure running continuously a metre of accumulated correction
+        arrives in centimetre increments, and no single update ever crosses
+        a 0.3 m threshold while the map drifts metres behind the graph."""
+        return worst_pose_drift(
+            (old, kf.T_world) for kf in self._keyframes
+            if (old := self._rebuild_old_poses.get(kf.index)) is not None)
 
     def _redetect_and_apply(self, moved_indices):
         """Re-run loop-closure detection for keyframes that shifted after the
