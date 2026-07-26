@@ -1003,6 +1003,11 @@ def visible_params(values, show_advanced):
     return out
 
 
+def row_id(p, section):
+    """Identity of a drawn row, stable across rebuilds of the option list."""
+    return p.id if p is not None else ("#", section)
+
+
 def pending_tag(pend, limit=2):
     """'[restarts mapper, planner +2]' from Supervisor.pending_for().
 
@@ -1324,8 +1329,11 @@ def control_screen(stdscr, sup, values, link, session):
                                model.DEFAULT_HIDDEN_SECTIONS))
     # Row 0 is a section heading, where Enter folds rather than applies; park
     # the cursor on the first real option instead whenever the list is rebuilt
-    # from scratch (first draw, preset, advanced toggle).
+    # from scratch (first draw, preset).
     snap_to_option = True
+    # Row identities the cursor may land on after a rebuild that only changed
+    # which rows exist (advanced toggle), nearest first — the index alone shifts.
+    keep_cursor_on = None
 
     def set_status(msg, kind=C_OK):
         nonlocal status, status_kind
@@ -1496,6 +1504,13 @@ def control_screen(stdscr, sup, values, link, session):
         if snap_to_option:
             idx = next((r for r, (p, _) in enumerate(rows) if p is not None), 0)
             snap_to_option = False
+        elif keep_cursor_on is not None:
+            # First surviving row at or above where the cursor was. Hiding the
+            # advanced set can take away the selected row, and every row above
+            # it up to a whole section, so one fallback is not enough.
+            ids = [row_id(p, s) for p, s in rows]
+            idx = next((ids.index(c) for c in keep_cursor_on if c in ids), idx)
+            keep_cursor_on = None
         idx = max(0, min(idx, len(rows) - 1))
         cur, cur_section = rows[idx]
 
@@ -1577,12 +1592,19 @@ def control_screen(stdscr, sup, values, link, session):
                     last_point_pub_at = time.time()
         title = "ActiveSlam Control Center"
         put(stdscr, 0, 2, title, curses.A_BOLD)
+        title_end = 2 + len(title)
+        # The option list is the only sign the advanced set is shown, and it
+        # looks the same as a list scrolled past them.
+        if show_advanced:
+            tag = "  [advanced]"
+            put(stdscr, 0, title_end, tag, curses.color_pair(C_INFO))
+            title_end += len(tag)
         # A layer that goes down on its own is named next to the title: nothing
         # else on this screen reports one group being gone while the rest runs.
         down = [gid for gid in core.GROUP_ORDER
                 if sup.status(gid) in ("exited", "partial")]
         if down:
-            put(stdscr, 0, 4 + len(title), "! " + ", ".join(down) + " down",
+            put(stdscr, 0, title_end + 2, "! " + ", ".join(down) + " down",
                 curses.color_pair(C_ERR) | curses.A_BOLD)
         state = "RUNNING" if running else "STOPPED"
         # Gate state is what decides whether the vehicle can move at all, so it
@@ -1942,7 +1964,9 @@ def control_screen(stdscr, sup, values, link, session):
             set_status(f"Preset: {model.PRESETS[preset_idx][0]}", C_INFO)
         elif key in (ord("o"), ord("O")):
             show_advanced = not show_advanced
-            snap_to_option = True
+            # Showing advanced options is a change of view, not of selection —
+            # jumping the cursor to the top loses the operator's place.
+            keep_cursor_on = [row_id(p, s) for p, s in rows[idx::-1]]
         elif key in (ord("r"), ord("R")):
             if not sup.running_ids():
                 set_status("Start the stack before resetting", C_WARN)
