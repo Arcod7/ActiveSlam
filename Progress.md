@@ -2359,3 +2359,58 @@ Like the gate, this hides reverberation rather than retuning it — lowering
 **Not verified**: no full sim run. The measurements above drive
 `SonarNoiseNode` in-process with synthetic organized clouds; the effect on a
 TSDF built while approaching an obstacle has not been observed end to end.
+
+## Phase 56 — The near field cleared at its source instead of gated
+
+**Objective**: Phases 32 and 55 both ended on the same caveat — the gate and the
+fade *hide* reverberation rather than retune it, and lowering `reverb_p` is the
+modelling fix. The user asked for a realistic profile without the returns that
+land very close to the vehicle, so this is that fix: a profile where the near
+field is empty because nothing puts returns there, not because a filter deletes
+whatever does.
+
+**What changed**: `slam/slam_backend/config/noise_realistic_no_reverb.yaml`, a
+copy of `noise_realistic.yaml` differing in exactly one field, `reverb_p: 0.0`.
+No `min_range_m`, no `near_fade_p` — the near-field filters stay off and stay
+available as launch overrides. Volume reverberation is the only term in the
+model that can report a range where no surface is: the outlier and multipath
+terms both add *late* arrivals, so they push returns outward, never inward.
+
+Selectable everywhere a profile is: `demo.launch.py`'s `choices` list (which
+would otherwise reject it), the three nested launch descriptions, and all six
+launcher enums — as a master profile and, through `noise_profile_sonar`, as a
+sonar-only override over any nav-sensor profile.
+
+**Observed impact**: 36 sonar tests (2 new) pass. Measured through the real
+node, 10 pings against a 6 m wall on a 67x257 organized cloud:
+
+| profile | near returns/ping (r < 1.6 m) | surface returns |
+|---|---|---|
+| `realistic` | 372.9 | 16151 |
+| `realistic` + `near_cutoff:=1.6` | 0.0 | 15778 |
+| `realistic` + `near_fade:=0.8` | 112.0 | 15881 |
+| `realistic_no_reverb` | **0.0** | **16436** |
+
+The near field is as empty as under the gate, and the surface comes back
+*stronger* than under plain `realistic` (16436 vs 16151): reverberation was not
+only adding phantoms, it was relocating genuine surface returns into the near
+field, since a fired beam reports the volume echo instead of its surface.
+
+The difference the gate could never give, a wall the vehicle has closed on —
+fraction of the surface still returned:
+
+| wall range | `realistic` | `near_cutoff:=1.6` | `near_fade:=0.8` | `realistic_no_reverb` |
+|---|---|---|---|---|
+| 0.5 m | 96.1% | 0.1% | 47.3% | 96.8% |
+| 1.0 m | 96.3% | 0.2% | 74.4% | 96.6% |
+
+So the ordering is now: `realistic_no_reverb` for a clean near field at no cost
+to close geometry, `fade_close` when reverberation should stay modelled but
+thinned, `cut_close` for the harshest clean-up. Because the profile differs from
+`realistic` in one parameter, an A/B against it also isolates what the
+reverberation term alone is worth.
+
+**Not verified**: no full sim run — the measurements drive `SonarNoiseNode`
+in-process on synthetic organized clouds, as in Phase 55. Setting `reverb_p` to
+zero is a modelling choice about the water, not a hardware-fitted value; like
+every other term here it is argued from acoustics rather than measured.

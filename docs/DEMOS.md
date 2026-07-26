@@ -6,9 +6,11 @@ ROS2 workspace after `colcon build --symlink-install` and `source install/setup.
 Noise profiles: `ideal` (near-perfect everything), `sonar_only` (realistic sonar,
 near-ideal nav sensors), `odom_pos_only` (realistic DVL/pressure position,
 exact Stonefish orientation and sonar), `odom_only` (ground-truth sonar,
-realistic nav sensors), `realistic` (datasheet values everywhere), `degraded`
-(turbid water / magnetic interference). Add `noise_seed:=42` to any SLAM run
-for reproducibility.
+realistic nav sensors), `realistic` (datasheet values everywhere),
+`realistic_no_reverb` (`realistic` without the near-field volume reverberation,
+so no spray around the vehicle while close geometry is still reported),
+`degraded` (turbid water / magnetic interference). Add `noise_seed:=42` to any
+SLAM run for reproducibility.
 
 ## 1. Base demo — teleop + OctoMap, ground-truth pose
 
@@ -214,7 +216,7 @@ ros2 launch bringup demo.launch.py slam:=slam mode:=frontier mapper:=tsdf \
 | `wall_normal_offset_deg` | `0.0` | `motion:=walllooking`; turn wall-derived look heading toward path |
 | `wall_path_heading_weight` | `0.35` | `motion:=walllooking`; look blend: 0=wall-derived, 1=path-derived |
 | `slam` | `none`, `slam` | |
-| `noise_profile` | `realistic`, `ideal`, `sonar_only`, `odom_pos_only`, `odom_only`, `degraded` | `slam:=slam` |
+| `noise_profile` | `realistic`, `realistic_no_reverb`, `ideal`, `sonar_only`, `odom_pos_only`, `odom_only`, `degraded` | `slam:=slam` |
 | `loop_closure` | `true`, `false` | `slam:=slam` |
 | `noise_seed` | `-1` (profile default), any int | `slam:=slam` |
 | `scenario` | `none`, `drift_return` | `mode:=frontier` |

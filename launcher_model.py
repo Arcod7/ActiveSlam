@@ -413,8 +413,11 @@ PARAMS = [
     Param("noise_profile", "Noise profile (all sensors)", "enum", "realistic", "slam",
           "Which sensor error model feeds the pose graph and the sonar. Also "
           "drives the noise applied to /cloud_in.",
-          ["realistic", "ideal", "sonar_only", "odom_pos_only", "odom_only", "degraded"],
+          ["realistic", "realistic_no_reverb", "ideal", "sonar_only",
+           "odom_pos_only", "odom_only", "degraded"],
           {"realistic": "Datasheet-grounded sonar + nav sensor noise.",
+           "realistic_no_reverb": "Realistic with volume reverberation off — no "
+                                  "near-field spray, close geometry still mapped.",
            "ideal": "No noise — upper bound / sanity check.",
            "sonar_only": "Realistic sonar, near-ideal nav sensors.",
            "odom_pos_only": "Realistic DVL/pressure, exact orientation and sonar.",
@@ -426,8 +429,8 @@ PARAMS = [
           "map/range error knob. Each sim node reads only its own YAML section, so "
           "isolating one error source needs no merged profile. "
           "inherit = follow the master profile above.",
-          ["inherit", "realistic", "ideal", "sonar_only", "odom_pos_only",
-           "odom_only", "degraded"],
+          ["inherit", "realistic", "realistic_no_reverb", "ideal", "sonar_only",
+           "odom_pos_only", "odom_only", "degraded"],
           {"inherit": "Follow the master Noise profile."},
           advanced=True, visible=_slam),
     Param("noise_profile_dvl", "  DVL profile", "enum", "inherit", "slam",
@@ -435,8 +438,8 @@ PARAMS = [
           "position drift knob. Each sim node reads only its own YAML section, so "
           "isolating one error source needs no merged profile. "
           "inherit = follow the master profile above.",
-          ["inherit", "realistic", "ideal", "sonar_only", "odom_pos_only",
-           "odom_only", "degraded"],
+          ["inherit", "realistic", "realistic_no_reverb", "ideal", "sonar_only",
+           "odom_pos_only", "odom_only", "degraded"],
           {"inherit": "Follow the master Noise profile."},
           advanced=True, visible=_slam),
     Param("noise_profile_imu", "  IMU profile", "enum", "inherit", "slam",
@@ -444,8 +447,8 @@ PARAMS = [
           "angular error (roll/pitch/yaw rate) knob. Each sim node reads only its own YAML section, so "
           "isolating one error source needs no merged profile. "
           "inherit = follow the master profile above.",
-          ["inherit", "realistic", "ideal", "sonar_only", "odom_pos_only",
-           "odom_only", "degraded"],
+          ["inherit", "realistic", "realistic_no_reverb", "ideal", "sonar_only",
+           "odom_pos_only", "odom_only", "degraded"],
           {"inherit": "Follow the master Noise profile."},
           advanced=True, visible=_slam),
     Param("noise_profile_compass", "  Compass profile", "enum", "inherit", "slam",
@@ -453,8 +456,8 @@ PARAMS = [
           "angular error (absolute heading) knob. Each sim node reads only its own YAML section, so "
           "isolating one error source needs no merged profile. "
           "inherit = follow the master profile above.",
-          ["inherit", "realistic", "ideal", "sonar_only", "odom_pos_only",
-           "odom_only", "degraded"],
+          ["inherit", "realistic", "realistic_no_reverb", "ideal", "sonar_only",
+           "odom_pos_only", "odom_only", "degraded"],
           {"inherit": "Follow the master Noise profile."},
           advanced=True, visible=_slam),
     Param("noise_profile_pressure", "  Pressure profile", "enum", "inherit", "slam",
@@ -462,8 +465,8 @@ PARAMS = [
           "depth error knob. Each sim node reads only its own YAML section, so "
           "isolating one error source needs no merged profile. "
           "inherit = follow the master profile above.",
-          ["inherit", "realistic", "ideal", "sonar_only", "odom_pos_only",
-           "odom_only", "degraded"],
+          ["inherit", "realistic", "realistic_no_reverb", "ideal", "sonar_only",
+           "odom_pos_only", "odom_only", "degraded"],
           {"inherit": "Follow the master Noise profile."},
           advanced=True, visible=_slam),
     Param("noise_attenuation", "Noise Attenuation", "enum", "none", "slam",

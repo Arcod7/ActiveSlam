@@ -184,12 +184,17 @@ it is missing.
 - `noise_odom_only.yaml`: realistic DVL/pressure/IMU+compass navigation with exact sonar passthrough
 - `noise_realistic.yaml`: matches Bar30 pressure + Pathfinder DVL + gyro/compass attitude; sonar section
   derived from the WaterLinked Sonar 3D-15 datasheet (`ActiveSlam-Resources/3d-sonar`)
+- `noise_realistic_no_reverb.yaml`: `realistic` with `reverb_p: 0` — the only term that puts
+  returns in the near field where no surface is. Removes the spray at its source, so unlike
+  `near_cutoff`/`near_fade` (which gate *all* returns under a range) a real surface the vehicle
+  drives up to is still mapped. Every other sonar term and every nav section is `realistic` verbatim,
+  so it is also the controlled A/B for what the reverberation term alone costs
 - `noise_degraded.yaml`: turbid water / magnetic interference / degraded bottom-lock; sonar section
   worse-than-datasheet (full beam-separation lateral jitter, higher dropout/outlier rates,
   stronger specular loss, larger dropout patches, uncalibrated speed of sound)
 
 Each profile's `seed:` (42 for `ideal`/`sonar_only`/`odom_pos_only`/`odom_only`,
--1/random for `realistic`/`degraded`) is combined with a per-sensor offset
+-1/random for `realistic`/`realistic_no_reverb`/`degraded`) is combined with a per-sensor offset
 (imu +1, dvl +2, pressure +3, sonar +4, compass +5) before seeding, so co-launched sims no
 longer draw identical RNG streams off one shared seed — this changed `ideal`'s exact per-sensor
 draws vs. pre-Phase-16 runs (same seed, different effective value per node); nothing previously

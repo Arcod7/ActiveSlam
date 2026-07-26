@@ -201,6 +201,32 @@ def test_realistic_profile_enables_every_new_term():
     assert p.multipath_p > 0
 
 
+def test_no_reverb_profile_differs_from_realistic_only_in_reverb():
+    """The near field is cleared at its source, not by a gate: reverb off, and
+    no min_range_m/near_fade_p that would also erase real close geometry."""
+    p = load_noise_profile(CONFIG_DIR / 'noise_realistic_no_reverb.yaml').sonar
+    ref = load_noise_profile(CONFIG_DIR / 'noise_realistic.yaml').sonar
+    assert p.reverb_p == 0.0
+    assert p.min_range_m == 0.0 and p.near_fade_p == 0.0
+    differs = {f for f in vars(p) if getattr(p, f) != getattr(ref, f)}
+    assert differs == {'reverb_p'}
+
+
+def test_no_reverb_profile_emits_no_near_field_returns():
+    """A wall at 5 m produces nothing in the reverb band under this profile,
+    where `realistic` sprays returns inside reverb_max_m."""
+    p = load_noise_profile(CONFIG_DIR / 'noise_realistic_no_reverb.yaml').sonar
+    grid = plane_grid(0.0, distance=5.0)
+    rng = np.random.default_rng(3)
+    f_reverb, _ = correlated_field(rng, grid.shape[:2], p.corr_length_px)
+    out, mask = reverberation_range(
+        np.linalg.norm(grid, axis=-1), incidence_cosine(grid),
+        np.ones(grid.shape[:2], bool), f_reverb, rng, p)
+    assert not mask.any()
+    r = np.linalg.norm(noisy(grid, p, seed=3), axis=1)
+    assert np.nanmin(r) > p.reverb_max_m
+
+
 # --- item 3: strongest-return ranging ---------------------------------------
 
 def wall_with_bar(bar_range=2.0, wall_range=3.0, bar_cols=slice(64, 65)):

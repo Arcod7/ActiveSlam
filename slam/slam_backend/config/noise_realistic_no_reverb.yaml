@@ -1,0 +1,55 @@
+name: realistic_no_reverb
+# `realistic` with volume reverberation off: no phantom returns in the near
+# field, while a real surface the vehicle drives up to is still reported.
+# Removes the spray at its source rather than gating it after the fact, so
+# unlike near_cutoff nothing real is lost. Every other sonar term, and every
+# nav-sensor section, is `realistic` verbatim.
+seed: -1
+pressure:
+  sigma_depth_m: 0.02        # Bar30: ±2cm resolution
+  bias_m: 0.0
+  publish_rate_hz: 10.0
+imu:                         # realistic gyro-integrated attitude
+  sigma_roll_rad: 0.02       # ~1.1° — typical MEMS accelerometer
+  sigma_pitch_rad: 0.02
+  sigma_yaw_rad: 0.01        # ~0.6° short-term gyro attitude
+  gyro_bias_drift_rad_s: 0.0001
+  publish_rate_hz: 50.0
+compass:                     # absolute magnetic heading
+  sigma_yaw_rad: 0.05        # ~2.9° after calibration
+  bias_drift_rad_s: 0.0001
+  publish_rate_hz: 10.0
+dvl:
+  sigma_pct: 0.01            # Pathfinder DVL: ±1% of speed + 0.1 cm/s
+  sigma_floor_m_s: 0.001
+  bias_m_s: 0.001
+  scale_error_pct: 0.002     # 0.2% constant scale error (sampled once per run)
+  publish_rate_hz: 10.0
+sonar:                       # WaterLinked Sonar 3D-15, 1.2MHz mode datasheet
+  range_quant_m: 0.0015      # range resolution
+  range_sigma0_m: 0.005      # noise floor ~ a few x range resolution
+  range_sigma_k: 0.001       # speckle/SNR term, ~0.1% of range
+  lat_sigma_h_per_m: 0.003   # 0.5 x tan(0.35 deg beam separation)
+  lat_sigma_v_per_m: 0.005   # 0.5 x tan(0.60 deg beam separation)
+  dropout_p0: 0.02           # low-reflectivity / absorbing-surface no-returns
+  dropout_p_range: 0.05      # extra dropout growth toward max range
+  dropout_p_grazing: 0.35    # specular loss: an edge-on wall returns almost nothing
+  corr_length_px: 6.0        # speckle/dropout patch size, ~2 deg of beam pattern
+  corr_rho_time: 0.7         # partly frozen speckle between consecutive pings
+  range_corr_frac: 0.5       # half the range-error variance is beam-correlated
+  sos_scale_error_pct: 0.007 # 1500 m/s assumed vs. real salinity/temperature
+  outlier_p: 0.002           # sparse multipath returns
+  outlier_range_min_m: 0.3   # late arrivals only: an outlier never lands nearer
+  outlier_range_max_m: 3.0
+  argmax_window_px: 3        # beam ~1 px wide; small window bleeds edges / fades thin targets
+  argmax_beam_sigma_px: 1.5
+  lat_sigma_beam_frac: 0.5   # cross-range jitter = half the local beam width x range
+  reverb_p: 0.0             # off: the near-field spray this profile exists to avoid
+  reverb_max_m: 1.5         # unused while reverb_p is 0; kept as the `realistic` value
+  reverb_weak_boost: 3.0    # likewise
+  multipath_p: 0.05          # geometric second-bounce, fired only where geometry re-hits
+  multipath_grazing_exp: 1.0
+  min_range_m: 0.0          # no near-field gate: close geometry is kept, not cut
+  near_fade_p: 0.0          # soft gate; override per-run with the near_fade launch arg
+  near_fade_range_m: 1.6    # only consulted if near_fade is turned on
+  near_fade_exp: 1.0
