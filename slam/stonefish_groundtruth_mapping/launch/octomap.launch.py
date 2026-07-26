@@ -35,6 +35,11 @@ def generate_launch_description():
             '-1 = auto-lock (unknown at launch time, so the map stays full-column).'),
     )
 
+    voxel_size_arg = DeclareLaunchArgument(
+        'voxel_size', default_value='0.2',
+        description='octomap_server resolution in metres',
+    )
+
     pointcloud = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(_LAUNCH_DIR, 'pointcloud.launch.py'))
     )
@@ -44,7 +49,8 @@ def generate_launch_description():
         launch_arguments={
             'mapper': 'octomap',
             'depth': LaunchConfiguration('depth'),
+            'voxel_size': LaunchConfiguration('voxel_size'),
         }.items(),
     )
 
-    return LaunchDescription([depth_arg, pointcloud, octomap])
+    return LaunchDescription([depth_arg, voxel_size_arg, pointcloud, octomap])

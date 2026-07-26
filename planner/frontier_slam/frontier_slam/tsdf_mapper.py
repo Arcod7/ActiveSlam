@@ -64,6 +64,7 @@ from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point, PoseStamped
+from rcl_interfaces.msg import SetParametersResult
 from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from rclpy.time import Time
@@ -199,6 +200,12 @@ class TSDFMapper(Node):
         self.get_logger().info(
             f'TSDF  voxel={voxel_size}m  trunc={trunc}m  space_carving={space_carving}')
 
+        # Thresholds that filter what the map publishes rather than what it
+        # stores, so they can move without touching the grid. Settable at
+        # runtime for exactly that reason: retuning a wall threshold should not
+        # cost the map built so far.
+        self.add_on_set_parameters_callback(self._on_set_parameters)
+
         # ── TF ──────────────────────────────────────────────────────────
         self._tf_buffer   = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -323,6 +330,41 @@ class TSDFMapper(Node):
                           callback_group=self._viz_group)
 
         self.get_logger().info('tsdf_mapper ready')
+
+    # ────────────────────────────────────────────────────────────────────
+    # Live parameters
+    # ────────────────────────────────────────────────────────────────────
+
+    LIVE_PARAMS = ('voxel_min_weight', 'voxel_min_solid_confidence',
+                   'target_depth_m')
+
+    def _on_set_parameters(self, params):
+        """Apply the publish-time thresholds; refuse what the grid was built on.
+
+        Rejecting the rest is the point: voxel_size and trunc_distance are
+        baked into the VDB volume, and silently accepting them would report a
+        resolution the map does not have.
+        """
+        unsupported = [p.name for p in params if p.name not in self.LIVE_PARAMS]
+        if unsupported:
+            return SetParametersResult(
+                successful=False,
+                reason=f"{', '.join(unsupported)}: launch-time only")
+        for p in params:
+            value = float(p.value)
+            if p.name == 'voxel_min_weight':
+                self._voxel_min_weight = value
+            elif p.name == 'voxel_min_solid_confidence':
+                self._voxel_min_solid_confidence = value
+                self._voxel_max_d = self._trunc * (1.0 - 2.0 * value)
+            else:
+                self._target_depth = value
+                # Negative hands the band centre back to the next TF lookup.
+                self._projected_map_z = value if value >= 0.0 else None
+            self.get_logger().info(f'{p.name} = {value:g} (live)')
+        # The viz and projection caches redraw on a revision change only.
+        self._map_revision += 1
+        return SetParametersResult(successful=True)
 
     # ────────────────────────────────────────────────────────────────────
     # Cloud callback — integrate now when TF is ready, otherwise defer

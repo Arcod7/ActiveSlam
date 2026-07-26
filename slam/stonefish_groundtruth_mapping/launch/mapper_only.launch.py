@@ -31,6 +31,16 @@ corrected keyframe poses after a big loop closure.
 range to a band centred on that depth (see z_band.py) instead of the
 stock full-column projection — skipped when depth is auto-locked, since
 the actual depth is unknown at launch time in that case.
+
+`voxel_size` is the one cell size for both backends: octomap_server's
+resolution, the TSDF grid's voxel_size, and the octree tsdf_to_octomap
+rebuilds from it. The TSDF truncation band follows at 3x voxel_size, the
+minimum VDBFusion needs for a usable gradient.
+
+`voxel_min_weight` and `voxel_min_solid_confidence` decide what the TSDF
+calls a wall — how often a voxel must be observed, and how far behind the
+zero crossing it must sit. Both feed the voxel view, /tsdf/occupied_voxels
+and /projected_map, so loosening them opens up planning space too.
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
@@ -46,7 +56,8 @@ def _octomap_node(context, *args, **kwargs):
     depth = float(LaunchConfiguration('depth').perform(context))
     params = {
         'frame_id':               'world_ned',
-        'resolution':             0.2,        # 20 cm voxels
+        'resolution':             float(
+            LaunchConfiguration('voxel_size').perform(context)),
         'sensor_model/max_range': 15.0,       # matches Dcam depth_max in .scn
         'latch':                  True,
     }
@@ -109,6 +120,21 @@ def generate_launch_description():
         description='TSDF only: rebuild an octomap::OcTree from this TSDF grid '
         'and publish it on /tsdf/octomap_binary (tsdf_to_octomap)',
     )
+    voxel_size_arg = DeclareLaunchArgument(
+        'voxel_size', default_value='0.2',
+        description='Map cell size in metres, for both backends: octomap_server '
+        'resolution, TSDF voxel_size, and the tsdf_to_octomap octree',
+    )
+    voxel_min_weight_arg = DeclareLaunchArgument(
+        'voxel_min_weight', default_value='10.0',
+        description='TSDF only: how many times a voxel must be observed before '
+        'it counts as a wall (integration weight)',
+    )
+    voxel_min_solid_confidence_arg = DeclareLaunchArgument(
+        'voxel_min_solid_confidence', default_value='0.80',
+        description='TSDF only: how far behind the zero crossing a voxel must '
+        'sit to count as a wall — 0.5 = at the surface, 1.0 = fully saturated',
+    )
 
     # Built through an OpaqueFunction so the Z band can be resolved from `depth`
     # at launch time — see _octomap_node above.
@@ -122,6 +148,18 @@ def generate_launch_description():
         parameters=[{
             'enable_rebuild': LaunchConfiguration('map_rebuild'),
             'carve_no_return': LaunchConfiguration('carve_no_return'),
+            'voxel_size': ParameterValue(
+                LaunchConfiguration('voxel_size'), value_type=float),
+            # VDBFusion needs >= 3x the voxel size to have a gradient to work
+            # with, so the truncation band tracks the cell size instead of
+            # being a second knob that can silently invalidate the first.
+            'trunc_distance': ParameterValue(
+                PythonExpression(['3.0 * ', LaunchConfiguration('voxel_size')]),
+                value_type=float),
+            'voxel_min_weight': ParameterValue(
+                LaunchConfiguration('voxel_min_weight'), value_type=float),
+            'voxel_min_solid_confidence': ParameterValue(
+                LaunchConfiguration('voxel_min_solid_confidence'), value_type=float),
             'publish_projected_map': ParameterValue(
                 LaunchConfiguration('publish_projected_map'), value_type=bool),
             'target_depth_m': ParameterValue(
@@ -136,15 +174,16 @@ def generate_launch_description():
         condition=LaunchConfigurationEquals('mapper', 'tsdf'),
     )
 
-    # resolution mirrors tsdf_mapper's voxel_size default (0.2): the octree
-    # cells are the TSDF cells, not a resampling of them.
+    # resolution follows tsdf_mapper's voxel_size: the octree cells are the
+    # TSDF cells, not a resampling of them.
     tsdf_to_octomap = Node(
         package='tsdf_octomap',
         executable='tsdf_to_octomap',
         name='tsdf_to_octomap',
         output='screen',
         parameters=[{
-            'resolution': 0.2,
+            'resolution': ParameterValue(
+                LaunchConfiguration('voxel_size'), value_type=float),
             'world_frame': 'world_ned',
         }],
         # /octomap_binary belongs to octomap_server (mapper:=octomap) and to
@@ -164,5 +203,6 @@ def generate_launch_description():
                               carve_no_return_arg,
                               publish_projected_map_arg, target_depth_m_arg,
                               projected_map_band_m_arg, projected_map_margin_cells_arg,
-                              tsdf_octomap_arg,
+                              tsdf_octomap_arg, voxel_size_arg,
+                              voxel_min_weight_arg, voxel_min_solid_confidence_arg,
                               octomap, tsdf_mapper, tsdf_to_octomap])

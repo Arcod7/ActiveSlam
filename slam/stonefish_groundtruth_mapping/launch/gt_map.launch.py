@@ -37,8 +37,9 @@ standalone use without the noise node running.
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import LaunchConfigurationEquals
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -49,6 +50,22 @@ def generate_launch_description():
     gt_cloud_source_arg = DeclareLaunchArgument(
         'gt_cloud_source', default_value='/cloud_in_raw',
         description='Pre-noise cloud topic to feed the ground-truth map from',
+    )
+    # The map metrics compare these two grids cell for cell, so the reference
+    # map has to be built at the belief map's cell size and wall thresholds —
+    # a difference here would read as map error.
+    voxel_size_arg = DeclareLaunchArgument(
+        'voxel_size', default_value='0.2',
+        description='Map cell size in metres; mirrors the belief map',
+    )
+    voxel_min_weight_arg = DeclareLaunchArgument(
+        'voxel_min_weight', default_value='10.0',
+        description='TSDF observations before a voxel counts as a wall; '
+        'mirrors the belief map',
+    )
+    voxel_min_solid_confidence_arg = DeclareLaunchArgument(
+        'voxel_min_solid_confidence', default_value='0.80',
+        description='TSDF solid-confidence floor for a wall; mirrors the belief map',
     )
 
     odom_to_tf_gt = Node(
@@ -96,7 +113,8 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'frame_id':               'world_ned',
-            'resolution':             0.2,
+            'resolution':             ParameterValue(
+                LaunchConfiguration('voxel_size'), value_type=float),
             'sensor_model/max_range': 15.0,
             'latch':                  True,
         }],
@@ -110,6 +128,17 @@ def generate_launch_description():
         executable='tsdf_mapper',
         name='tsdf_mapper_gt',
         output='screen',
+        parameters=[{
+            'voxel_size': ParameterValue(
+                LaunchConfiguration('voxel_size'), value_type=float),
+            'trunc_distance': ParameterValue(
+                PythonExpression(['3.0 * ', LaunchConfiguration('voxel_size')]),
+                value_type=float),
+            'voxel_min_weight': ParameterValue(
+                LaunchConfiguration('voxel_min_weight'), value_type=float),
+            'voxel_min_solid_confidence': ParameterValue(
+                LaunchConfiguration('voxel_min_solid_confidence'), value_type=float),
+        }],
         remappings=[
             ('/cloud_in',                   '/gt/cloud_in'),
             ('/tsdf/surface_cloud',         '/gt/tsdf/surface_cloud'),
@@ -122,7 +151,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        mapper_arg, gt_cloud_source_arg,
+        mapper_arg, gt_cloud_source_arg, voxel_size_arg,
+        voxel_min_weight_arg, voxel_min_solid_confidence_arg,
         odom_to_tf_gt, static_camera_tf_gt, cloud_relabel_gt,
         octomap_gt, tsdf_gt,
     ])

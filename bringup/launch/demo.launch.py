@@ -226,6 +226,28 @@ def generate_launch_description():
         description="mapper:=tsdf only: also rebuild the TSDF grid into an "
         "octomap::OcTree on /tsdf/octomap_binary (tsdf_to_octomap)",
     )
+    voxel_size_arg = DeclareLaunchArgument(
+        "voxel_size",
+        default_value="0.2",
+        description="map cell size in metres, for either backend: octomap_server "
+        "resolution or TSDF voxel size (whose truncation band follows at 3x). "
+        "Also applies to the ground-truth reference map, so the two stay "
+        "comparable",
+    )
+    voxel_min_weight_arg = DeclareLaunchArgument(
+        "voxel_min_weight",
+        default_value="10.0",
+        description="mapper:=tsdf only: how many times a voxel must be observed "
+        "before it counts as a wall, in the voxel view, /tsdf/occupied_voxels "
+        "and /projected_map",
+    )
+    voxel_min_solid_confidence_arg = DeclareLaunchArgument(
+        "voxel_min_solid_confidence",
+        default_value="0.80",
+        description="mapper:=tsdf only: how far behind the zero crossing a voxel "
+        "must sit to count as a wall — 0.5 = at the surface, 1.0 = fully "
+        "saturated solid",
+    )
     rviz_arg = DeclareLaunchArgument(
         "rviz",
         default_value="true",
@@ -486,7 +508,10 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(stonefish_gt_mapping_share, "launch", "octomap.launch.py")
         ),
-        launch_arguments={"depth": LaunchConfiguration("depth")}.items(),
+        launch_arguments={
+            "depth": LaunchConfiguration("depth"),
+            "voxel_size": LaunchConfiguration("voxel_size"),
+        }.items(),
         condition=LaunchConfigurationEquals("mapper", "octomap"),
     )
 
@@ -506,6 +531,10 @@ def generate_launch_description():
             ),
             "target_depth_m": LaunchConfiguration("depth"),
             "tsdf_octomap": LaunchConfiguration("tsdf_octomap"),
+            "voxel_size": LaunchConfiguration("voxel_size"),
+            "voxel_min_weight": LaunchConfiguration("voxel_min_weight"),
+            "voxel_min_solid_confidence": LaunchConfiguration(
+                "voxel_min_solid_confidence"),
         }.items(),
         condition=LaunchConfigurationEquals("mapper", "tsdf"),
     )
@@ -538,6 +567,13 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(stonefish_gt_mapping_share, "launch", "gt_map.launch.py")
         ),
+        launch_arguments={
+            "mapper": LaunchConfiguration("mapper"),
+            "voxel_size": LaunchConfiguration("voxel_size"),
+            "voxel_min_weight": LaunchConfiguration("voxel_min_weight"),
+            "voxel_min_solid_confidence": LaunchConfiguration(
+                "voxel_min_solid_confidence"),
+        }.items(),
         condition=LaunchConfigurationEquals("slam", "slam"),
     )
 
@@ -845,6 +881,9 @@ def generate_launch_description():
             inflation_arg,
             plan_inflation_arg,
             tsdf_octomap_arg,
+            voxel_size_arg,
+            voxel_min_weight_arg,
+            voxel_min_solid_confidence_arg,
             rviz_arg,
             slam_arg,
             # Must precede the per-sensor args: each defaults to this one, and a

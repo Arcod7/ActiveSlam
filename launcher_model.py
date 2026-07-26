@@ -43,6 +43,39 @@ LIVE_ROBOT_POSE = {
 # fixed (node, param) pair like LIVE. control_screen resolves the node name
 # from this map before pushing the value with ros2 param set.
 LIVE_SPEED_TURN = {"speed_factor", "turn_factor"}
+
+# Map thresholds tsdf_mapper applies at publish time rather than building the
+# grid from, so they can be pushed to a running mapper instead of restarting it
+# and losing the map (see tsdf_mapper.LIVE_PARAMS). Launcher id -> node
+# parameter. Nothing here works under octomap: octomap_server takes its Z band
+# as occupancy_min_z/max_z at launch, and has no voxel thresholds at all.
+LIVE_MAPPER = {
+    "voxel_min_weight":           "voxel_min_weight",
+    "voxel_min_solid_confidence": "voxel_min_solid_confidence",
+    "robot_depth_target":         "target_depth_m",
+}
+
+
+def mapper_live_targets(pid, values):
+    """(node basename, node parameter) pairs a mapper option pushes to.
+
+    The ground-truth mapper is built from the same thresholds so the map
+    metrics keep comparing like with like, and it only exists under slam:=slam.
+    """
+    if pid not in LIVE_MAPPER or values["mapper"] != "tsdf":
+        return []
+    nodes = ["tsdf_mapper"]
+    if values["slam"] == "slam":
+        nodes.append("tsdf_mapper_gt")
+    return [(node, LIVE_MAPPER[pid]) for node in nodes]
+
+
+def is_live(p, values):
+    """Whether a change to this option reaches the running stack without a
+    restart. Values-dependent: the map thresholds are live under TSDF only."""
+    return bool(p.live or mapper_live_targets(p.id, values))
+
+
 MOTION_EXECUTOR_NODE = {
     "default":      "waypoint_controller",
     "walloriented": "wall_oriented_controller",
@@ -88,13 +121,15 @@ class Param:
 
 SECTION_TITLES = {
     "primary": "Primary",
+    "mapping": "Map resolution + wall threshold",
     "scene": "Scene + object",
     "robot": "Robot pose",
     "frontier": "Planner",
     "slam": "SLAM / pose source",
     "advanced": "Other",
 }
-SECTION_ORDER = ["primary", "scene", "robot", "frontier", "slam", "advanced"]
+SECTION_ORDER = ["primary", "mapping", "scene", "robot", "frontier", "slam",
+                 "advanced"]
 
 # Which sections are folded away behind their < SHOW > heading. Persisted in
 # config.yaml next to the options, so a layout survives a restart. Only the
@@ -124,7 +159,8 @@ PARAMS = [
            "frontier": "Autonomous frontier-based exploration."}),
     Param("mapper", "Mapper", "enum", "octomap", "primary",
           "Map backend. OctoMap is an octree occupancy grid (probabilistic, "
-          "raycast free space, 20 cm voxels). TSDF is VDBFusion: a truncated "
+          "raycast free space, 20 cm voxels by default — see Voxel size). "
+          "TSDF is VDBFusion: a truncated "
           "signed-distance field on OpenVDB, meshed with marching cubes — "
           "gives surfaces and normals rather than occupied cells.",
           ["octomap", "tsdf"],
@@ -171,6 +207,34 @@ PARAMS = [
           {"qwerty": "W fwd, S back, Q/E strafe, A/D yaw.",
            "azerty": "Z fwd, S back, A/E strafe, Q/D yaw (same finger positions)."},
           visible=lambda v: False),
+
+    Param("voxel_size", "Voxel size (m)", "float", 0.2, "mapping",
+          "Edge length of one map cell, for whichever backend is selected — "
+          "octomap_server's resolution or the TSDF grid's voxel size. Halving "
+          "it resolves finer geometry at roughly 8x the voxels, so integration "
+          "and the voxel view both get slower. Under TSDF the truncation band "
+          "follows at 3x this value, the minimum VDBFusion needs for a usable "
+          "gradient. The ground-truth reference map is built at the same size, "
+          "so the map metrics keep comparing like with like.",
+          step=0.05, lo=0.05, hi=1.0),
+    Param("voxel_min_solid_confidence", "Wall threshold", "float", 0.80, "mapping",
+          "How deep behind the reconstructed surface a voxel has to sit before "
+          "it counts as a wall, as solid confidence (trunc - d) / (2 * trunc): "
+          "0.5 is exactly at the zero crossing, 1.0 is fully saturated solid. "
+          "Lowering it calls thinner, less certain returns walls — more "
+          "geometry survives, at the cost of noise being mapped as structure. "
+          "Applies to the voxel view, the goal-safety cloud and the 2-D "
+          "planning map alike, so it moves what A* refuses to route through.",
+          step=0.05, lo=0.5, hi=1.0,
+          visible=lambda v: v["mapper"] == "tsdf"),
+    Param("voxel_min_weight", "Observations for a wall", "float", 10.0, "mapping",
+          "How many times a voxel must be observed before it counts as a wall. "
+          "Each integrated scan adds weight, so this is the persistence filter: "
+          "raise it and single-scan sonar noise stops becoming structure, lower "
+          "it and the map fills in sooner from thinner evidence. Same three "
+          "consumers as the wall threshold.",
+          step=1.0, lo=1.0, hi=200.0,
+          visible=lambda v: v["mapper"] == "tsdf"),
 
     Param("scene", "Scene", "enum", "waterlinked", "scene",
           "Stonefish world to launch. waterlinked is the unchanged baseline; "
@@ -239,9 +303,10 @@ PARAMS = [
           "exploring (positive is below the surface). Also centres the "
           "/projected_map Z band used for frontier detection and A* — "
           "octomap_server's through z_band.py, the TSDF mapper's through "
-          "target_depth_m — instead of a full-column projection. Changing it "
-          "restarts the mapper and the planner. Teleop vertical motion remains "
-          "manual.",
+          "target_depth_m — instead of a full-column projection. Under TSDF the "
+          "band re-centres live and the map is kept; the planner reads its "
+          "setpoint at startup, so it restarts either way. Teleop vertical "
+          "motion remains manual.",
           step=0.5, lo=0.0, hi=1000.0),
     Param("speed_factor", "Speed factor", "float", 1.0, "robot",
           "Multiplies forward/strafe/vertical motion, in teleop (W/S/Q/E/Space/X) "
@@ -698,7 +763,8 @@ INFOS = [
     ]),
     ("Mapping", [
         "OctoMap          probabilistic octree occupancy grid, 20 cm",
-        "                 voxels, raycast free space (default backend).",
+        "                 voxels by default, raycast free space",
+        "                 (default backend).",
         "VDBFusion        truncated signed-distance field on OpenVDB,",
         "                 meshed with marching cubes — gives surfaces",
         "                 and normals (mapper:=tsdf).",

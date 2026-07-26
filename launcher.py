@@ -1026,7 +1026,7 @@ def unapplied_ids(applied, values):
     if not applied:
         return set()
     return {p.id for p in model.PARAMS
-            if not p.live and p.visible(values)
+            if not model.is_live(p, values) and p.visible(values)
             and p.id in applied and applied[p.id] != values.get(p.id)}
 
 
@@ -1349,12 +1349,21 @@ def control_screen(stdscr, sup, values, link, session):
         nonlocal saved_robot_pose
         if values[param.id] == old:
             return
-        if not param.live or not sup.running_ids():
+        if not model.is_live(param, values) or not sup.running_ids():
             if param.id in model.LIVE_ROBOT_POSE:
                 saved_robot_pose = {key: values[key] for key in robot_pose_fields}
             save_config()
             return
-        if param.id in model.LIVE:
+        mapper_targets = model.mapper_live_targets(param.id, values)
+        if mapper_targets:
+            # Belief and ground-truth mappers take the same threshold; a push
+            # that reached only one would leave the map metrics comparing two
+            # different definitions of a wall.
+            pushes = [set_live_param(node, pname, values[param.id])
+                      for node, pname in mapper_targets]
+            ok = all(done for done, _ in pushes)
+            msg = "; ".join(text for _, text in pushes)
+        elif param.id in model.LIVE:
             node, pname = model.LIVE[param.id]
             ok, msg = set_live_param(node, pname, values[param.id])
         elif param.id in model.LIVE_ROBOT_POSE:
@@ -1629,7 +1638,7 @@ def control_screen(stdscr, sup, values, link, session):
             if p.is_soon(values[p.id]):
                 tags.append(("(soon)", curses.color_pair(C_WARN) | curses.A_BOLD))
             if running:
-                if p.live:
+                if model.is_live(p, values):
                     tags.append(("(live)", curses.color_pair(C_OK)))
                 pend = sup.pending_for(p.id, pending_values)
                 if pend:
