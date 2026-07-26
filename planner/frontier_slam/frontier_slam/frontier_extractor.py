@@ -69,6 +69,7 @@ class FrontierExtractor(Node):
     MIN_CLUSTER_CELLS = 1
     UPDATE_HZ         = 0.5
     REPLAN_HZ         = 3.0
+    PATH_FLOW_HZ      = 10.0   # animation rate of the path beads, not a plan rate
     REPLAN_FAIL_MAX   = 6    # consecutive A* failures before blacklisting goal as unreachable
     TSDF_SOLID_STALE_S = 5.0
     TSDF_SURFACE_STALE_S = 5.0
@@ -188,6 +189,7 @@ class FrontierExtractor(Node):
 
         self.create_timer(1.0 / self.UPDATE_HZ,  self._update)
         self.create_timer(1.0 / self.REPLAN_HZ,  self._replan)
+        self.create_timer(1.0 / self.PATH_FLOW_HZ, self._publish_path_flow)
         self.get_logger().info(
             f'frontier_extractor ready — TSDF solid rejection={self._tsdf_solid_radius:.2f}m '
             f'standoff={self._tsdf_frontier_standoff:.2f}m '
@@ -498,6 +500,10 @@ class FrontierExtractor(Node):
             self._robot_pos, self._robot_yaw, self._robot_speed,
             self._current_path, self._current_goal_xy, self._last_stuck_pct,
         )
+
+    def _publish_path_flow(self) -> None:
+        z = float(self._robot_pos[2]) if self._robot_pos is not None else 0.0
+        self._viz.publish_path_flow(self._current_path, z)
 
     # ------------------------------------------------------------------
     # Logging

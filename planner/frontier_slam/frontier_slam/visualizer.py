@@ -25,6 +25,12 @@ C_FREE     = (245, 245, 245)         # near-white
 C_UNKNOWN  = (208, 217, 238)         # light blue
 C_PATH     = (38,  174, 96)          # green
 C_GOAL255  = (245, 194, 40)          # amber  (planning dashboard, 0-255)
+C_PATH01   = (0.149, 0.682, 0.376)   # C_PATH as RGB 0-1
+
+# Beads marching along the planned path (metres).
+FLOW_SPACING = 0.45   # gap between beads
+FLOW_STEP    = 0.09   # bead travel per publish
+FLOW_BEAD    = 0.22   # bead diameter
 
 
 class FrontierVisualizer:
@@ -36,6 +42,38 @@ class FrontierVisualizer:
             Image, '/frontier_slam/planning_dashboard', 1)
         self._debug_pub = node.create_publisher(
             MarkerArray, '/frontier_slam/frontier_debug', 1)
+        self._flow_pub = node.create_publisher(
+            MarkerArray, '/frontier_slam/path_flow', 1)
+        self._flow_phase = 0.0
+
+    # ------------------------------------------------------------------
+    def publish_path_flow(self, path: list, z: float) -> None:
+        """Beads travelling along the planned path, brightening toward the goal.
+
+        Driven by its own timer rather than by replan: the publish rate is the
+        animation rate, and 3 Hz replan reads as a stutter, not as flow.
+        """
+        m = Marker()
+        m.header.stamp    = self._node.get_clock().now().to_msg()
+        m.header.frame_id = 'world_ned'
+        m.ns     = 'path_flow'
+        m.id     = 0
+        m.type   = Marker.SPHERE_LIST
+        m.pose.orientation.w = 1.0
+        m.scale.x = m.scale.y = m.scale.z = FLOW_BEAD
+        m.lifetime = Duration(sec=1)
+
+        beads, total = ([], 0.0) if len(path) < 2 else _flow_beads(
+            path, FLOW_SPACING, self._flow_phase)
+        m.action = Marker.ADD if beads else Marker.DELETE
+        self._flow_phase = (self._flow_phase + FLOW_STEP) % FLOW_SPACING
+        for x, y, s in beads:
+            m.points.append(Point(x=x, y=y, z=z))
+            m.colors.append(ColorRGBA(r=C_PATH01[0], g=C_PATH01[1], b=C_PATH01[2],
+                                      a=0.35 + 0.6 * (s / total if total else 0.0)))
+        markers = MarkerArray()
+        markers.markers.append(m)
+        self._flow_pub.publish(markers)
 
     # ------------------------------------------------------------------
     def publish_markers(self, clusters, gx: float, gy: float,
@@ -214,6 +252,25 @@ class FrontierVisualizer:
 
 # ------------------------------------------------------------------
 # Module-level helpers — no node state
+
+def _flow_beads(path: list, spacing: float, phase: float) -> tuple:
+    """Points every `spacing` m along the polyline, the first at arc length
+    `phase`. Returns ([(x, y, arc_length)], total_length)."""
+    beads  = []
+    target = phase
+    acc    = 0.0
+    for (x0, y0), (x1, y1) in zip(path, path[1:]):
+        seg = math.hypot(x1 - x0, y1 - y0)
+        if seg <= 1e-9:
+            continue
+        while target <= acc + seg:
+            t = (target - acc) / seg
+            beads.append((float(x0 + (x1 - x0) * t),
+                          float(y0 + (y1 - y0) * t), target))
+            target += spacing
+        acc += seg
+    return beads, acc
+
 
 def _arrow(*, ns, mid, x, y, z, dx, dy, length, rgba, stamp, lifetime) -> Marker:
     """ARROW marker from (x,y) pointing along (dx,dy) for `length` metres."""
