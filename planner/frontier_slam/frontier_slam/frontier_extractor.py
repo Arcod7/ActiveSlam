@@ -41,6 +41,7 @@ from std_msgs.msg import Bool, String
 from frontier_slam.control_utils import yaw_from_quat
 from frontier_slam.frontier_detection import (
     find_frontier_clusters,
+    frontier_cell_points,
     standoff_point_from_tsdf_surface,
 )
 from frontier_slam.goal_manager import GoalManager
@@ -83,6 +84,10 @@ class FrontierExtractor(Node):
         self.declare_parameter('tsdf_surface_normals_topic', '/tsdf/surface_normals_cloud')
         self.declare_parameter('tsdf_frontier_standoff_m', 1.0)
         self.declare_parameter('tsdf_surface_normal_max_distance_m', 1.0)
+        # Display only: the Z range one /projected_map cell collapses, drawn as
+        # the band_columns marker. Must match the mapper that publishes the map
+        # (tsdf_mapper's projected_map_band_m, or octomap's occupancy_min/max_z).
+        self.declare_parameter('projected_map_band_m', 3.0)
         self.declare_parameter('hard_inflation_m', HARD_INFLATION_M)
         self.declare_parameter('inflation_m', INFLATION_M)
         self.declare_parameter('plan_inflation_m', PLAN_INFLATION_M)
@@ -109,6 +114,8 @@ class FrontierExtractor(Node):
             self.get_parameter('tsdf_frontier_standoff_m').value))
         self._tsdf_surface_normal_max_distance = max(0.0, float(
             self.get_parameter('tsdf_surface_normal_max_distance_m').value))
+        self._projected_map_band = abs(float(
+            self.get_parameter('projected_map_band_m').value))
         self._hard_inflation_m = float(self.get_parameter('hard_inflation_m').value)
         self._inflation_m = float(self.get_parameter('inflation_m').value)
         self._plan_inflation_m = float(self.get_parameter('plan_inflation_m').value)
@@ -293,8 +300,11 @@ class FrontierExtractor(Node):
         # Put a TSDF frontier goal in free space, offset along the outward
         # surface normal.  The nearest normal is queried at the vehicle depth;
         # vertical surfaces give no horizontal offset and keep the old target.
+        raw_centroids = [(c.wx, c.wy) for c in clusters]
         for c in clusters:
             c.wx, c.wy = self._tsdf_surface_standoff(np.array([c.wx, c.wy]))
+
+        self._publish_frontier_debug(clusters, raw_centroids)
 
         # Tag each cluster with its distance from the robot.
         for c in clusters:
@@ -373,6 +383,16 @@ class FrontierExtractor(Node):
 
     # ------------------------------------------------------------------
     # Publishing
+    def _publish_frontier_debug(self, clusters: list, raw_centroids: list) -> None:
+        """Show what a frontier was derived from, before selection filters it."""
+        frontier_xy, border_xy = frontier_cell_points(self._map)
+        pairs = [(raw, (c.wx, c.wy))
+                 for raw, c in zip(raw_centroids, clusters)
+                 if math.hypot(c.wx - raw[0], c.wy - raw[1]) > 1e-3]
+        self._viz.publish_frontier_debug(
+            frontier_xy, border_xy, pairs, self._robot_pos,
+            float(self._map.info.resolution), self._projected_map_band)
+
     def _publish_goal(self, gx: float, gy: float, clusters: list) -> None:
         self._current_goal_xy = np.array([gx, gy])
         # _cruise_z, not self._robot_pos[2]: waypoint_controller drives depth

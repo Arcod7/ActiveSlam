@@ -35,6 +35,10 @@ Optional arguments:
   tsdf_frontier_standoff_m
               TSDF-only horizontal distance to hold from a frontier surface,
               measured along its outward normal. Default: 1.0 m.
+  projected_map_band_m
+              Display only: the Z half-range one /projected_map cell collapses,
+              drawn on /frontier_slam/frontier_debug. Match the mapper in use.
+              Default: 3.0 (the TSDF mapper's own band).
   scenario    Scripted evaluation scenario: none, drift_return, or trajectory.
               Default: none.
   scenario_out_dx/scenario_out_dy
@@ -68,6 +72,9 @@ Examples:
 
 Visualise in RViz2:
   - MarkerArray  /frontier_slam/frontiers  (cyan = candidates, red = active goal)
+  - MarkerArray  /frontier_slam/frontier_debug  (why each frontier exists:
+    un-inflated boundary cells, the unknown cells bordering them, the Z column
+    each 2-D cell collapses, and the TSDF standoff offset)
   - Image        /frontier_slam/planning_dashboard
   - OccupancyGrid /frontier_slam/inflated_map
 """
@@ -249,6 +256,15 @@ def generate_launch_description():
         'tsdf_frontier_standoff_m', default_value='1.0',
         description='TSDF frontier goal offset from the surface along its outward normal, in metres.',
     )
+    projected_map_band_arg = DeclareLaunchArgument(
+        'projected_map_band_m', default_value='3.0',
+        description=(
+            'Display only: the Z half-range one /projected_map cell collapses, '
+            'drawn as the band_columns marker on /frontier_slam/frontier_debug. '
+            "Match the mapper publishing the map — tsdf.launch.py's "
+            'projected_map_band_m (3.0), or octomap.launch.py (0.25 with an '
+            'explicit depth, otherwise the full water column).'),
+    )
     wall_points_topic_arg = DeclareLaunchArgument(
         'wall_points_topic', default_value='/octomap_point_cloud_centers',
         description=(
@@ -330,6 +346,7 @@ def generate_launch_description():
         wall_orientation_offset_arg,
         wall_orientation_lookahead_arg,
         tsdf_frontier_standoff_arg,
+        projected_map_band_arg,
         wall_points_topic_arg,
         wall_standoff_arg,
         wall_switch_goal_distance_arg,
@@ -399,6 +416,7 @@ def generate_launch_description():
                 # to, so goal.point.z is a real depth target either way.
                 'depth_setpoint': depth,
                 'tsdf_frontier_standoff_m': _float_parameter('tsdf_frontier_standoff_m'),
+                'projected_map_band_m': _float_parameter('projected_map_band_m'),
                 'hard_inflation_m': _float_parameter('hard_inflation_m'),
                 'inflation_m': _float_parameter('inflation_m'),
                 'plan_inflation_m': _float_parameter('plan_inflation_m'),
