@@ -230,6 +230,12 @@ def generate_launch_description():
         "survey_center_y", default_value="nan",
         description="Survey-area centre Y (NED east, m). nan = the deployment point.",
     )
+    revisit_min_closures_arg = DeclareLaunchArgument(
+        "revisit_min_closures", default_value="0",
+        description="Loop closures required before a revisit ends on closure count "
+        "alone. 0 = not taken into account, leaving the uncertainty ratio as the only "
+        "uncertainty-based exit.",
+    )
     min_goal_separation_arg = DeclareLaunchArgument(
         "min_goal_separation_m", default_value="0.0",
         description="Minimum distance (m) between consecutive frontier goals, so the "
@@ -680,6 +686,7 @@ def generate_launch_description():
             "survey_center_x": LaunchConfiguration("survey_center_x"),
             "survey_center_y": LaunchConfiguration("survey_center_y"),
             "min_goal_separation_m": LaunchConfiguration("min_goal_separation_m"),
+            "revisit_min_closures": LaunchConfiguration("revisit_min_closures"),
             "odom_topic": PythonExpression(
                 [
                     "'/slam/odometry' if '",
@@ -939,6 +946,7 @@ def generate_launch_description():
             survey_center_x_arg,
             survey_center_y_arg,
             min_goal_separation_arg,
+            revisit_min_closures_arg,
             tsdf_octomap_arg,
             voxel_size_arg,
             trunc_distance_arg,

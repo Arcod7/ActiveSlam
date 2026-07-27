@@ -110,6 +110,15 @@ class RevisitConfig:
     sigma_allow_yaw_rad: float = 0.045
     ratio_trigger: float = 1.0
     ratio_resume: float = 0.5
+    # Closures that must fire before a revisit is allowed to end on closure
+    # count alone. 0 = not taken into account, which leaves U_r the only
+    # uncertainty-based exit. Default 0: ending on the first closure pre-empts
+    # the U_r test, and one closure rarely brings the covariance back under
+    # ratio_resume -- the vehicle resumed exploring with sigma_xy still just
+    # under sigma_allow. The trigger is stated in uncertainty
+    # (U_r = D(Sigma)/D(Sigma_allow), Suresh et al. 2020 eq. 5), so the
+    # symmetric exit is "uncertainty restored", not "a closure happened".
+    min_closures: int = 0
     min_keyframes: int = 15
     min_index_gap: int = 10
     candidate_radius_m: float = 5.0
@@ -234,7 +243,11 @@ class RevisitStateMachine:
 
     def _tick_revisiting(self, now, dopt, lc_count, kf_xyz, robot_xy):
         cfg = self.cfg
-        if lc_count > self._lc_at_start:
+        # min_closures = 0 disables this exit entirely, leaving U_r to decide.
+        # revisit_timeout_s and ARRIVED_STERILE remain the backstops either
+        # way, so a revisit cannot run forever.
+        if (cfg.min_closures > 0
+                and lc_count - self._lc_at_start >= cfg.min_closures):
             return self._end_revisit(now, 'CLOSED')
         u_ratio = self.ratio(dopt)
         if u_ratio is not None and u_ratio < cfg.ratio_resume:
@@ -281,6 +294,7 @@ class RevisitPlanner(Node):
         self.declare_parameter('sigma_allow_yaw_rad', 0.045)
         self.declare_parameter('ratio_trigger', 1.0)
         self.declare_parameter('ratio_resume', 0.5)
+        self.declare_parameter('revisit_min_closures', 0)
         self.declare_parameter('min_keyframes', 15)
         self.declare_parameter('min_index_gap', 10)
         self.declare_parameter('candidate_radius_m', 5.0)
@@ -299,6 +313,7 @@ class RevisitPlanner(Node):
             sigma_allow_yaw_rad=float(self.get_parameter('sigma_allow_yaw_rad').value),
             ratio_trigger=float(self.get_parameter('ratio_trigger').value),
             ratio_resume=float(self.get_parameter('ratio_resume').value),
+            min_closures=int(self.get_parameter('revisit_min_closures').value),
             min_keyframes=int(self.get_parameter('min_keyframes').value),
             min_index_gap=int(self.get_parameter('min_index_gap').value),
             candidate_radius_m=float(self.get_parameter('candidate_radius_m').value),
@@ -381,6 +396,7 @@ class RevisitPlanner(Node):
         cfg.sigma_allow_yaw_rad = float(self.get_parameter('sigma_allow_yaw_rad').value)
         cfg.ratio_trigger = float(self.get_parameter('ratio_trigger').value)
         cfg.ratio_resume = float(self.get_parameter('ratio_resume').value)
+        cfg.min_closures = int(self.get_parameter('revisit_min_closures').value)
         cfg.revisit_timeout_s = float(self.get_parameter('revisit_timeout_s').value)
 
     def _tick(self) -> None:

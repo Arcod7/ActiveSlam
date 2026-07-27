@@ -136,7 +136,9 @@ def test_no_retrigger_during_cooldown():
 
 
 def test_exit_on_loop_closure_success():
-    sm = RevisitStateMachine(_cfg())
+    # min_closures is opt-in now: 0 (the default) ignores the closure count
+    # entirely and leaves U_r as the uncertainty-based exit.
+    sm = RevisitStateMachine(_cfg(min_closures=1))
     kf = _kf_for_trigger()
     robot_xy = np.array([19.0, 0.0])
     sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=robot_xy)
@@ -145,6 +147,38 @@ def test_exit_on_loop_closure_success():
     assert event == 'CLOSED'
     assert sm.state == RevisitState.COOLDOWN
     assert sm.suspended is False
+
+
+def test_closures_alone_do_not_end_a_revisit_by_default():
+    # The regression this guards: ending on the first closure pre-empted the
+    # U_r test, so the vehicle resumed exploring with sigma still near the
+    # allowance -- one closure rarely restores the covariance.
+    sm = RevisitStateMachine(_cfg())            # min_closures = 0
+    kf = _kf_for_trigger()
+    robot_xy = np.array([19.0, 0.0])
+    sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=robot_xy)
+
+    # Several closures fire, but U_r stays above ratio_resume.
+    for i, t in enumerate((5.0, 6.0, 7.0), start=1):
+        assert sm.tick(now=t, dopt=0.05, lc_count=i, kf_xyz=kf,
+                       robot_xy=robot_xy) is None
+    assert sm.state == RevisitState.REVISITING
+
+    # It ends when the uncertainty actually comes down.
+    assert sm.tick(now=8.0, dopt=0.005, lc_count=3, kf_xyz=kf,
+                   robot_xy=robot_xy) == 'RESUMED_DOPT'
+
+
+def test_two_closures_required_when_min_closures_is_two():
+    sm = RevisitStateMachine(_cfg(min_closures=2))
+    kf = _kf_for_trigger()
+    robot_xy = np.array([19.0, 0.0])
+    sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=robot_xy)
+
+    assert sm.tick(now=5.0, dopt=0.05, lc_count=1, kf_xyz=kf,
+                   robot_xy=robot_xy) is None
+    assert sm.tick(now=6.0, dopt=0.05, lc_count=2, kf_xyz=kf,
+                   robot_xy=robot_xy) == 'CLOSED'
 
 
 def test_exit_on_resume_ratio():
@@ -327,7 +361,7 @@ def test_cause_is_none_without_both_sigmas():
 # ----------------------------------------------------------------------
 
 def test_trigger_latches_the_cause_and_clears_it_on_exit():
-    sm = RevisitStateMachine(_cfg())
+    sm = RevisitStateMachine(_cfg(min_closures=1))
     kf, robot_xy = _kf_for_trigger(), np.array([19.0, 0.0])
     assert sm.cause is None
     assert sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=robot_xy,

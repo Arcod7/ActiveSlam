@@ -14,6 +14,7 @@ LIVE = {
     "sigma_allow_yaw_rad":        ("revisit_planner", "sigma_allow_yaw_rad"),
     "ratio_trigger":              ("revisit_planner", "ratio_trigger"),
     "ratio_resume":               ("revisit_planner", "ratio_resume"),
+    "revisit_min_closures":       ("revisit_planner", "revisit_min_closures"),
     "wall_standoff":             ("wall_looking", "standoff_m"),
     "wall_switch_goal_distance": ("wall_looking", "switch_goal_distance_m"),
     "wall_switch_scan_angle":    ("wall_looking", "switch_scan_angle_rad"),
@@ -607,6 +608,16 @@ PARAMS = [
           "Must stay below the trigger ratio or revisit will not exit. "
           "Live-tunable while running.",
           advanced=True, step=0.1, lo=0.0, hi=20.0,
+          visible=lambda v: _slam(v) and _planner(v) and v["revisit"]),
+    Param("revisit_min_closures", "Revisit min closures", "int", 0, "slam",
+          "Loop closures required before a revisit ends on closure count "
+          "alone. 0 (default) means the count is not taken into account, so "
+          "the revisit ends only when the uncertainty ratio falls below the "
+          "resume ratio (or on timeout). Ending on the first closure resumes "
+          "exploring while sigma is still near the allowance, because one "
+          "closure rarely restores the covariance. "
+          "Live-tunable while running.",
+          advanced=True, step=1, lo=0, hi=10,
           visible=lambda v: _slam(v) and _planner(v) and v["revisit"]),
     Param("map_rebuild", "Rebuild map on closure", "bool", False, "slam",
           "After a large loop closure, reset the TSDF and re-integrate every "

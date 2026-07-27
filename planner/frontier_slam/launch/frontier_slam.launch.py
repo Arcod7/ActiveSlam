@@ -329,6 +329,12 @@ def generate_launch_description():
         'survey_center_y', default_value='nan',
         description='Survey-area centre Y (NED east, m). nan = the deployment point.',
     )
+    revisit_min_closures_arg = DeclareLaunchArgument(
+        'revisit_min_closures', default_value='0',
+        description='Loop closures required before a revisit ends on closure count '
+                    'alone. 0 = not taken into account, leaving the uncertainty ratio '
+                    'as the only uncertainty-based exit.',
+    )
     min_goal_separation_arg = DeclareLaunchArgument(
         'min_goal_separation_m', default_value='0.0',
         description='Minimum distance (m) between consecutive frontier goals, so '
@@ -347,6 +353,7 @@ def generate_launch_description():
         survey_center_x_arg,
         survey_center_y_arg,
         min_goal_separation_arg,
+        revisit_min_closures_arg,
         odom_topic_arg,
         safety_start_enabled_arg,
         actuator_backend_arg,
@@ -513,6 +520,8 @@ def generate_launch_description():
                 'sigma_allow_yaw_rad': _float_parameter('sigma_allow_yaw_rad'),
                 'ratio_trigger': _float_parameter('ratio_trigger'),
                 'ratio_resume': _float_parameter('ratio_resume'),
+                'revisit_min_closures': ParameterValue(
+                    LaunchConfiguration('revisit_min_closures'), value_type=int),
             }],
             condition=IfCondition(LaunchConfiguration('revisit')),
         ),
