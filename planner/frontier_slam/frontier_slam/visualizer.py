@@ -23,14 +23,14 @@ C_GOAL     = (0.961, 0.761, 0.157)   # amber
 C_OCCUPIED = (16,  65,  158)         # blue   (planning dashboard, 0-255)
 C_FREE     = (245, 245, 245)         # near-white
 C_UNKNOWN  = (208, 217, 238)         # light blue
-C_PATH     = (38,  174, 96)          # green
+C_PATH     = (150, 90,  40)          # brown
 C_GOAL255  = (245, 194, 40)          # amber  (planning dashboard, 0-255)
-C_PATH01   = (0.149, 0.682, 0.376)   # C_PATH as RGB 0-1
+C_PATH01   = (0.588, 0.353, 0.157)   # C_PATH as RGB 0-1
 
-# Beads marching along the planned path (metres).
-FLOW_SPACING = 0.45   # gap between beads
-FLOW_STEP    = 0.09   # bead travel per publish
-FLOW_BEAD    = 0.22   # bead diameter
+# Chevrons travelling along the planned path (metres).
+FLOW_SPACING = 6.0   # gap between arrows
+FLOW_STEP    = 0.10   # arrow travel per publish
+FLOW_LENGTH  = 0.55   # arrow length
 
 
 class FrontierVisualizer:
@@ -45,35 +45,46 @@ class FrontierVisualizer:
         self._flow_pub = node.create_publisher(
             MarkerArray, '/frontier_slam/path_flow', 1)
         self._flow_phase = 0.0
+        self._flow_count = 0
 
     # ------------------------------------------------------------------
     def publish_path_flow(self, path: list, z: float) -> None:
-        """Beads travelling along the planned path, brightening toward the goal.
+        """Chevrons travelling along the planned path, brightening toward the goal.
 
-        Driven by its own timer rather than by replan: the publish rate is the
-        animation rate, and 3 Hz replan reads as a stutter, not as flow.
+        Arrows rather than a dotted trail: the heading reads as direction in a
+        single frame, so the animation only has to reinforce what is already
+        drawn instead of carrying it. Sparse for the same reason — a dense trail
+        needs a high redraw rate to look like motion rather than flicker.
+
+        Driven by its own timer, not by replan: the publish rate is the
+        animation rate, and 3 Hz replan reads as a stutter.
         """
-        m = Marker()
-        m.header.stamp    = self._node.get_clock().now().to_msg()
-        m.header.frame_id = 'world_ned'
-        m.ns     = 'path_flow'
-        m.id     = 0
-        m.type   = Marker.SPHERE_LIST
-        m.pose.orientation.w = 1.0
-        m.scale.x = m.scale.y = m.scale.z = FLOW_BEAD
-        m.lifetime = Duration(sec=1)
-
-        beads, total = ([], 0.0) if len(path) < 2 else _flow_beads(
+        now      = self._node.get_clock().now().to_msg()
+        lifetime = Duration(sec=1)
+        samples, total = ([], 0.0) if len(path) < 2 else _flow_samples(
             path, FLOW_SPACING, self._flow_phase)
-        m.action = Marker.ADD if beads else Marker.DELETE
         self._flow_phase = (self._flow_phase + FLOW_STEP) % FLOW_SPACING
-        for x, y, s in beads:
-            m.points.append(Point(x=x, y=y, z=z))
-            m.colors.append(ColorRGBA(r=C_PATH01[0], g=C_PATH01[1], b=C_PATH01[2],
-                                      a=0.35 + 0.6 * (s / total if total else 0.0)))
+
         markers = MarkerArray()
-        markers.markers.append(m)
-        self._flow_pub.publish(markers)
+        for i, (x, y, s, dx, dy) in enumerate(samples):
+            markers.markers.append(_arrow(
+                ns='path_flow', mid=i, x=x, y=y, z=z, dx=dx, dy=dy,
+                length=FLOW_LENGTH, stamp=now, lifetime=lifetime,
+                rgba=(*C_PATH01, 0.35 + 0.6 * (s / total if total else 0.0)),
+            ))
+        # A shortened path leaves the arrows past its end standing otherwise:
+        # each is its own marker id, and only the ones re-sent get overwritten.
+        for stale in range(len(samples), self._flow_count):
+            m = Marker()
+            m.header.stamp    = now
+            m.header.frame_id = 'world_ned'
+            m.ns     = 'path_flow'
+            m.id     = stale
+            m.action = Marker.DELETE
+            markers.markers.append(m)
+        self._flow_count = len(samples)
+        if markers.markers:
+            self._flow_pub.publish(markers)
 
     # ------------------------------------------------------------------
     def publish_markers(self, clusters, gx: float, gy: float,
@@ -256,23 +267,25 @@ class FrontierVisualizer:
 # ------------------------------------------------------------------
 # Module-level helpers — no node state
 
-def _flow_beads(path: list, spacing: float, phase: float) -> tuple:
-    """Points every `spacing` m along the polyline, the first at arc length
-    `phase`. Returns ([(x, y, arc_length)], total_length)."""
-    beads  = []
+def _flow_samples(path: list, spacing: float, phase: float) -> tuple:
+    """Sample the polyline every `spacing` m, the first at arc length `phase`.
+
+    Returns ([(x, y, arc_length, heading_x, heading_y)], total_length)."""
+    out    = []
     target = phase
     acc    = 0.0
     for (x0, y0), (x1, y1) in zip(path, path[1:]):
         seg = math.hypot(x1 - x0, y1 - y0)
         if seg <= 1e-9:
             continue
+        ux, uy = (x1 - x0) / seg, (y1 - y0) / seg
         while target <= acc + seg:
-            t = (target - acc) / seg
-            beads.append((float(x0 + (x1 - x0) * t),
-                          float(y0 + (y1 - y0) * t), target))
+            t = target - acc
+            out.append((float(x0 + ux * t), float(y0 + uy * t), target,
+                        float(ux), float(uy)))
             target += spacing
         acc += seg
-    return beads, acc
+    return out, acc
 
 
 def _arrow(*, ns, mid, x, y, z, dx, dy, length, rgba, stamp, lifetime) -> Marker:

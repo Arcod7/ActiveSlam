@@ -69,7 +69,7 @@ class FrontierExtractor(Node):
     MIN_CLUSTER_CELLS = 1
     UPDATE_HZ         = 0.5
     REPLAN_HZ         = 3.0
-    PATH_FLOW_HZ      = 10.0   # animation rate of the path beads, not a plan rate
+    PATH_FLOW_HZ      = 10.0   # animation rate of the path arrows, not a plan rate
     REPLAN_FAIL_MAX   = 6    # consecutive A* failures before blacklisting goal as unreachable
     TSDF_SOLID_STALE_S = 5.0
     TSDF_SURFACE_STALE_S = 5.0
