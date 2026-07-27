@@ -64,6 +64,9 @@ CHOICE_MIN_W = 14
 # option list. Ascend gave the key up for it (launcher_core.DRIVE_KEYS).
 PREV_KEYS = (curses.KEY_LEFT,)
 NEXT_KEYS = (curses.KEY_RIGHT, ord(" "))
+# Auto-repeat delivers an arrow every ~40 ms; a second deliberate press is far
+# slower. Past this gap a press at either end of a list wraps, inside it holds.
+NAV_REPEAT_GAP_S = 0.15
 # How long the "copied" acknowledgement stays next to the button.
 COPY_NOTE_S = 2.5
 # Pose table: how far GT and belief may diverge before the row stops being
@@ -891,6 +894,83 @@ def fits(stdscr):
     return h >= MIN_TERM_HEIGHT and w >= MIN_TERM_WIDTH
 
 
+def read_key(stdscr, timeout):
+    """The next key, and whether it was already waiting to be read.
+
+    A key found in the buffer was typed before the read that returned it, so
+    the time since the previous key says how long this frame took, not how long
+    the finger was off the arrow."""
+    stdscr.timeout(0)
+    key = stdscr.getch()
+    if key != -1:
+        return key, True
+    stdscr.timeout(timeout)
+    return stdscr.getch(), False
+
+
+class NavRepeat:
+    """Tells a held arrow from a fresh press.
+
+    Two signals, because neither covers both screens. A buffered key is
+    auto-repeat however slow the frame that delayed it — that is the control
+    screen, which spins ROS and repaints between reads. On a redraw fast enough
+    that nothing is ever waiting, the gap since the last press is what shows
+    the hold instead."""
+
+    def __init__(self):
+        self.key = None
+        self.at = 0.0
+
+    def held(self, key, buffered=False):
+        now = time.time()
+        repeat = key == self.key and (buffered
+                                      or now - self.at < NAV_REPEAT_GAP_S)
+        self.key, self.at = key, now
+        return repeat
+
+
+def step_row(idx, delta, count, skip=None, repeated=False):
+    """Next selectable index `delta` away, stepping over rows `skip` rejects.
+
+    A held arrow stops at the first or last row; only a fresh press from there
+    wraps to the other end, so overshooting a long list takes a deliberate
+    second press."""
+    if count <= 0:
+        return idx
+    nxt = idx
+    for _ in range(count):
+        nxt += delta
+        if not 0 <= nxt < count:
+            if repeated:
+                return idx
+            nxt %= count
+        if skip is None or not skip(nxt):
+            return nxt
+    return idx
+
+
+def nav_step(stdscr, nav, key, buffered, idx, delta, count, skip=None):
+    """Move the cursor for one arrow press and any repeats queued behind it.
+
+    The whole burst is spent in this frame rather than one press per redraw, so
+    a held arrow crosses a long list at the keyboard's pace, not the screen's.
+    The caller's loop sets its own timeout again before the next read."""
+    queued = 0
+    stdscr.timeout(0)
+    while True:
+        k = stdscr.getch()
+        if k == key:
+            queued += 1
+            continue
+        if k != -1:
+            curses.ungetch(k)          # not ours — leave it for the main loop
+        break
+    repeated = nav.held(key, buffered)
+    for n in range(queued + 1):
+        idx = step_row(idx, delta, count, skip, repeated or n > 0)
+    return idx
+
+
 # --------------------------------------------------------------------------
 # screens
 
@@ -899,6 +979,7 @@ def welcome_screen(stdscr, built, values):
     options = ["Launch", "---",
                "Update", "Rebuild", "---", "Infos", "Exit", "---", KEYBOARD_ROW]
     idx = 0
+    nav = NavRepeat()
     while True:
         if not fits(stdscr):
             too_small(stdscr)
@@ -944,17 +1025,13 @@ def welcome_screen(stdscr, built, values):
         put(stdscr, h - 1, 2, "Up/Down navigate   Enter select   q quit", curses.A_DIM)
         stdscr.refresh()
 
-        key = stdscr.getch()
+        key, buffered = read_key(stdscr, -1)
         if key == curses.KEY_RESIZE:
             continue
-        if key == curses.KEY_UP:
-            idx = (idx - 1) % len(options)
-            while options[idx] == "---":
-                idx = (idx - 1) % len(options)
-        elif key == curses.KEY_DOWN:
-            idx = (idx + 1) % len(options)
-            while options[idx] == "---":
-                idx = (idx + 1) % len(options)
+        if key in (curses.KEY_UP, curses.KEY_DOWN):
+            idx = nav_step(stdscr, nav, key, buffered, idx,
+                           -1 if key == curses.KEY_UP else 1, len(options),
+                           skip=lambda i: options[i] == "---")
         elif key in (ord("\n"), curses.KEY_ENTER, 10, 13):
             if options[idx] == KEYBOARD_ROW:
                 values["keyboard"] = ("azerty" if values["keyboard"] == "qwerty"
@@ -984,15 +1061,19 @@ def infos_screen(stdscr):
         h, w = stdscr.getmaxyx()
         title = "Technologies"
         put(stdscr, 0, max(0, (w - len(title)) // 2), title, curses.A_BOLD)
-        view = h - 3
+        # A row above and below the text is kept clear for the cut marks.
+        view = h - 4
         scroll = max(0, min(scroll, max(0, len(lines) - view)))
         for i, (kind, text) in enumerate(lines[scroll:scroll + view]):
             if kind == "head":
                 put(stdscr, 2 + i, 2, text, curses.A_BOLD | curses.color_pair(C_HEAD))
             else:
                 put(stdscr, 2 + i, 4, text)
-        more = "" if scroll + view >= len(lines) else "   (more below)"
-        put(stdscr, h - 1, 2, f"Up/Down scroll   q back{more}", curses.A_DIM)
+        if scroll:
+            put(stdscr, 1, 4, "...", curses.A_DIM)
+        if scroll + view < len(lines):
+            put(stdscr, 2 + view, 4, "...", curses.A_DIM)
+        put(stdscr, h - 1, 2, "Up/Down scroll   q back", curses.A_DIM)
         stdscr.refresh()
         key = stdscr.getch()
         if key == curses.KEY_UP:
@@ -1315,6 +1396,7 @@ def control_screen(stdscr, sup, values, link, session):
     preset_idx = 0
     idx = 0
     scroll = 0
+    nav = NavRepeat()
     status = None
     status_kind = C_OK
     # Driving is not a mode any more: in teleop mode the launcher becomes a
@@ -1753,6 +1835,11 @@ def control_screen(stdscr, sup, values, link, session):
         dtop = list_top + list_h
         put(stdscr, dtop, 2, "-" * max(0, list_right - 4), curses.A_DIM,
             maxx=list_right)
+        # A list scrolled past its pane otherwise ends there as far as the eye goes.
+        if scroll:
+            put(stdscr, list_top - 1, 4, "...", curses.A_DIM, maxx=list_right)
+        if scroll + list_h < len(rows):
+            put(stdscr, dtop, 4, "...", curses.A_DIM, maxx=list_right)
         width = max(20, list_right - 6)
         drow = dtop + 1
         if cur is None:
@@ -1860,8 +1947,7 @@ def control_screen(stdscr, sup, values, link, session):
         stdscr.refresh()
 
         # -- input
-        stdscr.timeout(200 if running else -1)
-        key = stdscr.getch()
+        key, buffered = read_key(stdscr, 200 if running else -1)
 
         if key == -1:
             if driving:
@@ -1924,10 +2010,9 @@ def control_screen(stdscr, sup, values, link, session):
                     last_drive_at = time.time()
                 continue
 
-        if key == curses.KEY_UP:
-            idx = (idx - 1) % len(rows)
-        elif key == curses.KEY_DOWN:
-            idx = (idx + 1) % len(rows)
+        if key in (curses.KEY_UP, curses.KEY_DOWN):
+            idx = nav_step(stdscr, nav, key, buffered, idx,
+                           -1 if key == curses.KEY_UP else 1, len(rows))
         elif cur is None and key in NEXT_KEYS + PREV_KEYS:
             # Left/Right/Space only: Enter stays the apply/launch key.
             if cur_section in collapsed:
