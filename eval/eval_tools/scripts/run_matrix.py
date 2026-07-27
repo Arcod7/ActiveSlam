@@ -78,6 +78,8 @@ VALID_KEYS = {
     'wall_normal_offset_deg', 'wall_path_heading_weight',
     # Survey working area: bounds frontier exploration to the structure.
     'survey_radius_m', 'survey_center_x', 'survey_center_y',
+    'min_goal_separation_m', 'wall_z_band_m', 'revisit_scan_slowdown',
+    'revisit_min_closures',
 }
 
 

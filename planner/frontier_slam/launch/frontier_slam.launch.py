@@ -341,6 +341,13 @@ def generate_launch_description():
                     'so the sweep puts more sonar frames on the structure it went back '
                     'to re-observe. 1.0 = off (default; untested in a full run).',
     )
+    wall_z_band_arg = DeclareLaunchArgument(
+        'wall_z_band_m', default_value='3.0',
+        description='Half-thickness (m) of the depth slice wall_oriented uses to pick '
+                    'which side to look at. Depth is directly observed, so geometry '
+                    'further above or below than this cannot be collided with and '
+                    'should not steer the look direction.',
+    )
     min_goal_separation_arg = DeclareLaunchArgument(
         'min_goal_separation_m', default_value='0.0',
         description='Minimum distance (m) between consecutive frontier goals, so '
@@ -359,6 +366,7 @@ def generate_launch_description():
         survey_center_x_arg,
         survey_center_y_arg,
         min_goal_separation_arg,
+        wall_z_band_arg,
         revisit_scan_slowdown_arg,
         revisit_min_closures_arg,
         odom_topic_arg,
@@ -489,6 +497,7 @@ def generate_launch_description():
                 'depth_setpoint': _float_parameter('depth'),
                 'odom_topic': odom_topic,
                 'look_offset_deg': _float_parameter('wall_orientation_offset_deg'),
+                'wall_z_band_m': _float_parameter('wall_z_band_m'),
                 'revisit_scan_slowdown': _float_parameter('revisit_scan_slowdown'),
                 'lookahead_m': _float_parameter('wall_orientation_lookahead_m'),
                 'map_points_topic': LaunchConfiguration('wall_points_topic'),

@@ -241,6 +241,12 @@ def generate_launch_description():
         description="Divide the scan yaw rate by this while a revisit is in progress. "
         "1.0 = off (default; untested in a full run as of 2026-07-27).",
     )
+    wall_z_band_arg = DeclareLaunchArgument(
+        "wall_z_band_m", default_value="3.0",
+        description="Half-thickness (m) of the depth slice wall_oriented uses to pick "
+        "which side to look at. Depth is directly observed, so geometry further above "
+        "or below cannot be collided with and should not steer the look direction.",
+    )
     min_goal_separation_arg = DeclareLaunchArgument(
         "min_goal_separation_m", default_value="0.0",
         description="Minimum distance (m) between consecutive frontier goals, so the "
@@ -691,6 +697,7 @@ def generate_launch_description():
             "survey_center_x": LaunchConfiguration("survey_center_x"),
             "survey_center_y": LaunchConfiguration("survey_center_y"),
             "min_goal_separation_m": LaunchConfiguration("min_goal_separation_m"),
+            "wall_z_band_m": LaunchConfiguration("wall_z_band_m"),
             "revisit_scan_slowdown": LaunchConfiguration("revisit_scan_slowdown"),
             "revisit_min_closures": LaunchConfiguration("revisit_min_closures"),
             "odom_topic": PythonExpression(
@@ -952,6 +959,7 @@ def generate_launch_description():
             survey_center_x_arg,
             survey_center_y_arg,
             min_goal_separation_arg,
+            wall_z_band_arg,
             revisit_scan_slowdown_arg,
             revisit_min_closures_arg,
             tsdf_octomap_arg,

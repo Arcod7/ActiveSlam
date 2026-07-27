@@ -251,7 +251,7 @@ class WallOrientedController(Node):
         self.declare_parameter('lookahead_m', 0.0)
         self.declare_parameter('map_points_topic', '/octomap_point_cloud_centers')
         self.declare_parameter('max_wall_distance_m', 8.0)
-        self.declare_parameter('wall_z_band_m', 3.0)
+        self.declare_parameter('wall_z_band_m', 2.0)
         self.declare_parameter('side_switch_margin_m', 0.3)
         # Scan this many times slower while a revisit is in progress: the
         # vehicle went back to re-observe known structure, so a slower sweep
