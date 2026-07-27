@@ -102,6 +102,10 @@ class FrontierExtractor(Node):
         # in the water unless the operator names a different centre.
         self.declare_parameter('survey_center_x', float('nan'))
         self.declare_parameter('survey_center_y', float('nan'))
+        # Consecutive frontier goals must be at least this far apart, so the
+        # planner moves on instead of re-picking a cluster beside the one it
+        # just reached. Waived when no other candidate qualifies.
+        self.declare_parameter('min_goal_separation_m', 0.0)
         odom_topic = str(self.get_parameter('odom_topic').value)
         depth_arg = float(self.get_parameter('depth_setpoint').value)
         # Same value, same launch arg, as waypoint_controller's own
@@ -164,6 +168,8 @@ class FrontierExtractor(Node):
             arrival_blacklist_duration=20.0,
             survey_radius=max(0.0, survey_radius),
             survey_center=((cx, cy) if self._survey_center_fixed else None),
+            min_goal_separation=max(0.0, float(
+                self.get_parameter('min_goal_separation_m').value)),
         )
         if survey_radius > 0.0:
             where = (f'({cx:.1f}, {cy:.1f})' if self._survey_center_fixed

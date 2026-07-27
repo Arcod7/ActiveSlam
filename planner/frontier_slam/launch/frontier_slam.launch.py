@@ -329,6 +329,12 @@ def generate_launch_description():
         'survey_center_y', default_value='nan',
         description='Survey-area centre Y (NED east, m). nan = the deployment point.',
     )
+    min_goal_separation_arg = DeclareLaunchArgument(
+        'min_goal_separation_m', default_value='0.0',
+        description='Minimum distance (m) between consecutive frontier goals, so '
+                    'the planner moves on rather than re-picking beside the goal it '
+                    'just reached. Waived when no other candidate qualifies. 0 = off.',
+    )
     depth = LaunchConfiguration('depth')
     odom_topic = LaunchConfiguration('odom_topic')
 
@@ -340,6 +346,7 @@ def generate_launch_description():
         survey_radius_arg,
         survey_center_x_arg,
         survey_center_y_arg,
+        min_goal_separation_arg,
         odom_topic_arg,
         safety_start_enabled_arg,
         actuator_backend_arg,
@@ -440,6 +447,7 @@ def generate_launch_description():
                 'survey_radius_m': _float_parameter('survey_radius_m'),
                 'survey_center_x': _float_parameter('survey_center_x'),
                 'survey_center_y': _float_parameter('survey_center_y'),
+                'min_goal_separation_m': _float_parameter('min_goal_separation_m'),
             }],
         ),
         Node(

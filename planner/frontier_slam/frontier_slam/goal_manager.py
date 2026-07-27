@@ -34,7 +34,8 @@ class GoalManager:
                  blacklist_duration: float = 60.0,
                  arrival_blacklist_duration: float = 20.0,
                  survey_center: tuple | None = None,
-                 survey_radius: float = 0.0):
+                 survey_radius: float = 0.0,
+                 min_goal_separation: float = 0.0):
         self.min_explore_dist           = min_explore_dist
         self.goal_vanish_dist           = goal_vanish_dist
         self.goal_radius                = goal_radius
@@ -48,9 +49,16 @@ class GoalManager:
         # is the default -- every existing run behaves exactly as before.
         self.survey_center              = survey_center
         self.survey_radius              = survey_radius
+        # Consecutive goals must be at least this far apart. Without it the
+        # planner can re-pick a cluster a metre from the one it just reached,
+        # so the vehicle shuffles on the spot instead of moving on. Dropped
+        # when nothing else qualifies, so a lone remaining frontier is still
+        # reachable. 0 disables.
+        self.min_goal_separation        = min_goal_separation
 
         self._committed: np.ndarray | None = None
         self._committed_time: float = 0.0
+        self._last_goal: np.ndarray | None = None    # the goal before this one
         # Sliding-window stuck detection: resets when robot gets closer to goal OR
         # when robot has physically moved (displacement ≥ stuck_min_progress from
         # last-reset position).  The displacement check prevents false STUCK during
@@ -98,6 +106,8 @@ class GoalManager:
         # goal, so it must not consume a blacklist slot or trigger STUCK.
         in_area = [c for c in candidates if self.inside_survey_area(c.wx, c.wy)]
         if candidates and not in_area:
+            if self._committed is not None:
+                self._last_goal = self._committed.copy()
             self._committed = None
             return GoalSelection(float('nan'), float('nan'), 0,
                                  'OUTSIDE_SURVEY_AREA')
@@ -151,13 +161,32 @@ class GoalManager:
                 float(elapsed), float(self._closest_dist))
         self._blacklist.append((self._committed[0], self._committed[1],
                                 now + self.blacklist_duration))
+        self._last_goal = self._committed.copy()
         self._committed = None
         return info
+
+    def _fresh_pick(self, candidates):
+        """Best-scored candidate that is far enough from the previous goal.
+
+        Candidates arrive sorted by score, so this is the first one clearing
+        the separation. Falls back to the outright best when none does, which
+        is what keeps a single remaining frontier reachable."""
+        # The goal being left is the committed one while it still exists, and
+        # _last_goal once it has been cleared (arrival, stuck, out of area).
+        reference = (self._committed if self._committed is not None
+                     else self._last_goal)
+        if reference is not None and self.min_goal_separation > 0.0:
+            spread = [c for c in candidates
+                      if np.hypot(c.wx - reference[0], c.wy - reference[1])
+                      >= self.min_goal_separation]
+            if spread:
+                return spread[0]
+        return candidates[0]
 
     def _pick_committed(self, candidates, robot_xy, now):
         """Return the goal to send.  Never switches away from a committed goal
         except on arrival — STUCK is the only other exit, handled upstream."""
-        best = candidates[0]   # best-scored: used only when picking a fresh goal
+        best = self._fresh_pick(candidates)   # used only when picking a fresh goal
 
         if self._committed is None:
             self._commit(best.wx, best.wy, robot_xy, now)
@@ -200,6 +229,10 @@ class GoalManager:
             self._closest_ref_pos = None
 
     def _commit(self, gx: float, gy: float, robot_xy: np.ndarray, now: float) -> None:
+        # Remember the outgoing goal before it is replaced: the separation
+        # rule is stated against the goal the vehicle just came from.
+        if self._committed is not None:
+            self._last_goal = self._committed.copy()
         self._committed       = np.array([gx, gy])
         self._committed_time  = now
         d = float(np.hypot(gx - robot_xy[0], gy - robot_xy[1]))

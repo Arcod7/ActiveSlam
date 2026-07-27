@@ -95,3 +95,59 @@ def test_commitment_is_dropped_when_the_area_runs_out():
     gm.select([_Cluster(wx=60.0, wy=0.0)], np.array([0.0, 0.0]), 101.0)
 
     assert gm._committed is None
+
+
+# ----------------------------------------------------------------------
+# Minimum separation between consecutive goals
+# ----------------------------------------------------------------------
+
+def test_separation_off_by_default_keeps_the_best_scored_goal():
+    gm = _manager()
+    gm.select([_Cluster(wx=0.0, wy=0.0)], np.array([0.0, 0.0]), 100.0)
+
+    sel = gm.select([_Cluster(wx=1.0, wy=0.0)], np.array([1.0, 0.0]), 101.0)
+
+    assert (sel.gx, sel.gy) == (1.0, 0.0)
+
+
+def test_first_goal_is_unconstrained():
+    # There is no previous goal to be near, so nothing may be rejected.
+    gm = _manager(min_goal_separation=10.0)
+
+    sel = gm.select([_Cluster(wx=2.0, wy=0.0)], np.array([0.0, 0.0]), 100.0)
+
+    assert (sel.gx, sel.gy) == (2.0, 0.0)
+
+
+def test_next_goal_within_the_separation_is_skipped_for_a_farther_one():
+    gm = _manager(min_goal_separation=10.0)
+    gm.select([_Cluster(wx=0.0, wy=0.0, distance=5.0)], np.array([0.0, 0.0]), 100.0)
+    # Arrive, so the manager picks afresh.
+    near = _Cluster(wx=3.0, wy=0.0, size=50, distance=4.0)    # best score, too close
+    far = _Cluster(wx=40.0, wy=0.0, size=10, distance=40.0)
+
+    sel = gm.select([near, far], np.array([0.0, 0.0]), 130.0)
+
+    assert (sel.gx, sel.gy) == (40.0, 0.0)
+
+
+def test_a_close_goal_is_still_taken_when_it_is_the_only_one():
+    # The waiver: a lone remaining frontier must stay reachable, or the
+    # planner strands itself next to the last thing left to map.
+    gm = _manager(min_goal_separation=10.0)
+    gm.select([_Cluster(wx=0.0, wy=0.0, distance=5.0)], np.array([0.0, 0.0]), 100.0)
+    only = _Cluster(wx=3.0, wy=0.0, distance=4.0)
+
+    sel = gm.select([only], np.array([0.0, 0.0]), 130.0)
+
+    assert (sel.gx, sel.gy) == (3.0, 0.0)
+
+
+def test_separation_is_measured_from_the_previous_goal_not_the_robot():
+    gm = _manager(min_goal_separation=10.0)
+    gm.select([_Cluster(wx=50.0, wy=0.0, distance=50.0)], np.array([0.0, 0.0]), 100.0)
+    # Robot is at the origin; a candidate 4 m away from IT but 46 m from the
+    # previous goal must be allowed.
+    sel = gm.select([_Cluster(wx=4.0, wy=0.0, distance=4.0)], np.array([0.0, 0.0]), 130.0)
+
+    assert (sel.gx, sel.gy) == (4.0, 0.0)

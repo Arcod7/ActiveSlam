@@ -230,6 +230,12 @@ def generate_launch_description():
         "survey_center_y", default_value="nan",
         description="Survey-area centre Y (NED east, m). nan = the deployment point.",
     )
+    min_goal_separation_arg = DeclareLaunchArgument(
+        "min_goal_separation_m", default_value="0.0",
+        description="Minimum distance (m) between consecutive frontier goals, so the "
+        "planner moves on rather than re-picking beside the goal it just reached. "
+        "Waived when no other candidate qualifies. 0 = off.",
+    )
     plan_inflation_arg = DeclareLaunchArgument(
         "plan_inflation_m",
         default_value="3.00",
@@ -673,6 +679,7 @@ def generate_launch_description():
             "survey_radius_m": LaunchConfiguration("survey_radius_m"),
             "survey_center_x": LaunchConfiguration("survey_center_x"),
             "survey_center_y": LaunchConfiguration("survey_center_y"),
+            "min_goal_separation_m": LaunchConfiguration("min_goal_separation_m"),
             "odom_topic": PythonExpression(
                 [
                     "'/slam/odometry' if '",
@@ -931,6 +938,7 @@ def generate_launch_description():
             survey_radius_arg,
             survey_center_x_arg,
             survey_center_y_arg,
+            min_goal_separation_arg,
             tsdf_octomap_arg,
             voxel_size_arg,
             trunc_distance_arg,
