@@ -107,7 +107,7 @@ class TSDFMapper(Node):
         self.declare_parameter('voxel_min_weight', 10.0)   # hide voxels observed fewer times
         self.declare_parameter('voxel_min_solid_confidence', 0.80)  # see module docstring
         self.declare_parameter('normal_every',     10)
-        self.declare_parameter('max_voxels_viz',   40_000)
+        self.declare_parameter('max_voxels_viz',   100_000)
         self.declare_parameter('show_free_voxels', False)
         # Discard points beyond the simulated Sonar 3D-15 beam range before
         # integration. The depth-camera proxy may produce farther off-axis
@@ -796,7 +796,8 @@ class TSDFMapper(Node):
             del_m.action = Marker.DELETE
             self._voxels_cache = (
                 _make_pointcloud2(header, np.empty((0, 3), dtype=np.float32)),
-                MarkerArray(markers=[del_m]), free_cloud, grid)
+                MarkerArray(markers=[del_m, _cap_banner(0, 0, None, header)]),
+                free_cloud, grid)
             return
 
         # This remains a solid-only cloud even if the optional voxel
@@ -806,6 +807,7 @@ class TSDFMapper(Node):
         solid_cloud = _make_pointcloud2(header, solid_pts)
 
         n = len(pts)
+        all_pts = pts   # pre-thinning, so the banner sits over the whole map
         if n > self._max_viz:
             sel    = np.random.choice(n, self._max_viz, replace=False)
             pts    = pts[sel]
@@ -841,9 +843,11 @@ class TSDFMapper(Node):
         m.colors   = [ColorRGBA(r=float(c[0]), g=float(c[1]),
                                 b=float(c[2]), a=float(c[3])) for c in colors]
 
-        self._voxels_cache = (solid_cloud, MarkerArray(markers=[m]), free_cloud, grid)
+        banner = _cap_banner(len(pts), n, all_pts, header)
+        self._voxels_cache = (solid_cloud, MarkerArray(markers=[m, banner]),
+                              free_cloud, grid)
         self.get_logger().info(
-            f'Voxels: {len(pts)} published in {self._voxels_gate.last_s:.2f}s',
+            f'Voxels: {len(pts)} of {n} published in {self._voxels_gate.last_s:.2f}s',
             throttle_duration_sec=5.0)
 
     # ────────────────────────────────────────────────────────────────────
@@ -907,8 +911,10 @@ class TSDFMapper(Node):
 
         self._solid_cloud_pub.publish(_make_pointcloud2(header, centers))
 
-        if len(centers) > self._max_viz:
-            centers = centers[np.random.choice(len(centers), self._max_viz, replace=False)]
+        n_total = len(centers)
+        all_centers = centers   # pre-thinning, so the banner sits over the whole map
+        if n_total > self._max_viz:
+            centers = centers[np.random.choice(n_total, self._max_viz, replace=False)]
 
         # No per-voxel weight without the grid, so shade by height for depth —
         # the colormap is repurposed here as a plain low-to-high gradient.
@@ -930,9 +936,10 @@ class TSDFMapper(Node):
         m.colors   = [ColorRGBA(r=float(c[0]), g=float(c[1]),
                                 b=float(c[2]), a=float(c[3])) for c in colors]
 
-        self._voxels_pub.publish(MarkerArray(markers=[m]))
+        banner = _cap_banner(len(centers), n_total, all_centers, header)
+        self._voxels_pub.publish(MarkerArray(markers=[m, banner]))
         self.get_logger().info(
-            f'Voxels (surface-derived): {len(centers)} published',
+            f'Voxels (surface-derived): {len(centers)} of {n_total} published',
             throttle_duration_sec=5.0)
 
 
@@ -1405,6 +1412,43 @@ def _make_normals_cloud(header: Header, points: np.ndarray,
     else:
         msg.data = b''
     return msg
+
+
+def _cap_banner(shown: int, total: int, pts: 'np.ndarray | None',
+                header: Header) -> Marker:
+    """Text banner above the map when max_voxels_viz thins the CUBE_LIST.
+
+    The cap is a render budget on the marker only -- /tsdf/occupied_voxels
+    still carries every solid voxel -- so the wording has to say the map is
+    complete, or a thinned view reads as a mapping failure. DELETEs itself
+    when nothing was dropped, so the banner cannot linger once the map
+    shrinks back under the cap.
+    """
+    m = Marker()
+    m.header.stamp    = header.stamp
+    m.header.frame_id = header.frame_id
+    m.ns       = 'tsdf_voxels_cap'
+    m.id       = 0
+    m.type     = Marker.TEXT_VIEW_FACING
+    m.lifetime = Duration(sec=4)
+    if pts is None or len(pts) == 0 or shown >= total:
+        m.action = Marker.DELETE
+        return m
+
+    m.action  = Marker.ADD
+    m.scale.z = 0.8                                  # text height in metres
+    m.color   = ColorRGBA(r=1.0, g=0.75, b=0.1, a=1.0)
+    # world_ned is +Z down, so min Z is the top of the map.
+    m.pose.position.x = float(pts[:, 0].mean())
+    m.pose.position.y = float(pts[:, 1].mean())
+    m.pose.position.z = float(pts[:, 2].min()) - 1.5
+    m.pose.orientation.w = 1.0
+    m.text = (f'VOXEL VIEW CAPPED FOR PERFORMANCE\n'
+              f'showing {shown} of {total} voxels ({100.0 * shown / total:.0f}%), '
+              f'resampled each redraw\n'
+              f'display limit only - the map itself is complete '
+              f'(see /tsdf/occupied_voxels)')
+    return m
 
 
 def _normals_markers(points: np.ndarray, normals: np.ndarray,
