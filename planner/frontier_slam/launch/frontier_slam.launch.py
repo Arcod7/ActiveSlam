@@ -335,6 +335,12 @@ def generate_launch_description():
                     'alone. 0 = not taken into account, leaving the uncertainty ratio '
                     'as the only uncertainty-based exit.',
     )
+    arrival_dwell_arg = DeclareLaunchArgument(
+        'arrival_dwell_s', default_value='30.0',
+        description='Seconds to wait at the revisit target for the uncertainty to '
+                    'come back down before giving up on the detour. Counts from '
+                    'arrival, so the drive out never shortens it.',
+    )
     revisit_scan_slowdown_arg = DeclareLaunchArgument(
         'revisit_scan_slowdown', default_value='1.0',
         description='Divide the scan yaw rate by this while a revisit is in progress, '
@@ -369,6 +375,7 @@ def generate_launch_description():
         wall_z_band_arg,
         revisit_scan_slowdown_arg,
         revisit_min_closures_arg,
+        arrival_dwell_arg,
         odom_topic_arg,
         safety_start_enabled_arg,
         actuator_backend_arg,
@@ -540,6 +547,7 @@ def generate_launch_description():
                 'ratio_resume': _float_parameter('ratio_resume'),
                 'revisit_min_closures': ParameterValue(
                     LaunchConfiguration('revisit_min_closures'), value_type=int),
+                'arrival_dwell_s': _float_parameter('arrival_dwell_s'),
             }],
             condition=IfCondition(LaunchConfiguration('revisit')),
         ),

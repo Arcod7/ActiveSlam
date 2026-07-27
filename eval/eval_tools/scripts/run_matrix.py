@@ -79,7 +79,7 @@ VALID_KEYS = {
     # Survey working area: bounds frontier exploration to the structure.
     'survey_radius_m', 'survey_center_x', 'survey_center_y',
     'min_goal_separation_m', 'wall_z_band_m', 'revisit_scan_slowdown',
-    'revisit_min_closures',
+    'revisit_min_closures', 'arrival_dwell_s',
 }
 
 

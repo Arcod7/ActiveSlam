@@ -236,6 +236,12 @@ def generate_launch_description():
         "alone. 0 = not taken into account, leaving the uncertainty ratio as the only "
         "uncertainty-based exit.",
     )
+    arrival_dwell_arg = DeclareLaunchArgument(
+        "arrival_dwell_s", default_value="30.0",
+        description="Seconds to wait at the revisit target for the uncertainty to come "
+        "back down before giving up on the detour. Counts from arrival, so the drive "
+        "out never shortens it.",
+    )
     revisit_scan_slowdown_arg = DeclareLaunchArgument(
         "revisit_scan_slowdown", default_value="1.0",
         description="Divide the scan yaw rate by this while a revisit is in progress. "
@@ -700,6 +706,7 @@ def generate_launch_description():
             "wall_z_band_m": LaunchConfiguration("wall_z_band_m"),
             "revisit_scan_slowdown": LaunchConfiguration("revisit_scan_slowdown"),
             "revisit_min_closures": LaunchConfiguration("revisit_min_closures"),
+            "arrival_dwell_s": LaunchConfiguration("arrival_dwell_s"),
             "odom_topic": PythonExpression(
                 [
                     "'/slam/odometry' if '",
@@ -962,6 +969,7 @@ def generate_launch_description():
             wall_z_band_arg,
             revisit_scan_slowdown_arg,
             revisit_min_closures_arg,
+            arrival_dwell_arg,
             tsdf_octomap_arg,
             voxel_size_arg,
             trunc_distance_arg,

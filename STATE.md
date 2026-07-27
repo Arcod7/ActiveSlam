@@ -271,9 +271,9 @@ every tick, so `ros2 param set` takes effect without a restart)
 | `candidate_radius_m` | 5.0 | Neighbourhood radius used to score candidate density |
 | `min_target_dist_m` | 3.0 | Candidates closer than this to the robot are excluded |
 | `w_density` / `w_travel` | 1.0 / 0.2 | Target score = density − w_travel·dist |
-| `revisit_timeout_s` * | 120 | Give up and cooldown if a revisit hasn't resolved by then |
+| `revisit_timeout_s` * | 120 | Transit budget from the trigger: give up if the target is never reached. Suspended once arrived, so a long drive cannot shorten the dwell |
 | `arrival_radius_m` | 2.5 | "Arrived at target" threshold |
-| `arrival_dwell_s` | 30 | Time spent at an arrived target with no closure before cooldown |
+| `arrival_dwell_s` * | 30 | Recovery window at an arrived target: how long to wait for `U_r` to fall before declaring the detour sterile. Counts from arrival |
 | `cooldown_s` | 60 | COOLDOWN → EXPLORING delay |
 
 ### Launch usage
