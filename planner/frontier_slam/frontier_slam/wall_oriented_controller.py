@@ -253,6 +253,12 @@ class WallOrientedController(Node):
         self.declare_parameter('max_wall_distance_m', 8.0)
         self.declare_parameter('wall_z_band_m', 3.0)
         self.declare_parameter('side_switch_margin_m', 0.3)
+        # Scan this many times slower while a revisit is in progress: the
+        # vehicle went back to re-observe known structure, so a slower sweep
+        # puts more sonar frames on it and gives the pose graph and the map
+        # rebuild more time on geometry where a closure is actually possible.
+        # 1.0 = off.
+        self.declare_parameter('revisit_scan_slowdown', 1.0)
         self.declare_parameter('odom_topic', '/StoneFish/Odometry')
         self.declare_parameter('goal_topic', '/frontier_slam/goal')
         self.declare_parameter('path_topic', '/frontier_slam/path')
@@ -268,6 +274,11 @@ class WallOrientedController(Node):
         self._max_wall_distance = float(self.get_parameter('max_wall_distance_m').value)
         self._wall_z_band = float(self.get_parameter('wall_z_band_m').value)
         self._side_switch_margin = float(self.get_parameter('side_switch_margin_m').value)
+        self._revisit_scan_slowdown = max(
+            1.0, float(self.get_parameter('revisit_scan_slowdown').value))
+        self._scan_slowdown = 1.0
+        self.create_subscription(String, '/frontier_slam/revisit_state',
+                                 self._revisit_state_cb, 10)
         map_topic = str(self.get_parameter('map_points_topic').value)
         odom_topic = str(self.get_parameter('odom_topic').value)
         goal_topic = str(self.get_parameter('goal_topic').value)
@@ -379,6 +390,19 @@ class WallOrientedController(Node):
             self.get_logger().info(
                 f'initial {self.INIT_SCAN_DURATION:.0f}s scan starting')
 
+    def _scan_yaw(self) -> float:
+        """Scan yaw effort, divided down while a revisit is in progress."""
+        return self.SCAN_YAW / self._scan_slowdown
+
+    def _revisit_state_cb(self, msg) -> None:
+        slowdown = (self._revisit_scan_slowdown if msg.data == 'revisiting'
+                    else 1.0)
+        if slowdown != self._scan_slowdown:
+            self._scan_slowdown = slowdown
+            self.get_logger().info(
+                f'Scan yaw {"slowed x%.1f for revisit" % slowdown}'
+                if slowdown > 1.0 else 'Scan yaw back to normal')
+
     def _heave_cmd(self) -> float:
         if self._depth_setpoint is None:
             return 0.0
@@ -464,14 +488,14 @@ class WallOrientedController(Node):
 
         heave = self._heave_cmd()
         if self._init_scan_end is not None and now < self._init_scan_end:
-            self._send_thrust(0.0, 0.0, self.SCAN_YAW, heave)
+            self._send_thrust(0.0, 0.0, self._scan_yaw(), heave)
             if write_csv:
-                self._write_csv(0.0, 0.0, self.SCAN_YAW, heave, 'INIT_SCAN')
+                self._write_csv(0.0, 0.0, self._scan_yaw(), heave, 'INIT_SCAN')
             return
         if self._goal is None:
-            self._send_thrust(0.0, 0.0, self.SCAN_YAW, heave)
+            self._send_thrust(0.0, 0.0, self._scan_yaw(), heave)
             if write_csv:
-                self._write_csv(0.0, 0.0, self.SCAN_YAW, heave, 'SCAN')
+                self._write_csv(0.0, 0.0, self._scan_yaw(), heave, 'SCAN')
             return
 
         goal_dist = float(np.hypot(*(self._goal[:2] - self._pose[:2])))
@@ -481,9 +505,9 @@ class WallOrientedController(Node):
             elif now - self._goal_reached_at > self.GOAL_REACHED_TIMEOUT:
                 self._goal = None
                 self._goal_reached_at = None
-            self._send_thrust(0.0, 0.0, self.SCAN_YAW, heave)
+            self._send_thrust(0.0, 0.0, self._scan_yaw(), heave)
             if write_csv:
-                self._write_csv(0.0, 0.0, self.SCAN_YAW, heave,
+                self._write_csv(0.0, 0.0, self._scan_yaw(), heave,
                                 'GOAL_REACHED', distance=goal_dist)
             return
 

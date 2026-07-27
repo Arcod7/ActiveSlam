@@ -335,6 +335,12 @@ def generate_launch_description():
                     'alone. 0 = not taken into account, leaving the uncertainty ratio '
                     'as the only uncertainty-based exit.',
     )
+    revisit_scan_slowdown_arg = DeclareLaunchArgument(
+        'revisit_scan_slowdown', default_value='1.0',
+        description='Divide the scan yaw rate by this while a revisit is in progress, '
+                    'so the sweep puts more sonar frames on the structure it went back '
+                    'to re-observe. 1.0 = off (default; untested in a full run).',
+    )
     min_goal_separation_arg = DeclareLaunchArgument(
         'min_goal_separation_m', default_value='0.0',
         description='Minimum distance (m) between consecutive frontier goals, so '
@@ -353,6 +359,7 @@ def generate_launch_description():
         survey_center_x_arg,
         survey_center_y_arg,
         min_goal_separation_arg,
+        revisit_scan_slowdown_arg,
         revisit_min_closures_arg,
         odom_topic_arg,
         safety_start_enabled_arg,
@@ -467,6 +474,7 @@ def generate_launch_description():
                 'odom_topic': odom_topic,
                 'scan_style': LaunchConfiguration('scan_style'),
                 'scan_sweep_deg': _float_parameter('scan_sweep_deg'),
+                'revisit_scan_slowdown': _float_parameter('revisit_scan_slowdown'),
                 'speed_factor': _float_parameter('speed_factor'),
                 'turn_factor': _float_parameter('turn_factor'),
             }],
@@ -481,6 +489,7 @@ def generate_launch_description():
                 'depth_setpoint': _float_parameter('depth'),
                 'odom_topic': odom_topic,
                 'look_offset_deg': _float_parameter('wall_orientation_offset_deg'),
+                'revisit_scan_slowdown': _float_parameter('revisit_scan_slowdown'),
                 'lookahead_m': _float_parameter('wall_orientation_lookahead_m'),
                 'map_points_topic': LaunchConfiguration('wall_points_topic'),
                 'speed_factor': _float_parameter('speed_factor'),

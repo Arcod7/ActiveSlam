@@ -236,6 +236,11 @@ def generate_launch_description():
         "alone. 0 = not taken into account, leaving the uncertainty ratio as the only "
         "uncertainty-based exit.",
     )
+    revisit_scan_slowdown_arg = DeclareLaunchArgument(
+        "revisit_scan_slowdown", default_value="1.0",
+        description="Divide the scan yaw rate by this while a revisit is in progress. "
+        "1.0 = off (default; untested in a full run as of 2026-07-27).",
+    )
     min_goal_separation_arg = DeclareLaunchArgument(
         "min_goal_separation_m", default_value="0.0",
         description="Minimum distance (m) between consecutive frontier goals, so the "
@@ -686,6 +691,7 @@ def generate_launch_description():
             "survey_center_x": LaunchConfiguration("survey_center_x"),
             "survey_center_y": LaunchConfiguration("survey_center_y"),
             "min_goal_separation_m": LaunchConfiguration("min_goal_separation_m"),
+            "revisit_scan_slowdown": LaunchConfiguration("revisit_scan_slowdown"),
             "revisit_min_closures": LaunchConfiguration("revisit_min_closures"),
             "odom_topic": PythonExpression(
                 [
@@ -946,6 +952,7 @@ def generate_launch_description():
             survey_center_x_arg,
             survey_center_y_arg,
             min_goal_separation_arg,
+            revisit_scan_slowdown_arg,
             revisit_min_closures_arg,
             tsdf_octomap_arg,
             voxel_size_arg,
