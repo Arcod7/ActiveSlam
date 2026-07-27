@@ -125,8 +125,12 @@ class RevisitConfig:
     min_target_dist_m: float = 3.0
     w_density: float = 1.0
     w_travel: float = 0.2
+    # Transit budget only, measured from the trigger: give up if the target
+    # cannot even be reached. Once there, arrival_dwell_s owns the clock.
     revisit_timeout_s: float = 120.0
     arrival_radius_m: float = 2.5
+    # How long to sit at the target waiting for the uncertainty to come back
+    # down before declaring the detour sterile.
     arrival_dwell_s: float = 30.0
     cooldown_s: float = 60.0
 
@@ -244,7 +248,7 @@ class RevisitStateMachine:
     def _tick_revisiting(self, now, dopt, lc_count, kf_xyz, robot_xy):
         cfg = self.cfg
         # min_closures = 0 disables this exit entirely, leaving U_r to decide.
-        # revisit_timeout_s and ARRIVED_STERILE remain the backstops either
+        # ARRIVED_STERILE and revisit_timeout_s remain the backstops either
         # way, so a revisit cannot run forever.
         if (cfg.min_closures > 0
                 and lc_count - self._lc_at_start >= cfg.min_closures):
@@ -252,21 +256,28 @@ class RevisitStateMachine:
         u_ratio = self.ratio(dopt)
         if u_ratio is not None and u_ratio < cfg.ratio_resume:
             return self._end_revisit(now, 'RESUMED_DOPT')
-        if now - self._t_start > cfg.revisit_timeout_s:
-            return self._end_revisit(now, 'TIMEOUT')
 
-        if self.target_idx is not None and self.target_idx < len(kf_xyz):
-            dist = float(np.linalg.norm(
-                np.asarray(kf_xyz)[self.target_idx][:2] - np.asarray(robot_xy)[:2]))
-            if dist < cfg.arrival_radius_m:
-                if self._arrived_since is None:
-                    self._arrived_since = now
-            else:
-                self._arrived_since = None
-            if (self._arrived_since is not None
-                    and now - self._arrived_since > cfg.arrival_dwell_s):
-                return self._end_revisit(now, 'ARRIVED_STERILE')
+        self._track_arrival(now, kf_xyz, robot_xy, cfg.arrival_radius_m)
+        if (self._arrived_since is not None
+                and now - self._arrived_since > cfg.arrival_dwell_s):
+            return self._end_revisit(now, 'ARRIVED_STERILE')
+        # The two clocks are separate on purpose: revisit_timeout_s budgets the
+        # transit, so a long drive can never eat into the recovery window the
+        # dwell grants once the robot is actually at the target.
+        if (self._arrived_since is None
+                and now - self._t_start > cfg.revisit_timeout_s):
+            return self._end_revisit(now, 'TIMEOUT')
         return None
+
+    def _track_arrival(self, now, kf_xyz, robot_xy, arrival_radius_m) -> None:
+        if self.target_idx is None or self.target_idx >= len(kf_xyz):
+            return
+        dist = float(np.linalg.norm(
+            np.asarray(kf_xyz)[self.target_idx][:2] - np.asarray(robot_xy)[:2]))
+        if dist >= arrival_radius_m:
+            self._arrived_since = None
+        elif self._arrived_since is None:
+            self._arrived_since = now
 
     def _end_revisit(self, now, event):
         self.state = RevisitState.COOLDOWN
@@ -320,6 +331,7 @@ class RevisitPlanner(Node):
             min_target_dist_m=float(self.get_parameter('min_target_dist_m').value),
             w_density=float(self.get_parameter('w_density').value),
             w_travel=float(self.get_parameter('w_travel').value),
+            revisit_timeout_s=float(self.get_parameter('revisit_timeout_s').value),
             arrival_radius_m=float(self.get_parameter('arrival_radius_m').value),
             arrival_dwell_s=float(self.get_parameter('arrival_dwell_s').value),
             cooldown_s=float(self.get_parameter('cooldown_s').value),
@@ -398,6 +410,7 @@ class RevisitPlanner(Node):
         cfg.ratio_resume = float(self.get_parameter('ratio_resume').value)
         cfg.min_closures = int(self.get_parameter('revisit_min_closures').value)
         cfg.revisit_timeout_s = float(self.get_parameter('revisit_timeout_s').value)
+        cfg.arrival_dwell_s = float(self.get_parameter('arrival_dwell_s').value)
 
     def _tick(self) -> None:
         self._refresh_live_params()
