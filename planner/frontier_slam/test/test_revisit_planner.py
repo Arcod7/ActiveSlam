@@ -217,6 +217,43 @@ def test_exit_on_arrival_dwell_sterile():
     assert sm.state == RevisitState.COOLDOWN
 
 
+def test_arrival_dwell_is_not_cut_short_by_the_transit_timeout():
+    # revisit_timeout_s budgets the drive out, not the recovery window: a
+    # target reached late must still get its full dwell, or a long detour
+    # silently buys less time to close a loop than a short one.
+    sm = RevisitStateMachine(_cfg(revisit_timeout_s=10.0, arrival_dwell_s=30.0))
+    kf = _kf_for_trigger()
+    sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
+    at_target = kf[sm.target_idx][:2] + np.array([0.1, 0.0])
+
+    # Arrives at t=9, one second before the transit budget runs out.
+    assert sm.tick(now=9.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+                   robot_xy=at_target) is None
+    # Well past the transit timeout, still inside the dwell -> keeps waiting.
+    assert sm.tick(now=30.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+                   robot_xy=at_target) is None
+    assert sm.state == RevisitState.REVISITING
+    # And the dwell, not the timeout, is what finally ends it.
+    assert sm.tick(now=40.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+                   robot_xy=at_target) == 'ARRIVED_STERILE'
+
+
+def test_transit_timeout_still_fires_once_the_robot_leaves_the_target():
+    # The dwell must not become an open-ended reprieve: drift back out and the
+    # transit budget applies again.
+    sm = RevisitStateMachine(_cfg(revisit_timeout_s=10.0, arrival_dwell_s=30.0))
+    kf = _kf_for_trigger()
+    sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
+    target_xy = kf[sm.target_idx][:2]
+    sm.tick(now=9.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+            robot_xy=target_xy + np.array([0.1, 0.0]))
+
+    event = sm.tick(now=20.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+                    robot_xy=target_xy + np.array([50.0, 0.0]))
+
+    assert event == 'TIMEOUT'
+
+
 def test_arrival_timer_resets_if_robot_leaves():
     sm = RevisitStateMachine(_cfg(arrival_radius_m=2.5, arrival_dwell_s=10.0))
     kf = _kf_for_trigger()

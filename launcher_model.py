@@ -15,6 +15,7 @@ LIVE = {
     "ratio_trigger":              ("revisit_planner", "ratio_trigger"),
     "ratio_resume":               ("revisit_planner", "ratio_resume"),
     "revisit_min_closures":       ("revisit_planner", "revisit_min_closures"),
+    "arrival_dwell_s":            ("revisit_planner", "arrival_dwell_s"),
     "wall_standoff":             ("wall_looking", "standoff_m"),
     "wall_switch_goal_distance": ("wall_looking", "switch_goal_distance_m"),
     "wall_switch_scan_angle":    ("wall_looking", "switch_scan_angle_rad"),
@@ -618,6 +619,13 @@ PARAMS = [
           "closure rarely restores the covariance. "
           "Live-tunable while running.",
           advanced=True, step=1, lo=0, hi=10,
+          visible=lambda v: _slam(v) and _planner(v) and v["revisit"]),
+    Param("arrival_dwell_s", "Revisit dwell (s)", "float", 30.0, "slam",
+          "How long the robot waits at the revisit target for the uncertainty "
+          "to come back down before giving up on the detour. Counts from "
+          "arrival, so a long drive out never shortens it. "
+          "Live-tunable while running.",
+          advanced=True, step=5.0, lo=1.0, hi=300.0,
           visible=lambda v: _slam(v) and _planner(v) and v["revisit"]),
     Param("map_rebuild", "Rebuild map on closure", "bool", False, "slam",
           "After a large loop closure, reset the TSDF and re-integrate every "
