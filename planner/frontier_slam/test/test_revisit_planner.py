@@ -8,8 +8,9 @@ import numpy as np
 import pytest
 
 from frontier_slam.revisit_planner import (
-    RevisitConfig, RevisitState, RevisitStateMachine, dopt_allowable,
-    select_revisit_target, uncertainty_ratio,
+    CAUSE_HEADING, CAUSE_POSITION, RevisitConfig, RevisitState,
+    RevisitStateMachine, dopt_allowable, revisit_cause, select_revisit_target,
+    uncertainty_ratio,
 )
 
 
@@ -279,3 +280,73 @@ def test_trigger_scales_with_the_allowable_covariance():
     assert loose.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=robot_xy) is None
     tight = RevisitStateMachine(_cfg(sigma_allow_xy_m=0.05, sigma_allow_yaw_rad=0.05))
     assert tight.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=robot_xy) == 'TRIGGER'
+
+
+# ----------------------------------------------------------------------
+# revisit_cause — attribution of an already-fired trigger, not a threshold
+# ----------------------------------------------------------------------
+
+def test_cause_is_the_axis_furthest_past_its_own_allowance():
+    assert revisit_cause(0.20, 0.05, 0.1, 0.1) == CAUSE_POSITION
+    assert revisit_cause(0.05, 0.20, 0.1, 0.1) == CAUSE_HEADING
+
+
+def test_cause_is_relative_to_each_allowance_not_the_raw_sigma():
+    # Yaw is numerically the smaller sigma yet the larger exceedance: 4x its
+    # allowance against 1.5x for XY.
+    assert revisit_cause(0.15, 0.04, 0.1, 0.01) == CAUSE_HEADING
+
+
+def test_cause_counts_position_twice_for_two_axes():
+    # Equal exceedance on both (2x each): XY carries exponent 4/3 against
+    # yaw's 2/3, so two drifting axes outweigh one.
+    assert revisit_cause(0.2, 0.2, 0.1, 0.1) == CAUSE_POSITION
+    # Yaw only wins once its exceedance passes the square of XY's.
+    assert revisit_cause(0.2, 0.5, 0.1, 0.1) == CAUSE_HEADING
+
+
+def test_cause_factorises_the_ratio_it_explains():
+    # U_r == r_xy**(4/3) * r_yaw**(2/3) is the identity the weighting rests on.
+    sigma_xy, sigma_yaw, allow_xy, allow_yaw = 0.3, 0.08, 0.1, 0.05
+    u_ratio = uncertainty_ratio(dopt_allowable(sigma_xy, sigma_yaw),
+                                dopt_allowable(allow_xy, allow_yaw))
+    assert u_ratio == pytest.approx(
+        (sigma_xy / allow_xy) ** (4 / 3) * (sigma_yaw / allow_yaw) ** (2 / 3))
+
+
+def test_cause_is_none_without_both_sigmas():
+    assert revisit_cause(None, 0.05, 0.1, 0.1) is None
+    assert revisit_cause(0.05, None, 0.1, 0.1) is None
+    assert revisit_cause(0.0, 0.05, 0.1, 0.1) is None
+    assert revisit_cause(0.05, 0.05, 0.1, 0.0) is None
+    assert revisit_cause(float('nan'), 0.05, 0.1, 0.1) is None
+
+
+# ----------------------------------------------------------------------
+# The state machine latches the cause at the trigger
+# ----------------------------------------------------------------------
+
+def test_trigger_latches_the_cause_and_clears_it_on_exit():
+    sm = RevisitStateMachine(_cfg())
+    kf, robot_xy = _kf_for_trigger(), np.array([19.0, 0.0])
+    assert sm.cause is None
+    assert sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=robot_xy,
+                   sigma_xy=0.05, sigma_yaw=0.9) == 'TRIGGER'
+    assert sm.cause == CAUSE_HEADING
+    # Held for the duration, even as the sigmas move during the detour.
+    assert sm.tick(now=1.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=robot_xy,
+                   sigma_xy=0.9, sigma_yaw=0.05) is None
+    assert sm.cause == CAUSE_HEADING
+    assert sm.tick(now=2.0, dopt=0.05, lc_count=1, kf_xyz=kf,
+                   robot_xy=robot_xy) == 'CLOSED'
+    assert sm.cause is None
+
+
+def test_trigger_without_sigmas_still_fires_with_no_cause():
+    # The sigmas are diagnostic: the machine must behave identically without
+    # them, so a missing /slam/sigma_* can never suppress a revisit.
+    sm = RevisitStateMachine(_cfg())
+    assert sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=_kf_for_trigger(),
+                   robot_xy=np.array([19.0, 0.0])) == 'TRIGGER'
+    assert sm.state == RevisitState.REVISITING
+    assert sm.cause is None

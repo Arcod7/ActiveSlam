@@ -80,6 +80,8 @@ EVAL_METRICS = (
     ("rpe_trans",    "/eval/rpe_trans",          False),
     ("rpe_rot",      "/eval/rpe_rot",            False),
     ("dopt",         "/slam/dopt",               False),
+    ("sigma_xy",     "/slam/sigma_xy",           False),
+    ("sigma_yaw",    "/slam/sigma_yaw",          False),
     ("u_ratio",      "/frontier_slam/uncertainty_ratio", False),
     ("anees",        "/eval/anees",              False),
     ("nis",          "/slam/nis",                False),
@@ -102,6 +104,14 @@ ACTIVITY_TEXT = {
     "EMERG_STOP":        "obstacle ahead, backing off",
     "CTRL_STUCK":        "stuck, spinning to escape",
     "CTRL_STUCK_ESCAPE": "stuck, spinning to escape",
+}
+# Which axis of the pose marginal drove the D-optimality that fired the
+# revisit — revisit_planner.py's CAUSE_* strings. The trigger is the combined
+# scalar, so this explains a revisit rather than being a second threshold.
+# Keep in step with safety_gate's REVISIT_CAUSE_LABELS, the RViz wording.
+REVISIT_CAUSE_TEXT = {
+    "position": "position uncertainty",
+    "heading":  "heading uncertainty",
 }
 # Activities that mean the vehicle is holding station rather than travelling.
 HOLDING_ACTIVITIES = {"INIT_SCAN", "SCAN", "GOAL_REACHED", "WALL_SWITCH_SCAN",
@@ -392,6 +402,7 @@ class RosLink:
         self.activity = None
         self.activity_at = 0.0
         self.revisit_state = None
+        self.revisit_cause = None
 
     def start(self):
         if self.node:
@@ -450,6 +461,8 @@ class RosLink:
                 String, "/frontier_slam/activity", self._activity_cb, 1)
             self.node.create_subscription(
                 String, "/frontier_slam/revisit_state", self._revisit_cb, 1)
+            self.node.create_subscription(
+                String, "/frontier_slam/revisit_cause", self._revisit_cause_cb, 1)
         except Exception as e:
             self.error = f"could not create launcher node: {e}"
             self.node = None
@@ -469,6 +482,9 @@ class RosLink:
 
     def _revisit_cb(self, msg):
         self.revisit_state = msg.data
+
+    def _revisit_cause_cb(self, msg):
+        self.revisit_cause = msg.data or None
 
     @staticmethod
     def _pose_from_msg(msg):
@@ -1085,9 +1101,11 @@ def robot_state_text(link, values, running, driving, drive_active):
     # Checked before the mode: a revisit detour preempts the goal in goto mode
     # too, and reporting the target point while driving away from it is a lie.
     if link.revisit_state == "revisiting":
-        return ("at the revisit site, holding until d-opt drops"
-                if link.activity in HOLDING_ACTIVITIES
-                else "driving to the revisit site")
+        where = ("at the revisit site, holding until d-opt drops"
+                 if link.activity in HOLDING_ACTIVITIES
+                 else "driving to the revisit site")
+        why = REVISIT_CAUSE_TEXT.get(link.revisit_cause)
+        return f"{where}\n— triggered by {why}" if why else where
     cooling = " (revisit cooldown)" if link.revisit_state == "cooldown" else ""
     if values["mode"] == "goto":
         return f"heading for the target point{cooling}\n— {doing}"
@@ -1110,12 +1128,17 @@ def metric_rows(metrics, mapper, values=None):
     accuracy = (("RMSE", _metric(metrics, "map_accuracy", ".3f", " m"))
                 if mapper == "tsdf"
                 else ("IoU", _metric(metrics, "map_accuracy", ".3f")))
+    # The two axes d-opt rolls into one scalar, in the units the allowable
+    # sigmas are stated in, so the pair below reads against the pair above it.
+    sigma = (f'{_metric(metrics, "sigma_xy", ".3f")}m '
+             f'{_metric(metrics, "sigma_yaw", ".3f")}rad')
     rows = [
         ("err",      _metric(metrics, "abs_error", ".3f", " m")),
         ("ATE",      _metric(metrics, "ate", ".3f", " m")),
         ("RPE",      rpe),
         ("kf",       _metric(metrics, "keyframes", "d")),
         ("lc",       _metric(metrics, "loops", "d")),
+        ("sigma",    sigma),
         ("d-opt",    _metric(metrics, "dopt", ".4f")),
         ("U_r",      _metric(metrics, "u_ratio", ".2f")),
         # Consistency pair: ANEES wants ~3 against ground truth, NIS ~6 against
@@ -1126,6 +1149,8 @@ def metric_rows(metrics, mapper, values=None):
     # The live d-opt only means something against the level that triggers a
     # revisit, so the thresholds sit under it whenever revisit is armed.
     if values and values.get("revisit") and values.get("mode") in ("frontier", "goto"):
+        rows.append(("allow", f"{values['sigma_allow_xy_m']:g}m "
+                              f"{values['sigma_allow_yaw_rad']:g}rad"))
         rows.append(("trig/res", f"{values['ratio_trigger']:g}"
                                  f" / {values['ratio_resume']:g}"))
     rows += [

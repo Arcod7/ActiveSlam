@@ -2478,3 +2478,65 @@ verified only through `run_matrix.py --dry-run`, which emits
 `noise_profile:=degraded_no_reverb` for that arm; the batch itself has not been
 executed. As with every other term in these profiles, `reverb_p: 0` is a
 modelling choice about the water rather than a hardware-fitted value.
+
+## Phase 58 — The revisit trigger says which axis fired it
+
+The trigger stayed exactly what Phase 48 made it: one scalar,
+`U_r = D(Sigma)/D(Sigma_allow)`, against `ratio_trigger`. What was missing is
+that a run could not say *why* it fired. D-optimality is the geometric mean of
+the XYH marginal, so a revisit driven by heading drift and one driven by
+position drift produce the same number, and the operator sees the same
+`REVISITING` label either way — the one question a live viewer asks about an
+active-SLAM detour was the one the HUD could not answer.
+
+`pose_graph.sigmas_xyh()` splits the marginal `dopt_xyh()` already scores into
+the two numbers the threshold is stated in: a horizontal sigma in metres
+(`det^(1/4)` of the XY block, the radius of the circle of equal area to the
+covariance ellipse) and a yaw sigma in radians. `sigma_xy**4 * sigma_yaw**2`
+is `dopt**3` up to the XY-yaw cross terms, so the pair and the scalar cannot
+drift apart. Published on `/slam/sigma_xy` and `/slam/sigma_yaw`.
+
+Attribution is a factorisation, not a second threshold. With
+`r_xy = sigma_xy/sigma_allow_xy` and `r_yaw = sigma_yaw/sigma_allow_yaw`,
+`U_r = r_xy**(4/3) * r_yaw**(2/3)` exactly, so `revisit_cause()` compares those
+two weighted terms rather than the raw sigmas: position carries twice the
+exponent because XY is two axes, and yaw only wins once its exceedance passes
+the square of XY's. The cause is latched at TRIGGER and cleared on exit — the
+reason it fired, not whichever axis dominates later once the detour has already
+changed the marginal. Published on `/frontier_slam/revisit_cause` as
+`position`/`heading`, empty outside a revisit. The sigmas reach the state
+machine as optional arguments, so a missing `/slam/sigma_*` leaves the trigger
+behaviour identical and the cause `None`; a diagnostic can never suppress a
+revisit.
+
+Both viewers read the same wire strings and render them in their own house
+style — the existing `ACTIVITY_LABELS`/`ACTIVITY_TEXT` split. The RViz state
+row (`safety_gate`, and so the eval HUD panel, which mirrors the marker) reads
+`REVISITING — HEADING DRIFT`; the launcher reads
+`driving to the revisit site / — triggered by heading uncertainty`. An unknown
+or stale cause falls back to the unqualified `REVISITING` rather than reaching
+the HUD raw.
+
+The sigmas themselves are now visible in both. The RViz HUD's second line
+became `sigma xy … | sigma yaw … | D-opt … | U_r … | ANEES …`, with `KF`/`LC`
+moved up to the first — two lines, not three, because the panel's dock height
+comes from the saved RViz geometry while its width has ~2400 px to spare. The
+launcher's metrics block gained a `sigma` row above `d-opt` and, whenever
+revisit is armed, an `allow` row next to the existing `trig/res`, so the live
+pair reads directly against the pair that defines the denominator. `metrics.csv`
+gained `sigma_xy,sigma_yaw,u_ratio` and the revisit session log gained
+`sigma_xy,sigma_yaw,cause` — both appended, and every reader uses `DictReader`.
+
+**Verified**: 47 unit tests over the three changed modules pass, including the
+`U_r == r_xy**(4/3) * r_yaw**(2/3)` identity the weighting rests on, the
+`sigma_xy**4 * sigma_yaw**2 == dopt**3` round trip, correlated-XY shrinkage,
+cause latching across a trigger→closure cycle, and the no-sigma path still
+firing a plain `TRIGGER`. Full suites: 104/104 `slam_backend`, 321/324 across
+`frontier_slam`/`eval_tools`/launcher — the 3 failures are the known
+pre-existing `test_tsdf_tf_queue` ones. Launcher rows and state strings rendered
+headlessly and fit the 31-column panel; the HUD line is 79 characters.
+
+**Not verified**: no sim run — nothing here has been seen in a live RViz, so the
+HUD's two-line fit in the docked panel and the cause reported by a real trigger
+are both unconfirmed. Which axis actually dominates in this scene is therefore
+still an open question, not a result.

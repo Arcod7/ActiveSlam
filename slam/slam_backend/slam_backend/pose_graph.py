@@ -99,6 +99,21 @@ def dopt_xyh(cov_gtsam_6x6: np.ndarray) -> float:
     return float(np.power(max(np.linalg.det(cov_xyh), 0.0), 1.0 / 3.0))
 
 
+def sigmas_xyh(cov_gtsam_6x6: np.ndarray) -> "tuple[float, float]":
+    """The same marginal as dopt_xyh(), split into the two interpretable
+    numbers the revisit threshold is stated in: a horizontal sigma in metres
+    and a yaw sigma in radians.
+
+    sigma_xy is the 2x2 XY block's det^(1/4), i.e. the radius of the circle of
+    equal area to the covariance ellipse, so sigma_xy**4 * sigma_yaw**2 is
+    dopt_xyh()**3 up to the XY-yaw cross terms.
+    """
+    cov_xyh = cov_gtsam_6x6[np.ix_(XYH_INDICES, XYH_INDICES)]
+    sigma_xy = np.power(max(np.linalg.det(cov_xyh[:2, :2]), 0.0), 0.25)
+    sigma_yaw = np.sqrt(max(cov_xyh[2, 2], 0.0))
+    return float(sigma_xy), float(sigma_yaw)
+
+
 @dataclass
 class Keyframe:
     index: int
@@ -287,6 +302,9 @@ class PoseGraphNode(Node):
         self.pub_keyframe_count = self.create_publisher(Int32, '/slam/keyframe_count', 10)
         self.pub_loop_closure_count = self.create_publisher(Int32, '/slam/loop_closure_count', 10)
         self.pub_dopt = self.create_publisher(Float64, '/slam/dopt', 10)
+        # The same marginal per axis, so a reader can see which one drove D-opt.
+        self.pub_sigma_xy = self.create_publisher(Float64, '/slam/sigma_xy', 10)
+        self.pub_sigma_yaw = self.create_publisher(Float64, '/slam/sigma_yaw', 10)
         # Consistency diagnostics: unlike D-optimality these say whether the
         # assumed noise models match the residuals actually observed, and need
         # no ground truth, so they are available on a real vehicle too.
@@ -919,6 +937,9 @@ class PoseGraphNode(Node):
         self.pub_loop_closure_count.publish(Int32(data=n_closures))
 
         self.pub_dopt.publish(Float64(data=dopt_xyh(cov_6x6)))
+        sigma_xy, sigma_yaw = sigmas_xyh(cov_6x6)
+        self.pub_sigma_xy.publish(Float64(data=sigma_xy))
+        self.pub_sigma_yaw.publish(Float64(data=sigma_yaw))
 
     def _publish_visualization(self):
         """Paths and markers, on a timer rather than per keyframe.

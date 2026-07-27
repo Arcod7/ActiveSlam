@@ -20,6 +20,11 @@ NEES pairs each keyframe's reported covariance with the true error over the
 same XYH DoF that feed D-optimality, so it measures whether the revisit
 trigger's input is calibrated. A consistent estimator averages NEES ~= 3
 (chi-square, 3 DoF); ANEES >> 3 means overconfident, << 3 conservative.
+
+Two ANEES columns are reported. ``anees`` is the textbook mean; ``anees_robust``
+is the median-based estimator of the same quantity, and is what the RViz HUD
+shows and what the end-of-run verdict is taken from, because the mean is not
+robust to a single degenerate reported covariance.
 """
 import os
 import bisect
@@ -125,7 +130,8 @@ class BenchmarkNode(Node):
         self._metrics_file = open(os.path.join(out_dir, 'metrics.csv'), 'w')
         self._metrics_file.write(
             't,abs_error,ate,rpe_trans,rpe_rot_deg,dopt,nees,anees,nis,chi2_norm,'
-            'lc_count,rebuild_count,revisit_count,anees_robust,nees_rejected\n')
+            'lc_count,rebuild_count,revisit_count,anees_robust,nees_rejected,'
+            'sigma_xy,sigma_yaw,u_ratio\n')
 
         self._matched_pairs = []   # time-ordered [(gt_sample, est_sample), ...] for RPE
         self._sq_errors = []       # running ATE accumulator
@@ -137,6 +143,11 @@ class BenchmarkNode(Node):
         self._latest_nis = None         # cached from /slam/nis, per loop closure
         self._latest_chi2_norm = None   # cached from /slam/chi2_normalized
         self._latest_dopt = None   # cached from pose_graph.py's /slam/dopt
+        # The same marginal per axis, plus the ratio the revisit trigger reads:
+        # D-opt alone says how uncertain, not in which DoF nor against what.
+        self._latest_sigma_xy = None
+        self._latest_sigma_yaw = None
+        self._latest_u_ratio = None
         self._latest_kf_count = 0
         self._latest_lc_count = 0
         self._latest_rebuild_count = 0
@@ -149,6 +160,10 @@ class BenchmarkNode(Node):
         self.create_subscription(Odometry, '/slam/sensors/dead_reckoned_odom', self._dr_cb, 10)
         self.create_subscription(Odometry, '/slam/odometry', self._slam_odom_cb, 10)
         self.create_subscription(Float64, '/slam/dopt', self._dopt_cb, 10)
+        self.create_subscription(Float64, '/slam/sigma_xy', self._sigma_xy_cb, 10)
+        self.create_subscription(Float64, '/slam/sigma_yaw', self._sigma_yaw_cb, 10)
+        self.create_subscription(Float64, '/frontier_slam/uncertainty_ratio',
+                                 self._u_ratio_cb, 10)
         self.create_subscription(Float64, '/slam/nis', self._nis_cb, 10)
         self.create_subscription(Float64, '/slam/chi2_normalized', self._chi2_cb, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/slam/pose', self._slam_pose_cb, 10)
@@ -174,6 +189,15 @@ class BenchmarkNode(Node):
 
     def _dopt_cb(self, msg: Float64):
         self._latest_dopt = msg.data
+
+    def _sigma_xy_cb(self, msg: Float64):
+        self._latest_sigma_xy = msg.data
+
+    def _sigma_yaw_cb(self, msg: Float64):
+        self._latest_sigma_yaw = msg.data
+
+    def _u_ratio_cb(self, msg: Float64):
+        self._latest_u_ratio = msg.data
 
     def _nis_cb(self, msg: Float64):
         self._latest_nis = msg.data
@@ -278,7 +302,9 @@ class BenchmarkNode(Node):
             f'{_fmt(self._latest_nees)},{_fmt(self._latest_anees)},'
             f'{_fmt(self._latest_nis)},{_fmt(self._latest_chi2_norm)},'
             f'{self._latest_lc_count},{self._latest_rebuild_count},{self._latest_revisit_count},'
-            f'{_fmt(self._latest_anees_robust)},{self._nees_rejected}\n')
+            f'{_fmt(self._latest_anees_robust)},{self._nees_rejected},'
+            f'{_fmt(self._latest_sigma_xy, 6)},{_fmt(self._latest_sigma_yaw, 6)},'
+            f'{_fmt(self._latest_u_ratio, 4)}\n')
         self._metrics_file.flush()
 
         self._publish_eval_markers(gt, sample, abs_error, ate, rpe_trans, rpe_rot_deg)
@@ -320,14 +346,31 @@ class BenchmarkNode(Node):
         rpe_t_str = f'{rpe_trans:.2f} m' if rpe_trans is not None else 'n/a'
         rpe_r_str = f'{rpe_rot_deg:.1f} deg' if rpe_rot_deg is not None else 'n/a'
         dopt_str = f'{self._latest_dopt:.4f}' if self._latest_dopt is not None else 'n/a'
-        anees_str = (f'{self._latest_anees:.1f} (rob {self._latest_anees_robust:.1f})'
+        # The robust estimator, unlabelled: on a HUD the number has to be the one
+        # worth acting on. The raw mean stays on /eval/anees and in the CSV.
+        anees_str = (f'{self._latest_anees_robust:.1f}'
                      if self._nees_samples else 'n/a')
+        rejected_str = (f'  |  NEES rej {self._nees_rejected}'
+                        if self._nees_rejected else '')
+        # D-opt is the two sigmas rolled into one scalar, so it sits next to
+        # them: the sigmas say which DoF, U_r says how close that is to firing
+        # a revisit.
+        sigma_xy_str = (f'{self._latest_sigma_xy:.3f} m'
+                        if self._latest_sigma_xy is not None else 'n/a')
+        sigma_yaw_str = (f'{self._latest_sigma_yaw:.3f} rad'
+                         if self._latest_sigma_yaw is not None else 'n/a')
+        u_ratio_str = (f'{self._latest_u_ratio:.2f}'
+                       if self._latest_u_ratio is not None else 'n/a')
         # Spaced pipes and spaced units: the HUD panel renders this monospaced.
+        # Two lines, not three — the panel sits in a dock whose height comes
+        # from the saved RViz geometry, and the width is what there is to spare.
         text.text = (
             f'err {abs_error:.2f} m  |  ATE {ate:.2f} m  |  '
-            f'RPE {rpe_t_str} / {rpe_r_str}\n'
-            f'KF {self._latest_kf_count}  |  LC {self._latest_lc_count}  |  '
-            f'D-opt {dopt_str}  |  ANEES {anees_str}'
+            f'RPE {rpe_t_str} / {rpe_r_str}  |  '
+            f'KF {self._latest_kf_count}  |  LC {self._latest_lc_count}\n'
+            f'sigma xy {sigma_xy_str}  |  sigma yaw {sigma_yaw_str}  |  '
+            f'D-opt {dopt_str}  |  U_r {u_ratio_str}  |  '
+            f'ANEES {anees_str}{rejected_str}'
         )
         markers.markers.append(text)
 

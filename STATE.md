@@ -62,7 +62,9 @@ other. Enabled by default:
   (`/eval/markers_live`); a line, not an arrow, because at small drift the
   arrowhead swallowed the shaft. All from `slam:=slam`. The scalar metrics
   (`err`/`ATE`/`RPE` translation+rotation/keyframe count/loop-closure
-  count/D-optimality) come from `eval_tools/benchmark.py`'s `/eval/markers`
+  count, then the per-axis `sigma xy` in metres and `sigma yaw` in radians
+  beside the `D-optimality` they collapse into and the `U_r` that trigger is
+  compared against) come from `eval_tools/benchmark.py`'s `/eval/markers`
   and render in the Eval HUD panel docked at the bottom, under a state row
   that mirrors the `RobotState` label and its colour.
 - One image view, `Sonar DepthMap` (`/cloud_in/range_image`, published in

@@ -53,9 +53,15 @@ _LOG_DIR = os.path.join(
 )
 
 CSV_COLUMNS = [
-    't_ros', 'state', 'dopt', 'u_ratio', 'lc_count', 'n_kf',
-    'tgt_x', 'tgt_y', 'dist_m', 'revisit_count', 'event',
+    't_ros', 'state', 'dopt', 'u_ratio', 'sigma_xy', 'sigma_yaw', 'cause',
+    'lc_count', 'n_kf', 'tgt_x', 'tgt_y', 'dist_m', 'revisit_count', 'event',
 ]
+
+# Which axis pushed U_r over the trigger. Published verbatim on
+# /frontier_slam/revisit_cause; the RViz HUD and the launcher each render it in
+# their own house style, so these strings are the shared contract between them.
+CAUSE_POSITION = 'position'
+CAUSE_HEADING = 'heading'
 
 
 def dopt_allowable(sigma_xy_m: float, sigma_yaw_rad: float) -> float:
@@ -72,6 +78,23 @@ def uncertainty_ratio(dopt, dopt_allow: float) -> "float | None":
     if dopt is None or dopt_allow <= 0.0:
         return None
     return float(dopt) / dopt_allow
+
+
+def revisit_cause(sigma_xy, sigma_yaw, sigma_allow_xy_m: float,
+                  sigma_allow_yaw_rad: float) -> "str | None":
+    """Which axis is responsible for U_r, or None without both sigmas.
+
+    U_r factorises exactly: with r_xy = sigma_xy/sigma_allow_xy and
+    r_yaw = sigma_yaw/sigma_allow_yaw, U_r = r_xy**(4/3) * r_yaw**(2/3). Those
+    two exponents are the comparison — position carries twice the weight
+    because XY is two axes, so the larger raw sigma is not the larger cause.
+    """
+    values = (sigma_xy, sigma_yaw, sigma_allow_xy_m, sigma_allow_yaw_rad)
+    if any(v is None or not np.isfinite(v) or v <= 0.0 for v in values):
+        return None
+    weight_xy = (4.0 / 3.0) * np.log(float(sigma_xy) / sigma_allow_xy_m)
+    weight_yaw = (2.0 / 3.0) * np.log(float(sigma_yaw) / sigma_allow_yaw_rad)
+    return CAUSE_POSITION if weight_xy >= weight_yaw else CAUSE_HEADING
 
 
 class RevisitState(Enum):
@@ -150,6 +173,9 @@ class RevisitStateMachine:
         self.state = RevisitState.EXPLORING
         self.revisit_count = 0
         self.target_idx = None
+        # Latched at TRIGGER: the reason it fired, not whichever axis happens
+        # to dominate later once the detour has already changed the marginal.
+        self.cause = None
         self._lc_at_start = 0
         self._t_start = None
         self._arrived_since = None
@@ -166,17 +192,24 @@ class RevisitStateMachine:
         return uncertainty_ratio(dopt, self.dopt_allow())
 
     def tick(self, now: float, dopt, lc_count: int,
-             kf_xyz: np.ndarray, robot_xy: np.ndarray) -> "str | None":
+             kf_xyz: np.ndarray, robot_xy: np.ndarray,
+             sigma_xy=None, sigma_yaw=None) -> "str | None":
         """Advance one tick. Returns an event string ('TRIGGER', 'CLOSED',
         'RESUMED_DOPT', 'TIMEOUT', 'ARRIVED_STERILE', 'COOLDOWN_DONE') or
-        None if nothing changed this tick."""
+        None if nothing changed this tick.
+
+        The sigmas only label a trigger with its cause; without them the
+        machine behaves exactly as before and the cause stays None.
+        """
         if self.state == RevisitState.EXPLORING:
-            return self._try_trigger(now, dopt, lc_count, kf_xyz, robot_xy)
+            return self._try_trigger(now, dopt, lc_count, kf_xyz, robot_xy,
+                                     sigma_xy, sigma_yaw)
         if self.state == RevisitState.REVISITING:
             return self._tick_revisiting(now, dopt, lc_count, kf_xyz, robot_xy)
         return self._tick_cooldown(now)
 
-    def _try_trigger(self, now, dopt, lc_count, kf_xyz, robot_xy):
+    def _try_trigger(self, now, dopt, lc_count, kf_xyz, robot_xy,
+                     sigma_xy=None, sigma_yaw=None):
         cfg = self.cfg
         u_ratio = self.ratio(dopt)
         if u_ratio is None or u_ratio <= cfg.ratio_trigger:
@@ -192,6 +225,8 @@ class RevisitStateMachine:
         self.state = RevisitState.REVISITING
         self.revisit_count += 1
         self.target_idx = target
+        self.cause = revisit_cause(sigma_xy, sigma_yaw, cfg.sigma_allow_xy_m,
+                                   cfg.sigma_allow_yaw_rad)
         self._lc_at_start = lc_count
         self._t_start = now
         self._arrived_since = None
@@ -224,6 +259,7 @@ class RevisitStateMachine:
         self.state = RevisitState.COOLDOWN
         self._last_revisit_end = now
         self.target_idx = None
+        self.cause = None
         return event
 
     def _tick_cooldown(self, now):
@@ -276,15 +312,22 @@ class RevisitPlanner(Node):
         self._sm = RevisitStateMachine(cfg)
 
         self._dopt = None
+        self._sigma_xy = None
+        self._sigma_yaw = None
         self._lc_count = 0
         self._kf_xyz = np.empty((0, 3))
         self._robot_xy = None
         self._last_goal_pub_time = None
 
         self._log = open_session_log('revisit', CSV_COLUMNS, _LOG_DIR,
-                                     precision={'dopt': 8, 'u_ratio': 4})
+                                     precision={'dopt': 8, 'u_ratio': 4,
+                                                'sigma_xy': 6, 'sigma_yaw': 6})
 
         self.create_subscription(Float64, '/slam/dopt', self._dopt_cb, 10)
+        # Diagnostic only — the same marginal split per axis, to label a
+        # trigger with its cause. The trigger itself is the combined D-opt.
+        self.create_subscription(Float64, '/slam/sigma_xy', self._sigma_xy_cb, 10)
+        self.create_subscription(Float64, '/slam/sigma_yaw', self._sigma_yaw_cb, 10)
         self.create_subscription(Path, '/slam/path_slam', self._path_cb, 10)
         self.create_subscription(Int32, '/slam/loop_closure_count', self._lc_cb, 10)
         self.create_subscription(Odometry, odom_topic, self._odom_cb, 10)
@@ -293,6 +336,7 @@ class RevisitPlanner(Node):
         self._goal_pub = self.create_publisher(PointStamped, '/frontier_slam/goal', 1)
         self._count_pub = self.create_publisher(Int32, '/frontier_slam/revisit_count', 10)
         self._state_pub = self.create_publisher(String, '/frontier_slam/revisit_state', 10)
+        self._cause_pub = self.create_publisher(String, '/frontier_slam/revisit_cause', 10)
         self._ratio_pub = self.create_publisher(Float64, '/frontier_slam/uncertainty_ratio', 10)
 
         self.create_timer(1.0 / self.TICK_HZ, self._tick)
@@ -306,6 +350,12 @@ class RevisitPlanner(Node):
     # ROS callbacks
     def _dopt_cb(self, msg: Float64) -> None:
         self._dopt = msg.data
+
+    def _sigma_xy_cb(self, msg: Float64) -> None:
+        self._sigma_xy = msg.data
+
+    def _sigma_yaw_cb(self, msg: Float64) -> None:
+        self._sigma_yaw = msg.data
 
     def _lc_cb(self, msg: Int32) -> None:
         self._lc_count = msg.data
@@ -340,11 +390,13 @@ class RevisitPlanner(Node):
 
         now = self.get_clock().now().nanoseconds * 1e-9
         prev_state = self._sm.state
-        event = self._sm.tick(now, self._dopt, self._lc_count, self._kf_xyz, self._robot_xy)
+        event = self._sm.tick(now, self._dopt, self._lc_count, self._kf_xyz,
+                              self._robot_xy, self._sigma_xy, self._sigma_yaw)
 
         suspended = self._sm.suspended
         self._suspend_pub.publish(Bool(data=suspended))
         self._state_pub.publish(String(data=self._sm.state.value))
+        self._cause_pub.publish(String(data=self._sm.cause or ''))
         self._count_pub.publish(Int32(data=self._sm.revisit_count))
 
         tgt_x = tgt_y = dist_m = float('nan')
@@ -360,9 +412,11 @@ class RevisitPlanner(Node):
             self._last_goal_pub_time = None
 
         if event is not None or prev_state != self._sm.state:
+            cause = (f', driven by {self._sm.cause}' if event == 'TRIGGER'
+                     and self._sm.cause else '')
             self.get_logger().info(
                 f'{prev_state.value} -> {self._sm.state.value}'
-                + (f' ({event})' if event else ''))
+                + (f' ({event}{cause})' if event else ''))
 
         u_ratio = self._sm.ratio(self._dopt)
         self._ratio_pub.publish(Float64(
@@ -372,6 +426,9 @@ class RevisitPlanner(Node):
             now, self._sm.state.value,
             self._dopt if self._dopt is not None else float('nan'),
             u_ratio if u_ratio is not None else float('nan'),
+            self._sigma_xy if self._sigma_xy is not None else float('nan'),
+            self._sigma_yaw if self._sigma_yaw is not None else float('nan'),
+            self._sm.cause or '',
             self._lc_count, len(self._kf_xyz),
             tgt_x, tgt_y, dist_m, self._sm.revisit_count, event or '',
         ])
