@@ -1,0 +1,73 @@
+batch_name: dtsdf_infl
+duration_s: 480
+settle_s: 15
+seeds:
+- 101
+common_args:
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  mapper: tsdf
+  rviz: 'false'
+  scene: target
+  obj_mesh: shipwreck.obj
+  obj_x: 40.55
+  obj_y: -13.62
+  obj_z: 17.38
+  obj_scale: 0.6901
+  obj_roll: 0.0
+  obj_pitch: -180.0
+  obj_yaw: 15.0
+  robot_x: 10.8225
+  robot_y: -10.665
+  robot_z: 8.9465
+  robot_roll: 0.1378
+  robot_pitch: 0.1706
+  robot_yaw: 96.0627
+  depth: 9.0
+  survey_radius_m: 60.0
+  tsdf_octomap: 'true'
+  voxel_size: 0.3
+  voxel_min_weight: 3.0
+  voxel_min_solid_confidence: 0.5
+  motion: walloriented
+  scan_style: sweep
+  scan_sweep_deg: 180.0
+  speed_factor: 1.0
+  turn_factor: 0.2
+  thrust_boost: 'false'
+  scenario: none
+  hard_inflation_m: 0.5
+  inflation_m: 2.0
+  plan_inflation_m: 3.7
+  wall_orientation_offset_deg: 50.0
+  wall_orientation_lookahead_m: 2.0
+  tsdf_frontier_standoff_m: 1.0
+  wall_standoff: 1.5
+  wall_switch_goal_distance: 6.0
+  wall_switch_scan_angle: 3.14159
+  wall_switch_scan_yaw: 0.08
+  wall_path_influence: 0.7
+  wall_path_look_offset_deg: 30.0
+  wall_normal_offset_deg: 0.0
+  wall_path_heading_weight: 0.35
+  noise_profile: realistic_no_reverb
+  noise_profile_dvl: degraded
+  near_cutoff: -1.0
+  near_fade: -1.0
+  sigma_allow_xy_m: 0.1
+  sigma_allow_yaw_rad: 0.05
+  ratio_trigger: 1.0
+  ratio_resume: 0.5
+runs:
+- name: dir_infl
+  args:
+    loop_closure: 'true'
+    revisit: 'false'
+    map_rebuild: 'false'
+    directional_tsdf: 'true'
+    voxel_min_weight: 4.5
+    voxel_min_solid_confidence: 0.8
+    hard_inflation_m: 0.4
+    inflation_m: 1.5
+    plan_inflation_m: 3.0

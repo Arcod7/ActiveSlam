@@ -94,8 +94,15 @@ class TSDFMapper(Node):
         self.declare_parameter('world_frame',      'world_ned')
         self.declare_parameter('cloud_frame',      'bluerov2/Dcam')
         self.declare_parameter('voxel_size',       0.2)
-        self.declare_parameter('trunc_distance',   0.6)    # metres, ≥ 3× voxel_size
+        # <= 0 resolves to 3x voxel_size, the minimum VDBFusion needs for a
+        # usable gradient. Set it explicitly to map structure thinner than
+        # 2x trunc, which a single signed field cannot hold (see
+        # directional_tsdf).
+        self.declare_parameter('trunc_distance',   0.0)
         self.declare_parameter('space_carving',    True)
+        # WIP: one volume per view-direction bin instead of one shared field,
+        # so a surface seen from both faces stops averaging itself away.
+        self.declare_parameter('directional_tsdf', False)
         self.declare_parameter('min_weight',       2.0)
         self.declare_parameter('voxel_min_weight', 10.0)   # hide voxels observed fewer times
         self.declare_parameter('voxel_min_solid_confidence', 0.80)  # see module docstring
@@ -178,18 +185,23 @@ class TSDFMapper(Node):
         voxel_size         = float(self.get_parameter('voxel_size').value)
         trunc              = float(self.get_parameter('trunc_distance').value)
         space_carving      = bool(self.get_parameter('space_carving').value)
+        directional        = bool(self.get_parameter('directional_tsdf').value)
+
+        if trunc <= 0.0:
+            trunc = 3.0 * voxel_size
 
         self._voxel_size = voxel_size
         self._trunc      = trunc
         self._space_carving = space_carving
+        self._directional = directional
         # solid-confidence = (trunc - d) / (2*trunc) >= voxel_min_solid_confidence
         #   <=>  d <= trunc * (1 - 2*voxel_min_solid_confidence)
         self._voxel_max_d = trunc * (1.0 - 2.0 * self._voxel_min_solid_confidence)
-        self._volume     = VDBVolume(voxel_size, trunc, space_carving=space_carving)
-        # Every VDB access is serialised on this; the volume itself is not
-        # thread-safe and a rebuild swaps the object outright.
+        self._volumes    = self._new_volumes()
+        # Every VDB access is serialised on this; the volumes themselves are not
+        # thread-safe and a rebuild swaps them outright.
         self._volume_lock = threading.Lock()
-        self._pyopenvdb = bool(self._volume.pyopenvdb_support_enabled)
+        self._pyopenvdb = bool(self._volumes[0].pyopenvdb_support_enabled)
         # Bumped on every integrate/replay/reset so viz can skip unchanged maps.
         self._map_revision = 0
 
@@ -198,7 +210,8 @@ class TSDFMapper(Node):
                 'VDBFusion built without pyopenvdb — voxel visualisation disabled')
 
         self.get_logger().info(
-            f'TSDF  voxel={voxel_size}m  trunc={trunc}m  space_carving={space_carving}')
+            f'TSDF  voxel={voxel_size}m  trunc={trunc}m  space_carving={space_carving}'
+            + (f'  directional={len(self._volumes)} bins (WIP)' if directional else ''))
 
         # Thresholds that filter what the map publishes rather than what it
         # stores, so they can move without touching the grid. Settable at
@@ -451,6 +464,42 @@ class TSDFMapper(Node):
             f'viz: surface={self._surface_gate.last_s:.2f}s '
             f'voxels={self._voxels_gate.last_s:.2f}s')
 
+    # ────────────────────────────────────────────────────────────────────
+    # Directional TSDF (WIP)
+    #
+    # A TSDF's sign is defined by the side the sensor observed a surface from,
+    # so a structure thinner than 2x trunc that is seen from both faces writes
+    # opposing fields into the same voxels. VDBFusion weight-averages them, the
+    # zero crossing flattens to ~0 and the surface dissolves into speckle.
+    #
+    # Binning each ray by its dominant view axis keeps the two faces in separate
+    # volumes, which never average; reads merge by picking the most solid bin
+    # per voxel rather than averaging. Splietker & Behnke (IROS 2019) bin by
+    # surface normal — view direction is the cheap proxy, since a face is only
+    # ever observed from the side it points at.
+    #
+    # Not yet validated against the ground-truth map: costs 6 grid walks per viz
+    # cycle, and the merge biases free/solid disputes toward solid.
+    # ────────────────────────────────────────────────────────────────────
+
+    DIRECTION_BINS = 6      # +X -X +Y -Y +Z -Z
+
+    def _new_volumes(self) -> list:
+        n = self.DIRECTION_BINS if self._directional else 1
+        return [VDBVolume(self._voxel_size, self._trunc,
+                          space_carving=self._space_carving) for _ in range(n)]
+
+    def _integrate_into(self, pts_world: np.ndarray, origin: np.ndarray) -> None:
+        """Integrate one scan, split across direction bins when directional."""
+        if not self._directional:
+            self._volumes[0].integrate(pts_world, origin)
+            return
+        bins = _direction_bins(pts_world - origin)
+        for b, volume in enumerate(self._volumes):
+            sel = pts_world[bins == b]
+            if len(sel):
+                volume.integrate(sel, origin)
+
     def _integrate_cloud(self, msg: PointCloud2, tf_msg) -> bool:
         """Filter and integrate one cloud using its exact capture-time TF."""
         pts_cam = _parse_pointcloud2(msg)   # (N,3) float64, sensor frame
@@ -483,7 +532,7 @@ class TSDFMapper(Node):
         origin    = t                       # camera origin in world frame, float64
 
         with self._volume_lock:
-            self._volume.integrate(pts_world, origin)
+            self._integrate_into(pts_world, origin)
         self._map_revision += 1
 
         if self._enable_rebuild:
@@ -553,8 +602,7 @@ class TSDFMapper(Node):
         self._write_back_cache(keyframe_ts, corrections)
 
         with self._volume_lock:
-            self._volume = VDBVolume(
-                self._voxel_size, self._trunc, space_carving=self._space_carving)
+            self._volumes = self._new_volumes()
         self._map_revision += 1
         self._replay_queue = list(self._scan_cache.keys())
         self.get_logger().info(
@@ -581,7 +629,7 @@ class TSDFMapper(Node):
                 pts_cam, T = entry
                 R, t = T[:3, :3], T[:3, 3]
                 pts_world = pts_cam.astype(np.float64) @ R.T + t
-                self._volume.integrate(pts_world, t)
+                self._integrate_into(pts_world, t)
         self._map_revision += 1
         if not self._replay_queue:
             self.get_logger().info('Map rebuild replay complete')
@@ -619,19 +667,29 @@ class TSDFMapper(Node):
         sampled = normals = None
         with self._volume_lock:
             try:
-                verts, _tris = self._volume.extract_triangle_mesh(
-                    fill_holes=False, min_weight=float(self._min_weight))
+                # Each direction bin meshes on its own — a shared marching-cubes
+                # pass is exactly the averaging this mode avoids. reshape keeps
+                # an empty bin at (0,3) so the concatenate below still matches.
+                per_bin = [np.asarray(v.extract_triangle_mesh(
+                    fill_holes=False, min_weight=float(self._min_weight))[0],
+                    dtype=np.float32).reshape(-1, 3) for v in self._volumes]
             except Exception as exc:
                 self.get_logger().warn(
                     f'extract_triangle_mesh failed: {exc}', throttle_duration_sec=5.0)
-                verts = None
-            if verts is not None:
-                verts = np.asarray(verts, dtype=np.float32)
-                # Normals need the TSDF grid (pyopenvdb-only); the cloud does not.
-                if len(verts) and self._pyopenvdb:
-                    sampled = verts[::self._normal_stride(len(verts))]
-                    normals = _compute_normals_vdb(
-                        self._volume.tsdf, sampled, self._voxel_size)
+                per_bin = None
+            verts = None if per_bin is None else np.concatenate(per_bin)
+            # Normals need the TSDF grid (pyopenvdb-only); the cloud does not.
+            if verts is not None and len(verts) and self._pyopenvdb:
+                stride = self._normal_stride(len(verts))
+                # Sampled per bin so each vertex's normal comes from the grid
+                # that actually meshed it.
+                pairs = [(p[::stride], v) for p, v in zip(per_bin, self._volumes)
+                         if len(p[::stride])]
+                if pairs:
+                    sampled = np.concatenate([p for p, _ in pairs])
+                    normals = np.concatenate([
+                        _compute_normals_vdb(v.tsdf, p, self._voxel_size)
+                        for p, v in pairs])
         finished = self._monotonic()
         self._surface_gate.record(finished, finished - started)
         if verts is None:
@@ -697,15 +755,17 @@ class TSDFMapper(Node):
                 # cloud: keep every voxel at/above the low map weight (min_weight)
                 # so free (d>0) cells survive, then re-filter to solids below for
                 # the CUBE_LIST + /tsdf/occupied_voxels.
-                coords, all_d, all_w = _extract_voxel_arrays(
-                    self._volume.tsdf, self._volume.weights, self._min_weight)
+                coords, all_d, all_w = _merge_voxel_parts([
+                    _extract_voxel_arrays(v.tsdf, v.weights, self._min_weight)
+                    for v in self._volumes])
             else:
                 # Only iterate voxels we'll actually show (early filtering inside):
                 # confidently solid (TSDF-derived) AND observed often enough (weight).
                 max_d = self._voxel_max_d if not self._show_free else None
-                pts, d_vals, w_vals = _extract_voxels(
-                    self._volume.tsdf, self._volume.weights,
-                    self._voxel_size, min_weight=self._voxel_min_weight, max_d=max_d)
+                pts, d_vals, w_vals = _merge_voxel_parts([
+                    _extract_voxels(v.tsdf, v.weights, self._voxel_size,
+                                    min_weight=self._voxel_min_weight, max_d=max_d)
+                    for v in self._volumes])
         finished = self._monotonic()
         self._voxels_gate.record(finished, finished - started)
         self._voxels_revision = revision
@@ -1058,6 +1118,41 @@ def _interpolate_correction(t: float, keyframe_ts: np.ndarray,
     A[:3, :3] = rotation
     A[:3, 3] = translation
     return A
+
+
+def _direction_bins(dirs: np.ndarray) -> np.ndarray:
+    """Bin index per ray: dominant axis * 2, +1 when that component is negative.
+
+    Opposite views of one surface land in different bins, which is the whole
+    point — see TSDFMapper's directional-TSDF note.
+    """
+    axis = np.argmax(np.abs(dirs), axis=1)
+    negative = dirs[np.arange(len(dirs)), axis] < 0.0
+    return axis * 2 + negative
+
+
+def _merge_voxel_parts(parts: list) -> tuple:
+    """Collapse per-bin (keys, d, w) triples to one, keeping the lowest d per key.
+
+    Picking the most solid bin rather than averaging is what stops a two-sided
+    surface cancelling itself; keys are VDB index coords or world centres, both
+    bit-identical across bins since every bin shares one grid transform.
+    """
+    parts = [p for p in parts if p[0] is not None]
+    if not parts:
+        return None, None, None
+    if len(parts) == 1:
+        return parts[0]
+
+    keys = np.concatenate([p[0] for p in parts])
+    d_vals = np.concatenate([p[1] for p in parts])
+    w_vals = np.concatenate([p[2] for p in parts])
+    # Primary key is the last lexsort argument: sorts by x, y, z, then d.
+    order = np.lexsort((d_vals, keys[:, 2], keys[:, 1], keys[:, 0]))
+    keys, d_vals, w_vals = keys[order], d_vals[order], w_vals[order]
+    first = np.ones(len(keys), dtype=bool)
+    first[1:] = np.any(keys[1:] != keys[:-1], axis=1)
+    return keys[first], d_vals[first], w_vals[first]
 
 
 def _extract_voxels(tsdf_grid, weights_grid, voxel_size: float,

@@ -74,6 +74,20 @@ def generate_launch_description():
         description='How far behind the zero crossing a voxel must sit to count '
         'as a wall — 0.5 = at the surface, 1.0 = fully saturated',
     )
+    trunc_distance_arg = DeclareLaunchArgument(
+        'trunc_distance', default_value='0.0',
+        description='Truncation band half-width in metres; 0 = follow voxel_size at 3x',
+    )
+    space_carving_arg = DeclareLaunchArgument(
+        'space_carving', default_value='true',
+        description='Free the whole ray from the sensor to the return, not just '
+        'the band ahead of the surface',
+    )
+    directional_tsdf_arg = DeclareLaunchArgument(
+        'directional_tsdf', default_value='false',
+        description='WIP: one volume per view-direction bin, so a surface seen '
+        'from both faces does not average itself away',
+    )
 
     pointcloud = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(_LAUNCH_DIR, 'pointcloud.launch.py'))
@@ -92,6 +106,9 @@ def generate_launch_description():
             'voxel_min_weight': LaunchConfiguration('voxel_min_weight'),
             'voxel_min_solid_confidence': LaunchConfiguration(
                 'voxel_min_solid_confidence'),
+            'trunc_distance': LaunchConfiguration('trunc_distance'),
+            'space_carving': LaunchConfiguration('space_carving'),
+            'directional_tsdf': LaunchConfiguration('directional_tsdf'),
         }.items(),
     )
 
@@ -99,4 +116,6 @@ def generate_launch_description():
                               publish_projected_map_arg, target_depth_m_arg,
                               tsdf_octomap_arg, voxel_size_arg,
                               voxel_min_weight_arg, voxel_min_solid_confidence_arg,
+                              trunc_distance_arg, space_carving_arg,
+                              directional_tsdf_arg,
                               pointcloud, tsdf_mapper])

@@ -79,6 +79,12 @@ def _octomap_band_depth(v):
     return v["robot_depth_target"] if v["mapper"] == "octomap" else None
 
 
+def _mapper_backend(v):
+    """The launch files take mapper:=octomap|tsdf. tsdf_directional is not a
+    backend of its own — it is the TSDF one with directional_tsdf set."""
+    return "octomap" if v["mapper"] == "octomap" else "tsdf"
+
+
 def _planner_mode(v):
     """Whether the planner layer runs. frontier and goto differ only in who
     publishes the goal — a runtime topic, not a launch argument."""
@@ -208,10 +214,11 @@ def build_groups(bringup_share=""):
         # Under mode:=frontier mapper:=tsdf the mapper derives /projected_map
         # from its own grid (banded around the cruise depth), so frontier
         # detection + A* share the belief map — no separate octomap_server.
-        publish_projected = v["mode"] in ("frontier", "goto") and v["mapper"] == "tsdf"
+        publish_projected = (v["mode"] in ("frontier", "goto")
+                            and _mapper_backend(v) == "tsdf")
         return [["ros2", "launch", "stonefish_groundtruth_mapping",
                  "mapper_only.launch.py",
-                 f"mapper:={v['mapper']}",
+                 f"mapper:={_mapper_backend(v)}",
                  f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}",
                  # octomap_server bands its own /projected_map around this depth
                  # (z_band.py); the TSDF mapper bands its projection through
@@ -223,18 +230,29 @@ def build_groups(bringup_share=""):
                  f"voxel_size:={v['voxel_size']}",
                  f"voxel_min_weight:={v['voxel_min_weight']}",
                  "voxel_min_solid_confidence:="
-                 f"{v['voxel_min_solid_confidence']}"]]
+                 f"{v['voxel_min_solid_confidence']}",
+                 *_tsdf_grid_args(v)]]
 
     def gt_map(v):
         # Built at the belief map's cell size and wall thresholds: the map
         # metrics compare the two grids directly, so a mismatch here would
         # register as map error.
         return [["ros2", "launch", "stonefish_groundtruth_mapping",
-                 "gt_map.launch.py", f"mapper:={v['mapper']}",
+                 "gt_map.launch.py", f"mapper:={_mapper_backend(v)}",
                  f"voxel_size:={v['voxel_size']}",
                  f"voxel_min_weight:={v['voxel_min_weight']}",
                  "voxel_min_solid_confidence:="
-                 f"{v['voxel_min_solid_confidence']}"]]
+                 f"{v['voxel_min_solid_confidence']}",
+                 *_tsdf_grid_args(v)]]
+
+    def _tsdf_grid_args(v):
+        """Options the VDB volume is constructed from — belief and ground-truth
+        map take the identical set, or the map metrics compare two grids built
+        on different geometry."""
+        return [f"trunc_distance:={v['trunc_distance']}",
+                f"space_carving:={'true' if v['space_carving'] else 'false'}",
+                "directional_tsdf:="
+                f"{'true' if v['mapper'] == 'tsdf_directional' else 'false'}"]
 
     def _sensor_profiles(v, names):
         """Only pass an override that is actually set; 'inherit' means the
@@ -256,7 +274,7 @@ def build_groups(bringup_share=""):
 
     def evaluation(v):
         cmd = ["ros2", "launch", "eval_tools", "eval.launch.py",
-               f"mapper:={v['mapper']}"]
+               f"mapper:={_mapper_backend(v)}"]
         if v["output_dir"]:
             cmd.append(f"output_dir:={v['output_dir']}")
         return [cmd]
@@ -286,7 +304,8 @@ def build_groups(bringup_share=""):
                  f"wall_orientation_offset_deg:={v['wall_orientation_offset_deg']}",
                  f"wall_orientation_lookahead_m:={v['wall_orientation_lookahead_m']}",
                  f"tsdf_frontier_standoff_m:={v['tsdf_frontier_standoff_m']}",
-                 "wall_points_topic:=" + ("/tsdf/surface_cloud" if v["mapper"] == "tsdf"
+                 "wall_points_topic:=" + ("/tsdf/surface_cloud"
+                                          if _mapper_backend(v) == "tsdf"
                                           else "/octomap_point_cloud_centers"),
                  f"wall_standoff:={v['wall_standoff']}",
                  f"wall_switch_goal_distance:={v['wall_switch_goal_distance']}",
@@ -340,13 +359,18 @@ def build_groups(bringup_share=""):
               "only, so the backend can be swapped without touching the sim.",
               # The wall thresholds are absent: tsdf_mapper takes them live, and
               # under octomap they reach no node at all.
+              # The grid options restart rather than push live: the VDB volume
+              # is constructed from them, so changing one discards the map.
               mapper, depends=["mapper", "map_rebuild", ("mode", _planner_mode),
-                               "tsdf_octomap", "voxel_size",
+                               "tsdf_octomap", "voxel_size", "trunc_distance",
+                               "space_carving",
                                ("robot_depth_target", _octomap_band_depth)]),
         Group("gt_map", "Ground-truth reference map",
               "A second map built from the exact simulator pose, overlaid "
               "against the belief map so map drift is visible directly.",
-              gt_map, depends=["mapper", "voxel_size"], visible=is_slam),
+              gt_map, depends=["mapper", "voxel_size", "trunc_distance",
+                               "space_carving"],
+              visible=is_slam),
         Group("slam", "SLAM backend (GTSAM)",
               "Simulated pressure/IMU/DVL sensors, dead-reckoning fusion and a "
               "GTSAM iSAM2 pose graph with loop closure.",

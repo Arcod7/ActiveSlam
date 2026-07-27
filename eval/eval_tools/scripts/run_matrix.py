@@ -70,6 +70,7 @@ VALID_KEYS = {
     # Map resolution and wall thresholds, and the A* inflation radii: a batch
     # that cannot set these cannot reproduce a tuned interactive config.
     'voxel_size', 'voxel_min_weight', 'voxel_min_solid_confidence',
+    'trunc_distance', 'space_carving', 'directional_tsdf',
     'hard_inflation_m', 'inflation_m', 'plan_inflation_m',
     # The rest of the wall-oriented executor's geometry.
     'wall_standoff', 'wall_switch_goal_distance', 'wall_switch_scan_angle',

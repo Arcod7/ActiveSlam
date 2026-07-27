@@ -1126,7 +1126,7 @@ def metric_rows(metrics, mapper, values=None):
     # map against the ground-truth reference map — so accuracy means belief->GT
     # RMSE under TSDF and occupied-cell IoU under octomap.
     accuracy = (("RMSE", _metric(metrics, "map_accuracy", ".3f", " m"))
-                if mapper == "tsdf"
+                if mapper.startswith("tsdf")
                 else ("IoU", _metric(metrics, "map_accuracy", ".3f")))
     # The two axes d-opt rolls into one scalar, in the units the allowable
     # sigmas are stated in, so the pair below reads against the pair above it.
@@ -1696,6 +1696,9 @@ def control_screen(stdscr, sup, values, link, session):
             # has to be findable on a stopped stack too.
             if p.is_soon(values[p.id]):
                 tags.append(("(soon)", curses.color_pair(C_WARN) | curses.A_BOLD))
+            # Runs, unlike (soon) — the tag marks results as provisional.
+            if p.is_wip(values[p.id]):
+                tags.append(("(WIP)", curses.color_pair(C_WARN) | curses.A_BOLD))
             if running:
                 if model.is_live(p, values):
                     tags.append(("(live)", curses.color_pair(C_OK)))

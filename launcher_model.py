@@ -62,7 +62,7 @@ def mapper_live_targets(pid, values):
     The ground-truth mapper is built from the same thresholds so the map
     metrics keep comparing like with like, and it only exists under slam:=slam.
     """
-    if pid not in LIVE_MAPPER or values["mapper"] != "tsdf":
+    if pid not in LIVE_MAPPER or not _tsdf(values):
         return []
     nodes = ["tsdf_mapper"]
     if values["slam"] == "slam":
@@ -86,7 +86,7 @@ MOTION_EXECUTOR_NODE = {
 class Param:
     def __init__(self, id, label, kind, default, section, description,
                  choices=None, choice_help=None, advanced=False, step=None,
-                 visible=lambda v: True, lo=None, hi=None, soon=()):
+                 visible=lambda v: True, lo=None, hi=None, soon=(), wip=()):
         self.id = id
         self.label = label
         self.kind = kind                  # enum, bool, int, float, text
@@ -102,9 +102,15 @@ class Param:
         self.hi = hi
         # Choices that name planned work rather than a runnable configuration.
         self.soon = frozenset(soon)
+        # Choices that do run but are not validated against the ground-truth
+        # map yet. Unlike soon, these apply — the tag says results are provisional.
+        self.wip = frozenset(wip)
 
     def is_soon(self, value):
         return value in self.soon
+
+    def is_wip(self, value):
+        return value in self.wip
 
     @property
     def live(self):
@@ -121,7 +127,7 @@ class Param:
 
 SECTION_TITLES = {
     "primary": "Primary",
-    "mapping": "Map resolution + wall threshold",
+    "mapping": "Map geometry + wall threshold",
     "scene": "Scene + object",
     "robot": "Robot pose",
     "frontier": "Planner",
@@ -142,6 +148,9 @@ _frontier = lambda v: v["mode"] == "frontier"
 # differ only in who picks the goal.
 _planner = lambda v: v["mode"] in ("frontier", "goto")
 _slam = lambda v: v["slam"] == "slam"
+# Both TSDF choices run the same VDBFusion backend; they differ only in how
+# many volumes it keeps.
+_tsdf = lambda v: v["mapper"].startswith("tsdf")
 
 PARAMS = [
     Param("mode", "Mode", "enum", "teleop", "primary",
@@ -162,17 +171,29 @@ PARAMS = [
           "raycast free space, 20 cm voxels by default — see Voxel size). "
           "TSDF is VDBFusion: a truncated "
           "signed-distance field on OpenVDB, meshed with marching cubes — "
-          "gives surfaces and normals rather than occupied cells.",
-          ["octomap", "tsdf"],
+          "gives surfaces and normals rather than occupied cells. "
+          "tsdf_directional is the same backend keeping one volume per "
+          "view-direction bin (6, axis-aligned) instead of one shared field. A "
+          "surface's sign depends on the side it was seen from, so both faces "
+          "of a thin structure land in separate volumes and never average; "
+          "reads merge by taking the most solid bin per voxel. This is the fix "
+          "the truncation band can only trade against. Costs 6 grid walks per "
+          "visualisation cycle, and free/solid disputes resolve toward solid. "
+          "WIP: runs, but is not yet validated against the ground-truth map, "
+          "so map metrics taken under it are provisional.",
+          ["octomap", "tsdf", "tsdf_directional"],
           {"octomap": "octomap_server, /projected_map + occupancy voxels.",
-           "tsdf": "VDBFusion/OpenVDB surface reconstruction with normals."}),
+           "tsdf": "VDBFusion/OpenVDB surface reconstruction with normals.",
+           "tsdf_directional": "One TSDF volume per view direction; thin "
+                               "structure survives (WIP)."},
+          wip=["tsdf_directional"]),
     Param("tsdf_octomap", "TSDF → OcTree", "bool", True, "primary",
           "Rebuild the TSDF grid into an octomap::OcTree on /tsdf/octomap_binary "
           "(tsdf_to_octomap), from its occupied and free voxels. Gives the TSDF "
           "backend the octree interface 3-D frontier detection and 3-D A* "
           "expect. Its own topic, not /octomap_binary, so RViz's OcTree displays "
           "stay empty under TSDF and only TSDFVoxels draws the belief map.",
-          visible=lambda v: v["mapper"] == "tsdf"),
+          visible=_tsdf),
     Param("slam", "Pose source", "enum", "none", "primary",
           "Where the vehicle pose comes from. none uses the simulator's exact "
           "pose. slam runs a GTSAM iSAM2 pose graph over simulated "
@@ -213,10 +234,30 @@ PARAMS = [
           "octomap_server's resolution or the TSDF grid's voxel size. Halving "
           "it resolves finer geometry at roughly 8x the voxels, so integration "
           "and the voxel view both get slower. Under TSDF the truncation band "
-          "follows at 3x this value, the minimum VDBFusion needs for a usable "
-          "gradient. The ground-truth reference map is built at the same size, "
-          "so the map metrics keep comparing like with like.",
+          "follows at 3x this value unless Truncation band overrides it. The "
+          "ground-truth reference map is built at the same size, so the map "
+          "metrics keep comparing like with like.",
           step=0.05, lo=0.05, hi=1.0),
+    Param("trunc_distance", "Truncation band (m)", "float", 0.0, "mapping",
+          "How far either side of a return the signed distance is written, in "
+          "metres. 0 follows the voxel size at 3x, the minimum VDBFusion needs "
+          "for a usable gradient. This is the hard limit on thin structure: a "
+          "wall thinner than twice this band, observed from both faces, has its "
+          "two opposing fields averaged into one another and its zero crossing "
+          "flattens away — the map goes speckled and holed exactly where it was "
+          "seen best. Lower it to map thin plating, at the cost of a coarser "
+          "gradient and a noisier surface. Directional TSDF removes the limit "
+          "instead of trading against it.",
+          step=0.05, lo=0.0, hi=3.0,
+          visible=_tsdf),
+    Param("space_carving", "Space carving", "bool", True, "mapping",
+          "Whether a return frees the whole ray back to the sensor, or only the "
+          "band just ahead of the surface. On, the map clears space it has flown "
+          "through and unknown volume shrinks faster. Off, a ray that misses a "
+          "thin target — past the bow, through a gap — can no longer carve away "
+          "the far face that an earlier pass mapped, which is the usual reason a "
+          "structure degrades as it is circled rather than improving.",
+          visible=_tsdf),
     Param("voxel_min_solid_confidence", "Wall threshold", "float", 0.80, "mapping",
           "How deep behind the reconstructed surface a voxel has to sit before "
           "it counts as a wall, as solid confidence (trunc - d) / (2 * trunc): "
@@ -226,7 +267,7 @@ PARAMS = [
           "Applies to the voxel view, the goal-safety cloud and the 2-D "
           "planning map alike, so it moves what A* refuses to route through.",
           step=0.05, lo=0.5, hi=1.0,
-          visible=lambda v: v["mapper"] == "tsdf"),
+          visible=_tsdf),
     Param("voxel_min_weight", "Observations for a wall", "float", 10.0, "mapping",
           "How many times a voxel must be observed before it counts as a wall. "
           "Each integrated scan adds weight, so this is the persistence filter: "
@@ -234,7 +275,7 @@ PARAMS = [
           "it and the map fills in sooner from thinner evidence. Same three "
           "consumers as the wall threshold.",
           step=1.0, lo=1.0, hi=200.0,
-          visible=lambda v: v["mapper"] == "tsdf"),
+          visible=_tsdf),
 
     Param("scene", "Scene", "enum", "waterlinked", "scene",
           "Stonefish world to launch. waterlinked is the unchanged baseline; "
@@ -572,7 +613,7 @@ PARAMS = [
           "keyframe at its corrected pose, so the map geometry is fixed too "
           "rather than just the trajectory. TSDF only — OctoMap cannot "
           "reproduce its raycast free space this way.",
-          visible=lambda v: _slam(v) and v["mapper"] == "tsdf"),
+          visible=lambda v: _slam(v) and _tsdf(v)),
     Param("noise_seed", "Noise seed", "int", -1, "slam",
           "Seed for the noise draws. -1 uses the profile's own seed; set an "
           "explicit value for reproducible or decorrelated repeat runs.",
@@ -623,7 +664,7 @@ PARAMS = [
           "How far off the reconstructed surface, along its outward normal, a "
           "TSDF frontier goal is placed — keeps goals in free water.",
           advanced=True, step=0.1, lo=0.0,
-          visible=lambda v: _frontier(v) and v["mapper"] == "tsdf"),
+          visible=lambda v: _frontier(v) and _tsdf(v)),
     Param("wall_standoff", "Wall standoff (m)", "float", 1.5, "frontier",
           "Target distance to hold from the wall while wall-looking. "
           "Live-tunable while running.",
@@ -708,6 +749,11 @@ def launch_command(values):
         value = values[p.id]
         if isinstance(value, bool):
             value = "true" if value else "false"
+        if p.id == "mapper" and value == "tsdf_directional":
+            # demo.launch.py has no directional backend: it is mapper:=tsdf
+            # plus a flag on the volume it builds.
+            parts.append("mapper:=tsdf directional_tsdf:=true")
+            continue
         parts.append(f"{LAUNCH_ARG_ALIASES.get(p.id, p.id)}:={value}")
     if values.get("noise_attenuation") == "cut_close":
         parts.append(f"near_cutoff:={values['near_cutoff_m']}")
@@ -774,6 +820,12 @@ INFOS = [
         "                 meshed with marching cubes — gives surfaces",
         "                 and normals (mapper:=tsdf).",
         "depth_image_proc depth image to organised point cloud.",
+        "",
+        "A TSDF's sign says which side a surface was seen from, so",
+        "structure thinner than twice the truncation band degrades as",
+        "it is circled: the two faces average each other out and the",
+        "zero crossing flattens. Truncation band trades against this;",
+        "tsdf_directional (WIP) splits the bins so it cannot happen.",
     ]),
     ("SLAM", [
         "GTSAM iSAM2      incremental pose-graph optimisation.",

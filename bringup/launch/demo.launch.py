@@ -263,6 +263,26 @@ def generate_launch_description():
         "must sit to count as a wall — 0.5 = at the surface, 1.0 = fully "
         "saturated solid",
     )
+    trunc_distance_arg = DeclareLaunchArgument(
+        "trunc_distance",
+        default_value="0.0",
+        description="mapper:=tsdf only: truncation band half-width in metres. "
+        "0 = follow voxel_size at 3x. Structure thinner than 2x this cannot hold "
+        "a zero crossing when both its faces are observed",
+    )
+    space_carving_arg = DeclareLaunchArgument(
+        "space_carving",
+        default_value="true",
+        description="mapper:=tsdf only: free the whole ray from the sensor to the "
+        "return, not just the band ahead of the surface. Off stops rays that miss "
+        "a thin target from carving away its far face",
+    )
+    directional_tsdf_arg = DeclareLaunchArgument(
+        "directional_tsdf",
+        default_value="false",
+        description="mapper:=tsdf only (WIP): keep one volume per view-direction "
+        "bin so a surface observed from both faces does not average itself away",
+    )
     rviz_arg = DeclareLaunchArgument(
         "rviz",
         default_value="true",
@@ -554,6 +574,9 @@ def generate_launch_description():
             "voxel_min_weight": LaunchConfiguration("voxel_min_weight"),
             "voxel_min_solid_confidence": LaunchConfiguration(
                 "voxel_min_solid_confidence"),
+            "trunc_distance": LaunchConfiguration("trunc_distance"),
+            "space_carving": LaunchConfiguration("space_carving"),
+            "directional_tsdf": LaunchConfiguration("directional_tsdf"),
         }.items(),
         condition=LaunchConfigurationEquals("mapper", "tsdf"),
     )
@@ -592,6 +615,9 @@ def generate_launch_description():
             "voxel_min_weight": LaunchConfiguration("voxel_min_weight"),
             "voxel_min_solid_confidence": LaunchConfiguration(
                 "voxel_min_solid_confidence"),
+            "trunc_distance": LaunchConfiguration("trunc_distance"),
+            "space_carving": LaunchConfiguration("space_carving"),
+            "directional_tsdf": LaunchConfiguration("directional_tsdf"),
         }.items(),
         condition=LaunchConfigurationEquals("slam", "slam"),
     )
@@ -907,6 +933,9 @@ def generate_launch_description():
             survey_center_y_arg,
             tsdf_octomap_arg,
             voxel_size_arg,
+            trunc_distance_arg,
+            space_carving_arg,
+            directional_tsdf_arg,
             voxel_min_weight_arg,
             voxel_min_solid_confidence_arg,
             rviz_arg,
