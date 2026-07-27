@@ -251,6 +251,11 @@ def load_run(run_dir):
                      if 'rpe_trans' in metrics else np.nan,
         'coverage': _last_finite(map_metrics.get('coverage')),
         'chamfer': _last_finite(map_metrics.get('chamfer')),
+        # Coverage is recall only (GT->belief): a spurious belief voxel is
+        # invisible to it and can only raise it. rmse_b2g is the precision
+        # half -- how far a belief point sits from any real surface -- and is
+        # the metric that punishes voxels where there should be none.
+        'rmse_b2g': _last_finite(map_metrics.get('rmse_belief_to_gt')),
         'lc_count': _last_finite(metrics.get('lc_count')),
         'revisit_count': _last_finite(metrics.get('revisit_count')),
         'rebuild_count': _last_finite(metrics.get('rebuild_count')),
@@ -831,11 +836,22 @@ def fig_repeatability(runs, arms, seeds, out_dir):
 
 # ---------------------------------------- fig 6: what the ratio hides
 
-def _explored_voxels(run_dir, voxel_size=0.2):
+def _explored_voxels(run_dir, voxel_size=None):
     """Distinct voxels in the ground-truth cloud: what the sonar observed.
 
     Coverage is a *fraction of* this, so an arm can raise coverage simply by
     observing less. The absolute quantity has to be carried alongside it."""
+    if voxel_size is None:
+        # Bin at the resolution the run mapped at, not a hardcoded default:
+        # a batch at 0.15 m counted on a 0.2 m grid under-reports its extent.
+        voxel_size = 0.2
+        manifest_path = os.path.join(run_dir, 'manifest.json')
+        if os.path.exists(manifest_path):
+            with open(manifest_path) as f:
+                try:
+                    voxel_size = float(json.load(f)['args'].get('voxel_size', 0.2))
+                except (KeyError, TypeError, ValueError):
+                    voxel_size = 0.2
     path = os.path.join(run_dir, 'maps', 'gt_tsdf.npy')
     if not os.path.exists(path):
         return np.nan
@@ -931,7 +947,8 @@ def _save(fig, out_dir, stem):
 def write_summary(runs, arms, out_dir):
     """Per-arm medians, and each rung's change against the one below it."""
     fields = ['path_m', 'ate', 'drift_pct', 'explored', 'coverage', 'correct',
-              'chamfer', 'lc_count', 'revisit_count', 'anees', 'nis_median']
+              'chamfer', 'rmse_b2g', 'lc_count', 'revisit_count', 'anees',
+              'nis_median']
     path = os.path.join(out_dir, 'summary_by_arm.csv')
     with open(path, 'w', newline='') as f:
         w = csv.writer(f)
@@ -956,7 +973,7 @@ def write_summary(runs, arms, out_dir):
                     'seeds_improved', 'n_paired'])
         for lower, upper in zip(arms, arms[1:]):
             for k in ('ate', 'drift_pct', 'explored', 'coverage', 'correct',
-                      'chamfer', 'anees'):
+                      'chamfer', 'rmse_b2g', 'anees'):
                 a, b = meds[lower][k], meds[upper][k]
                 pct = 100.0 * (b - a) / a if np.isfinite(a) and a else np.nan
                 better_is_higher = k in ('coverage', 'explored', 'correct')

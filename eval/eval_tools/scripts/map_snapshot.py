@@ -106,12 +106,19 @@ def collect(run_dir):
     path_m = (float(np.linalg.norm(np.diff(gt_traj[:, 1:3], axis=0), axis=1).sum())
               if gt_traj is not None and len(gt_traj) > 1 else float('nan'))
 
-    explored = _voxel_count(gt)
+    # Bin at the run's own map resolution so the count means the same thing
+    # across batches that mapped at different voxel sizes.
+    voxel_size = VOXEL_SIZE
+    try:
+        voxel_size = float(manifest.get('args', {}).get('voxel_size', VOXEL_SIZE))
+    except (TypeError, ValueError):
+        pass
+    explored = _voxel_count(gt, voxel_size)
     coverage = _last_row(map_csv, 'coverage')
     meta = {
         'run': base, 'arm': arm or base, 'seed': int(seed) if seed.isdigit() else -1,
         'status': manifest.get('status', 'unknown'),
-        'voxel_size_m': VOXEL_SIZE,
+        'voxel_size_m': voxel_size,
         'path_m': round(path_m, 2),
         'ate_m': _last_row(metrics_csv, 'ate'),
         'coverage': coverage,
@@ -120,7 +127,7 @@ def collect(run_dir):
         'revisit_count': _last_row(metrics_csv, 'revisit_count'),
         'rebuild_count': _last_row(metrics_csv, 'rebuild_count'),
         'belief_points': len(belief), 'gt_points': len(gt),
-        'belief_voxels': _voxel_count(belief),
+        'belief_voxels': _voxel_count(belief, voxel_size),
         'explored_voxels': explored,
         # The absolute quantity the ratio hides: observed surface that the
         # belief map also placed within the coverage radius.
