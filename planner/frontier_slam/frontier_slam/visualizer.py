@@ -85,8 +85,11 @@ class FrontierVisualizer:
         markers  = MarkerArray()
 
         for i, c in enumerate(clusters):
+            # Anchor on the wall cell, not the standoff point the goal moved to.
+            ax = c.wall_wx if math.isfinite(c.wall_wx) else c.wx
+            ay = c.wall_wy if math.isfinite(c.wall_wy) else c.wy
             markers.markers.append(_arrow(
-                ns='frontiers', mid=i, x=c.wx, y=c.wy, z=gz,
+                ns='frontiers', mid=i, x=ax, y=ay, z=gz,
                 dx=c.dx, dy=c.dy, length=0.6, rgba=(*C_FRONTIER, 0.9),
                 stamp=now, lifetime=lifetime,
             ))

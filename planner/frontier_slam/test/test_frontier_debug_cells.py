@@ -58,6 +58,22 @@ def test_cells_use_the_same_world_convention_as_the_cluster_centroid():
     assert np.allclose(frontier_xy.mean(axis=0), [cluster.wx, cluster.wy])
 
 
+def test_the_unknown_direction_points_across_the_wall():
+    cluster = find_frontier_clusters(_Grid(_WALL), min_cluster_cells=1)[0]
+
+    assert cluster.dir_valid
+    assert np.allclose([cluster.dx, cluster.dy], [-1.0, 0.0])
+
+
+def test_unknown_on_both_sides_marks_the_direction_unusable():
+    # The two centroids coincide, so the reported dx/dy is only a display
+    # fallback and must not be used to place a standoff goal.
+    grid = _Grid([[-1, 100, -1], [-1, 100, -1], [-1, 100, -1]])
+    cluster = find_frontier_clusters(grid, min_cluster_cells=1)[0]
+
+    assert not cluster.dir_valid
+
+
 def test_a_fully_known_map_reports_no_cells():
     frontier_xy, border_xy = frontier_cell_points(_Grid([[0, 100], [0, 100]]))
 

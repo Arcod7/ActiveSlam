@@ -299,8 +299,9 @@ class FrontierExtractor(Node):
             query, distance_upper_bound=self._tsdf_solid_radius)
         return math.isfinite(distance)
 
-    def _tsdf_surface_standoff(self, frontier_xy: np.ndarray) -> np.ndarray:
-        """Move a frontier goal outward from its nearest TSDF wall surface."""
+    def _tsdf_surface_standoff(self, frontier_xy: np.ndarray,
+                               unknown_dir: np.ndarray | None) -> np.ndarray:
+        """Move a frontier goal outward from its nearest TSDF wall surface, observed side."""
         if (self._tsdf_frontier_standoff <= 0.0 or self._tsdf_surface_tree is None
                 or self._tsdf_surface_received_at is None
                 or self._now() - self._tsdf_surface_received_at > self.TSDF_SURFACE_STALE_S):
@@ -312,7 +313,7 @@ class FrontierExtractor(Node):
             return frontier_xy
         standoff = standoff_point_from_tsdf_surface(
             self._tsdf_surface_points[index], self._tsdf_surface_normals[index],
-            self._tsdf_frontier_standoff)
+            self._tsdf_frontier_standoff, unknown_dir, self._robot_pos[:2])
         return frontier_xy if standoff is None else standoff
 
     # ------------------------------------------------------------------
@@ -331,11 +332,16 @@ class FrontierExtractor(Node):
             return
 
         # Put a TSDF frontier goal in free space, offset along the outward
-        # surface normal.  The nearest normal is queried at the vehicle depth;
-        # vertical surfaces give no horizontal offset and keep the old target.
+        # surface normal, on the observed side of the wall (opposite the
+        # cluster's own direction toward the unknown).  The nearest normal is
+        # queried at the vehicle depth; vertical surfaces give no horizontal
+        # offset and keep the old target.
         raw_centroids = [(c.wx, c.wy) for c in clusters]
         for c in clusters:
-            c.wx, c.wy = self._tsdf_surface_standoff(np.array([c.wx, c.wy]))
+            c.wall_wx, c.wall_wy = c.wx, c.wy
+            unknown_dir = np.array([c.dx, c.dy]) if c.dir_valid else None
+            c.wx, c.wy = self._tsdf_surface_standoff(
+                np.array([c.wx, c.wy]), unknown_dir)
 
         self._publish_frontier_debug(clusters, raw_centroids)
 

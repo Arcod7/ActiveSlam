@@ -20,6 +20,9 @@ class Cluster:
     distance: float = 0.0  # to a reference point — filled in by the caller
     dx: float = 1.0  # unit direction toward the unknown (world x)
     dy: float = 0.0  # unit direction toward the unknown (world y)
+    dir_valid: bool = True  # False = dx/dy is the arbitrary display fallback
+    wall_wx: float = float('nan')  # centroid before the standoff offset
+    wall_wy: float = float('nan')
 
 
 def point_inside_tsdf_solid(point_xyz: np.ndarray, solid_xyz: np.ndarray,
@@ -41,13 +44,25 @@ def point_inside_tsdf_solid(point_xyz: np.ndarray, solid_xyz: np.ndarray,
 
 def standoff_point_from_tsdf_surface(surface_xyz: np.ndarray,
                                      normal_xyz: np.ndarray,
-                                     standoff_m: float) -> np.ndarray | None:
+                                     standoff_m: float,
+                                     unknown_dir_xy: np.ndarray | None = None,
+                                     reference_xy: np.ndarray | None = None,
+                                     ) -> np.ndarray | None:
     """Return a horizontal free-space standoff point from a TSDF surface.
 
     VDBFusion's signed distance is positive in free space and negative in a
     solid.  Its TSDF gradient therefore points outward into free space.  Only
     the horizontal normal component is used because frontier navigation holds
     depth.  ``None`` means the normal belongs to a floor/ceiling or is invalid.
+
+    A thin wall carries solid voxels on both faces, so the nearest surface
+    sample may be the far one, whose outward normal points away from the
+    observed side and would place the goal behind the wall.  ``unknown_dir_xy``
+    (a cluster's direction toward the unknown) orients the offset back into
+    observed space; it is preferred over ``reference_xy`` (the vehicle
+    position) because it reflects accumulated map evidence rather than where
+    the vehicle happens to be now.  ``reference_xy`` is the fallback for
+    clusters whose unknown direction is degenerate.
     """
     surface = np.asarray(surface_xyz, dtype=np.float64)
     normal = np.asarray(normal_xyz, dtype=np.float64)
@@ -57,7 +72,25 @@ def standoff_point_from_tsdf_surface(surface_xyz: np.ndarray,
     length = float(np.linalg.norm(horizontal))
     if length < 1e-6:
         return None
+    away = _away_from_unknown(surface[:2], unknown_dir_xy, reference_xy)
+    if away is not None and float(np.dot(horizontal, away)) < 0.0:
+        horizontal = -horizontal
     return surface[:2] + max(0.0, standoff_m) * horizontal / length
+
+
+def _away_from_unknown(surface_xy: np.ndarray,
+                       unknown_dir_xy: np.ndarray | None,
+                       reference_xy: np.ndarray | None) -> np.ndarray | None:
+    """Return the direction the standoff should lean toward, or None if unknown."""
+    if unknown_dir_xy is not None:
+        toward_unknown = np.asarray(unknown_dir_xy, dtype=np.float64)[:2]
+        if np.isfinite(toward_unknown).all() and float(np.linalg.norm(toward_unknown)) > 1e-6:
+            return -toward_unknown
+    if reference_xy is not None:
+        toward_reference = np.asarray(reference_xy, dtype=np.float64)[:2] - surface_xy
+        if np.isfinite(toward_reference).all() and float(np.linalg.norm(toward_reference)) > 1e-6:
+            return toward_reference
+    return None
 
 
 def _frontier_masks(grid_msg) -> tuple:
@@ -127,15 +160,18 @@ def find_frontier_clusters(grid_msg, min_cluster_cells: int = 5) -> list:
         ur, uc = np.where(adj_unknown_crop)
         ur = ur + rmin
         uc = uc + cmin
-        dx, dy = 1.0, 0.0
+        # A cluster wrapping a corner, or bordering unknown on both sides, puts
+        # the two centroids on top of each other: no usable direction.
+        dx, dy, dir_valid = 1.0, 0.0, False
         if len(ur):
             vx, vy = uc.mean() - cols.mean(), ur.mean() - rows.mean()
             norm = float(np.hypot(vx, vy))
             if norm > 1e-6:
-                dx, dy = vx / norm, vy / norm
+                dx, dy, dir_valid = vx / norm, vy / norm, True
         clusters.append(
             Cluster(
-                wx=float(wx), wy=float(wy), size=len(rows), dx=float(dx), dy=float(dy)
+                wx=float(wx), wy=float(wy), size=len(rows), dx=float(dx), dy=float(dy),
+                dir_valid=dir_valid,
             )
         )
     return clusters
