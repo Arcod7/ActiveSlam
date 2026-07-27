@@ -263,6 +263,19 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /motion/robot_marker
       Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: RobotStateGT
+      Namespaces:
+        motion_state_gt: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /motion/robot_marker_gt
+      Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: GraphEdges

@@ -47,8 +47,11 @@ other. Enabled by default:
   pose it already watches (ground truth under `slam:=none`, `/slam/odometry`
   under `slam:=slam`). One `_marker_state()` resolves label and colour
   together so they cannot disagree: purple `MOTION DISABLED` (gate state
-  wins), cyan `REVISITING` when `revisit_planner` reports `revisiting` on
-  `/frontier_slam/revisit_state`, white `INITIAL SCAN`, otherwise green with
+  wins), cyan `REVISITING — POSITION DRIFT`/`— HEADING DRIFT` when
+  `revisit_planner` reports `revisiting` on `/frontier_slam/revisit_state`
+  (the suffix is `/frontier_slam/revisit_cause`, dropped when absent or
+  stale — attribution of the single D-opt trigger, not a second threshold),
+  white `INITIAL SCAN`, otherwise green with
   the current `/frontier_slam/activity` spelled out (`DRIVING TO WAYPOINT`,
   `SCANNING FOR FRONTIERS`, …). Both inputs publish at 1 Hz and are ignored
   past `marker_state_timeout_s` (3 s), so a stopped planner or executor falls

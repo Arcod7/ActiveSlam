@@ -4,7 +4,18 @@ Also publishes the vehicle on /motion/robot_marker as a state-coloured arrow
 (green = motion enabled, cyan = enabled and revisiting, white = enabled and
 running the initial scan, purple = disabled) plus a matching text label the
 RViz eval HUD renders — the gate is the only node that knows both the pose it
-watches and whether motion is armed.
+watches and whether motion is armed. A revisit is labelled with the axis that
+drove it, so the HUD answers "why" and not only "what".
+
+Two arrows on two topics, so RViz can show either alone:
+  /motion/robot_marker     the pose the gate watches — the SLAM estimate under
+                           pose source slam — faded, at publish_hz, with the
+                           text label.
+  /motion/robot_marker_gt  ground truth, opaque, republished on every truth
+                           odometry message rather than on the safety tick.
+The gap between the two is the live drift the vehicle is being steered on. Under
+pose source none the watched pose already is truth, so only the first is
+published, opaque.
 """
 
 import time
@@ -30,6 +41,17 @@ REVISIT_COLOR = ColorRGBA(r=0.00, g=0.80, b=0.90, a=0.95)
 INIT_SCAN_COLOR = ColorRGBA(r=1.00, g=1.00, b=1.00, a=0.95)
 REVISITING_STATE = 'revisiting'
 INIT_SCAN_ACTIVITY = 'INIT_SCAN'
+# Which axis of the pose marginal drove the D-optimality that fired the
+# revisit — revisit_planner.py's CAUSE_* strings. The trigger is the combined
+# scalar, so this is attribution, not a second threshold. Keep in step with the
+# launcher's REVISIT_CAUSE_TEXT, which renders the same strings as a sentence.
+REVISIT_CAUSE_LABELS = {
+    'position': 'POSITION DRIFT',
+    'heading': 'HEADING DRIFT',
+}
+# The belief arrow is the same vehicle in the same state, drawn where the gate
+# thinks it is — faint so it reads as a second opinion, not a second robot.
+BELIEF_ALPHA = 0.50
 
 # HUD wording for the labels the motion executors publish on
 # /frontier_slam/activity — keep in step with the launcher's ACTIVITY_TEXT.
@@ -59,6 +81,13 @@ class MotionSafetyGate(Node):
         self.declare_parameter('enable_topic', '/motion/enable')
         self.declare_parameter('status_topic', '/motion/safety_status')
         self.declare_parameter('odom_topic', '/StoneFish/Odometry')
+        # Visualisation only — never feeds the gate's freshness check, or a live
+        # ground truth would hold the gate open through a dead estimator. Empty
+        # on a real vehicle, where there is no truth to draw.
+        self.declare_parameter('truth_odom_topic', '/StoneFish/Odometry')
+        # Its own topic, so RViz can toggle the two arrows separately and so the
+        # ground-truth one is not pinned to this node's 20 Hz safety tick.
+        self.declare_parameter('truth_marker_topic', '/motion/robot_marker_gt')
         self.declare_parameter('command_timeout_s', 0.5)
         self.declare_parameter('odom_timeout_s', 0.5)
         self.declare_parameter('max_abs_command', 1.0)
@@ -69,6 +98,8 @@ class MotionSafetyGate(Node):
         self.declare_parameter('marker_frame', 'world_ned')
         self.declare_parameter('revisit_state_topic',
                                '/frontier_slam/revisit_state')
+        self.declare_parameter('revisit_cause_topic',
+                               '/frontier_slam/revisit_cause')
         self.declare_parameter('activity_topic', '/frontier_slam/activity')
         # Both sources publish at 1 Hz; fall back to the plain enabled colour
         # when either stops, rather than latching its state forever.
@@ -99,22 +130,40 @@ class MotionSafetyGate(Node):
         self._marker_state_timeout_s = float(
             self.get_parameter('marker_state_timeout_s').value)
         self._last_pose = None
+        self._last_truth_pose = None
         self._revisit_state: str | None = None
         self._revisit_state_time = 0.0
+        self._revisit_cause: str | None = None
+        self._revisit_cause_time = 0.0
         self._activity: str | None = None
         self._activity_time = 0.0
 
         self._output_pub = self.create_publisher(Twist, output_topic, 10)
         self._status_pub = self.create_publisher(String, status_topic, 10)
+        # Depth 10, not 1: each tick writes three markers back to back, and a
+        # one-deep queue drops some of them — the arrow then steps behind truth.
         self._marker_pub = self.create_publisher(
-            Marker, str(self.get_parameter('marker_topic').value), 1)
+            Marker, str(self.get_parameter('marker_topic').value), 10)
         self.create_subscription(
             Twist, command_topic, self._command_cb, 10)
         self.create_subscription(Bool, enable_topic, self._enable_cb, 10)
         self.create_subscription(Odometry, odom_topic, self._odom_cb, 10)
+        truth_topic = str(self.get_parameter('truth_odom_topic').value)
+        # Same topic under pose source none: the watched pose already is the
+        # truth, so there is nothing to draw twice.
+        self._truth_is_distinct = bool(truth_topic) and truth_topic != odom_topic
+        self._truth_marker_pub = None
+        if self._truth_is_distinct:
+            self._truth_marker_pub = self.create_publisher(
+                Marker, str(self.get_parameter('truth_marker_topic').value), 10)
+            self.create_subscription(
+                Odometry, truth_topic, self._truth_odom_cb, 10)
         self.create_subscription(
             String, str(self.get_parameter('revisit_state_topic').value),
             self._revisit_state_cb, 10)
+        self.create_subscription(
+            String, str(self.get_parameter('revisit_cause_topic').value),
+            self._revisit_cause_cb, 10)
         self.create_subscription(
             String, str(self.get_parameter('activity_topic').value),
             self._activity_cb, 10)
@@ -164,9 +213,28 @@ class MotionSafetyGate(Node):
         self._state.update_odometry(self._now())
         self._last_pose = msg.pose.pose
 
+    def _truth_odom_cb(self, msg: Odometry) -> None:
+        """Draw ground truth as it arrives, not on the safety tick.
+
+        Ground truth comes in at the simulator's rate — several times the gate's
+        publish_hz — and sampling it at 20 Hz is visible as the arrow stepping
+        while the vehicle slides on smoothly.
+        """
+        self._last_truth_pose = msg.pose.pose
+        if self._truth_marker_pub is None:
+            return
+        _label, color = self._marker_state()
+        self._truth_marker_pub.publish(self._arrow_marker(
+            'motion_state_gt', msg.pose.pose, color,
+            self.get_clock().now().to_msg()))
+
     def _revisit_state_cb(self, msg: String) -> None:
         self._revisit_state = msg.data
         self._revisit_state_time = self._now()
+
+    def _revisit_cause_cb(self, msg: String) -> None:
+        self._revisit_cause = msg.data
+        self._revisit_cause_time = self._now()
 
     def _activity_cb(self, msg: String) -> None:
         self._activity = msg.data
@@ -187,7 +255,10 @@ class MotionSafetyGate(Node):
             return 'MOTION DISABLED', DISABLED_COLOR
         if self._fresh(self._revisit_state,
                        self._revisit_state_time) == REVISITING_STATE:
-            return 'REVISITING', REVISIT_COLOR
+            cause = REVISIT_CAUSE_LABELS.get(
+                self._fresh(self._revisit_cause, self._revisit_cause_time))
+            return (f'REVISITING — {cause}' if cause else 'REVISITING',
+                    REVISIT_COLOR)
         activity = self._fresh(self._activity, self._activity_time)
         if activity == INIT_SCAN_ACTIVITY:
             return ACTIVITY_LABELS[activity], INIT_SCAN_COLOR
@@ -203,29 +274,28 @@ class MotionSafetyGate(Node):
 
         An RViz Odometry display carries a fixed colour, so the state has to
         come from the marker: this replaces the ground-truth arrow in
-        demo.rviz. It follows the pose the gate itself watches — ground truth
-        under slam:=none, /slam/odometry under slam:=slam — i.e. the pose the
-        controller is acting on. The eval HUD panel reads the text marker off
-        this topic, so the panel and the arrow always agree.
+        demo.rviz. This arrow is the pose the gate watches and the controller
+        acts on — the SLAM estimate under pose source slam, ground truth under
+        none. Ground truth gets its own topic and its own arrow (see
+        _truth_odom_cb); this one fades to BELIEF_ALPHA whenever that arrow is
+        up, so the opaque one is always the vehicle's real position. The eval
+        HUD panel reads the text marker off this topic, so the panel and the
+        arrow always agree.
         """
         if self._last_pose is None:
             return
         label, color = self._marker_state()
         stamp = self.get_clock().now().to_msg()
 
-        marker = Marker()
-        marker.header.frame_id = self._marker_frame
-        marker.header.stamp = stamp
-        marker.ns = 'motion_state'
-        marker.id = 0
-        marker.type = Marker.ARROW
-        marker.action = Marker.ADD
-        marker.pose = self._last_pose
-        marker.scale.x = 1.0    # shaft length, along the vehicle's +X
-        marker.scale.y = 0.16   # shaft diameter
-        marker.scale.z = 0.16   # head diameter
-        marker.color = color
-        self._marker_pub.publish(marker)
+        # Faded only once truth is actually being drawn: on a real vehicle no
+        # ground-truth arrow ever appears, and a permanently faint robot with
+        # nothing opaque beside it just looks like a rendering fault.
+        arrow_color = color
+        if self._last_truth_pose is not None:
+            arrow_color = ColorRGBA(r=color.r, g=color.g, b=color.b,
+                                    a=BELIEF_ALPHA)
+        self._marker_pub.publish(self._arrow_marker(
+            'motion_state', self._last_pose, arrow_color, stamp))
 
         text = Marker()
         text.header.frame_id = self._marker_frame
@@ -239,9 +309,24 @@ class MotionSafetyGate(Node):
         text.pose.position.z = self._last_pose.position.z - 1.2  # NED: -z is up
         text.pose.orientation.w = 1.0
         text.scale.z = 0.4      # character height
-        text.color = color
+        text.color = color      # full opacity: the label is not the faded arrow
         text.text = label
         self._marker_pub.publish(text)
+
+    def _arrow_marker(self, ns: str, pose, color: ColorRGBA, stamp) -> Marker:
+        marker = Marker()
+        marker.header.frame_id = self._marker_frame
+        marker.header.stamp = stamp
+        marker.ns = ns
+        marker.id = 0
+        marker.type = Marker.ARROW
+        marker.action = Marker.ADD
+        marker.pose = pose
+        marker.scale.x = 1.0    # shaft length, along the vehicle's +X
+        marker.scale.y = 0.16   # shaft diameter
+        marker.scale.z = 0.16   # head diameter
+        marker.color = color
+        return marker
 
     def _has_multiple_command_sources(self) -> bool:
         return len(self.get_publishers_info_by_topic(self._command_topic)) > 1
