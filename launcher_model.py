@@ -414,7 +414,7 @@ PARAMS = [
           "Which sensor error model feeds the pose graph and the sonar. Also "
           "drives the noise applied to /cloud_in.",
           ["realistic", "realistic_no_reverb", "ideal", "sonar_only",
-           "odom_pos_only", "odom_only", "degraded"],
+           "odom_pos_only", "odom_only", "degraded", "degraded_no_reverb"],
           {"realistic": "Datasheet-grounded sonar + nav sensor noise.",
            "realistic_no_reverb": "Realistic with volume reverberation off — no "
                                   "near-field spray, close geometry still mapped.",
@@ -422,7 +422,9 @@ PARAMS = [
            "sonar_only": "Realistic sonar, near-ideal nav sensors.",
            "odom_pos_only": "Realistic DVL/pressure, exact orientation and sonar.",
            "odom_only": "Ground-truth sonar, realistic nav sensors.",
-           "degraded": "Worst case — stresses loop closure and revisit."},
+           "degraded": "Worst case — stresses loop closure and revisit.",
+           "degraded_no_reverb": "Degraded with volume reverberation off — "
+                                 "worst-case nav/range error, no near-field spray."},
           visible=_slam),
     Param("noise_profile_sonar", "  Sonar profile", "enum", "inherit", "slam",
           "Override the noise profile for the sonar sensor alone — this is the "
@@ -430,7 +432,7 @@ PARAMS = [
           "isolating one error source needs no merged profile. "
           "inherit = follow the master profile above.",
           ["inherit", "realistic", "realistic_no_reverb", "ideal", "sonar_only",
-           "odom_pos_only", "odom_only", "degraded"],
+           "odom_pos_only", "odom_only", "degraded", "degraded_no_reverb"],
           {"inherit": "Follow the master Noise profile."},
           advanced=True, visible=_slam),
     Param("noise_profile_dvl", "  DVL profile", "enum", "inherit", "slam",
@@ -439,7 +441,7 @@ PARAMS = [
           "isolating one error source needs no merged profile. "
           "inherit = follow the master profile above.",
           ["inherit", "realistic", "realistic_no_reverb", "ideal", "sonar_only",
-           "odom_pos_only", "odom_only", "degraded"],
+           "odom_pos_only", "odom_only", "degraded", "degraded_no_reverb"],
           {"inherit": "Follow the master Noise profile."},
           advanced=True, visible=_slam),
     Param("noise_profile_imu", "  IMU profile", "enum", "inherit", "slam",
@@ -448,7 +450,7 @@ PARAMS = [
           "isolating one error source needs no merged profile. "
           "inherit = follow the master profile above.",
           ["inherit", "realistic", "realistic_no_reverb", "ideal", "sonar_only",
-           "odom_pos_only", "odom_only", "degraded"],
+           "odom_pos_only", "odom_only", "degraded", "degraded_no_reverb"],
           {"inherit": "Follow the master Noise profile."},
           advanced=True, visible=_slam),
     Param("noise_profile_compass", "  Compass profile", "enum", "inherit", "slam",
@@ -457,7 +459,7 @@ PARAMS = [
           "isolating one error source needs no merged profile. "
           "inherit = follow the master profile above.",
           ["inherit", "realistic", "realistic_no_reverb", "ideal", "sonar_only",
-           "odom_pos_only", "odom_only", "degraded"],
+           "odom_pos_only", "odom_only", "degraded", "degraded_no_reverb"],
           {"inherit": "Follow the master Noise profile."},
           advanced=True, visible=_slam),
     Param("noise_profile_pressure", "  Pressure profile", "enum", "inherit", "slam",
@@ -466,7 +468,7 @@ PARAMS = [
           "isolating one error source needs no merged profile. "
           "inherit = follow the master profile above.",
           ["inherit", "realistic", "realistic_no_reverb", "ideal", "sonar_only",
-           "odom_pos_only", "odom_only", "degraded"],
+           "odom_pos_only", "odom_only", "degraded", "degraded_no_reverb"],
           {"inherit": "Follow the master Noise profile."},
           advanced=True, visible=_slam),
     Param("noise_attenuation", "Noise Attenuation", "enum", "none", "slam",

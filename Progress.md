@@ -2414,3 +2414,67 @@ reverberation term alone is worth.
 in-process on synthetic organized clouds, as in Phase 55. Setting `reverb_p` to
 zero is a modelling choice about the water, not a hardware-fitted value; like
 every other term here it is argued from acoustics rather than measured.
+
+## Phase 57 — The same near-field fix for the degraded profile
+
+**Objective**: Phase 56 cleared the near field at its source for `realistic`.
+The user asked for the same on `degraded`, which is where the spray is worst:
+turbid water sets `reverb_p: 0.06` over `realistic`'s 0.01 and pushes the band
+out to 2.5 m. Without it, a degraded-noise run could only be de-sprayed with
+`near_cutoff`/`near_fade`, which also erase the close geometry the vehicle needs
+when it approaches a wall.
+
+**What changed**: `slam/slam_backend/config/noise_degraded_no_reverb.yaml`, a
+copy of `noise_degraded.yaml` differing in exactly one field, `reverb_p: 0.0`.
+`reverb_max_m`/`reverb_weak_boost` keep their `degraded` values (unused while
+the probability is zero), `min_range_m` and `near_fade_p` stay off, and every
+nav-sensor section is `degraded` verbatim — so the profile still stresses the
+pose graph with turbid-water DVL/IMU/compass error and only the phantom returns
+are gone.
+
+Selectable everywhere a profile is: `demo.launch.py`'s `choices` list (which
+would otherwise reject it), the three nested launch descriptions, and all six
+launcher enums — as a master profile and, through `noise_profile_sonar`, as a
+sonar-only override.
+
+**Observed impact**: 39 sonar tests (3 new) pass. Measured through
+`SonarNoiseNode` in-process, 10 pings against a 6 m wall on a 67x257 organized
+cloud, near band r < 2.6 m (`degraded`'s `reverb_max_m`):
+
+| profile | near returns/ping | surface returns/ping |
+|---|---|---|
+| `degraded` | 2096.1 | 12160.3 |
+| `degraded_no_reverb` | **0.0** | **14556.9** |
+
+`degraded` sprays 5.6x what `realistic` did in Phase 56 (2096 vs 373), and the
+surface it costs is correspondingly larger: turning reverberation off returns
+2397 beams per ping to the wall, a 19.7% gain in surface returns, again because
+a fired beam reports the volume echo *instead of* its surface rather than in
+addition to it.
+
+A wall the vehicle has closed on — % of beams reporting the true range (±0.2 m):
+
+| wall range | `degraded` | `degraded_no_reverb` |
+|---|---|---|
+| 0.5 m | 90.1% | 93.4% |
+| 1.0 m | 84.7% | 92.9% |
+| 2.0 m | 89.2% | 92.3% |
+
+The dropout/grazing terms cap both columns well under `realistic`'s ~96%, as
+they should — this profile is still the worst case. It differs from `degraded`
+in one parameter, so an A/B against it isolates what reverberation alone costs
+under turbidity, the same control `realistic_no_reverb` gives for clear water.
+
+`matrix_full.yaml`'s `noise_degraded` arm now runs `degraded_no_reverb` in place
+of `degraded` — the same adoption `realistic_no_reverb` got in the geofence,
+motion-A/B and DVL-pilot matrices. The batch stays 7 configs x 5 seeds. The arm
+keeps its name, so nothing downstream of the run directories has to change, but
+`degraded` results from earlier batches are not comparable with later ones: the
+sprayed near field is gone from the input cloud.
+
+**Not verified**: no full sim run — the numbers above drive the node on
+synthetic organized clouds, as in Phases 55 and 56. `matrix_full.yaml` is
+verified only through `run_matrix.py --dry-run`, which emits
+`noise_profile:=degraded_no_reverb` for that arm; the batch itself has not been
+executed. As with every other term in these profiles, `reverb_p: 0` is a
+modelling choice about the water rather than a hardware-fitted value.

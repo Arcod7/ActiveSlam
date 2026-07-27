@@ -281,13 +281,15 @@ def generate_launch_description():
         choices=[
             "ideal", "sonar_only", "odom_pos_only", "odom_only",
             "realistic", "realistic_no_reverb", "degraded",
+            "degraded_no_reverb",
         ],
         description="Sensor noise profile for slam:=slam (ignored otherwise); "
         "sonar_only = realistic sonar noise, near-ideal nav sensors; "
         "odom_pos_only = realistic DVL/pressure, exact orientation and sonar; "
         "odom_only = ground-truth sonar, realistic nav sensors; "
         "realistic_no_reverb = realistic with the near-field volume "
-        "reverberation off, close geometry still reported",
+        "reverberation off, close geometry still reported; "
+        "degraded_no_reverb = the same for degraded",
     )
     loop_closure_arg = DeclareLaunchArgument(
         "loop_closure",

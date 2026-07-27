@@ -192,9 +192,14 @@ it is missing.
 - `noise_degraded.yaml`: turbid water / magnetic interference / degraded bottom-lock; sonar section
   worse-than-datasheet (full beam-separation lateral jitter, higher dropout/outlier rates,
   stronger specular loss, larger dropout patches, uncalibrated speed of sound)
+- `noise_degraded_no_reverb.yaml`: `degraded` with `reverb_p: 0`, the same one-field change
+  `realistic_no_reverb` makes to `realistic`. Turbid water sprays hardest (2096 near returns/ping
+  against a 6 m wall, vs 373 for `realistic`), so this is where clearing it at the source matters
+  most; nav sections stay `degraded`, so the pose graph is still stressed while the near field
+  is empty
 
 Each profile's `seed:` (42 for `ideal`/`sonar_only`/`odom_pos_only`/`odom_only`,
--1/random for `realistic`/`realistic_no_reverb`/`degraded`) is combined with a per-sensor offset
+-1/random for `realistic`/`realistic_no_reverb`/`degraded`/`degraded_no_reverb`) is combined with a per-sensor offset
 (imu +1, dvl +2, pressure +3, sonar +4, compass +5) before seeding, so co-launched sims no
 longer draw identical RNG streams off one shared seed — this changed `ideal`'s exact per-sensor
 draws vs. pre-Phase-16 runs (same seed, different effective value per node); nothing previously
