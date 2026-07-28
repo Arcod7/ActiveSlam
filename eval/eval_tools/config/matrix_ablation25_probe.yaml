@@ -1,0 +1,110 @@
+# Active-SLAM ablation ladder on the shipwreck scene, at the tuned config.
+#
+# Each rung adds exactly one capability, so the change between rungs is
+# attributable to that capability alone (same scene, seeds, motion, noise):
+#
+#   nolc        -> lc          isolates loop closure          (trajectory drift)
+#   lc          -> lc_revisit  isolates uncertainty-triggered revisit
+#   lc_revisit  -> full        isolates TSDF re-integration    (map accuracy)
+#
+# The `full` rung is the interactive config.yaml verbatim, minus the viewers.
+# Every common_arg below is copied from it -- placement, spawn pose, speed,
+# voxel/wall thresholds, inflation radii and the whole wall-oriented executor
+# geometry -- so the ladder measures the system as tuned, not as defaulted.
+#
+# Differences from the earlier matrix_shipwreck_revisit.yaml, which is stale:
+# obj_scale 0.1501 (not 0.0001), speed_factor 0.8 (not 4.0), depth 9.0 (not
+# 6.0), a different spawn pose, and noise_profile realistic_no_reverb -- the
+# near-field reverberation is off at its source, so no near_cutoff/near_fade
+# gate is applied over it (both stay at -1.0, the profile default).
+#
+# 4 configs x 4 seeds = 16 runs x 25 min ~= 7.0 h. Driven seed-major (one
+# batch per seed) so an interrupted sweep still leaves every arm equally
+# sampled; run_matrix.py's own loop is arm-major.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py \
+#       eval/eval_tools/config/matrix_shipwreck_ablation.yaml
+batch_name: ablation25_probe
+duration_s: 1500
+settle_s: 15
+seeds: [101]
+
+common_args:
+  # Motion gate is fail-closed; headless runs never arm it otherwise.
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  mapper: tsdf
+  rviz: 'false'
+
+  # Scene and placement (config.yaml, shipwreck).
+  scene: target
+  obj_mesh: shipwreck.obj
+  obj_x: 40.55
+  obj_y: -13.62
+  obj_z: 20.38
+  obj_scale: 0.1501
+  obj_roll: 0.0
+  obj_pitch: -180.0
+  obj_yaw: 15.0
+  robot_x: 20.2753
+  robot_y: 17.8031
+  robot_z: 8.9324
+  robot_roll: 0.3412
+  robot_pitch: -0.3558
+  robot_yaw: -129.5052
+  depth: 9.0
+
+  # Map backend resolution and wall thresholds.
+  tsdf_octomap: 'true'
+  voxel_size: 0.2
+  voxel_min_weight: 3.0
+  voxel_min_solid_confidence: 0.6
+
+  # Motion and scanning.
+  motion: walloriented
+  scan_style: sweep
+  scan_sweep_deg: 180.0
+  speed_factor: 0.8
+  turn_factor: 0.2
+  thrust_boost: 'false'
+  scenario: none
+
+  # A* inflation zones.
+  hard_inflation_m: 0.5
+  inflation_m: 2.0
+  plan_inflation_m: 3.7
+
+  # Wall-oriented executor geometry.
+  wall_orientation_offset_deg: 50.0
+  wall_orientation_lookahead_m: 2.0
+  tsdf_frontier_standoff_m: 1.0
+  wall_standoff: 1.5
+  wall_switch_goal_distance: 6.0
+  wall_switch_scan_angle: 3.14159
+  wall_switch_scan_yaw: 0.08
+  wall_path_influence: 0.7
+  wall_path_look_offset_deg: 30.0
+  wall_normal_offset_deg: 0.0
+  wall_path_heading_weight: 0.35
+
+  # Perception. realistic_no_reverb leaves the near field empty at its source,
+  # so neither near-field filter is applied on top of it.
+  noise_profile: realistic_no_reverb
+  near_cutoff: -1.0
+  near_fade: -1.0
+
+  # Revisit trigger, held constant across the ladder so only the `revisit`
+  # switch differs between rungs 2 and 3.
+  sigma_allow_xy_m: 0.1
+  sigma_allow_yaw_rad: 0.05
+  ratio_trigger: 1.0
+  ratio_resume: 0.5
+
+runs:
+- name: nolc
+  args: {loop_closure: 'false', revisit: 'false', map_rebuild: 'false'}
+- name: lc
+  args: {loop_closure: 'true', revisit: 'false', map_rebuild: 'true'}
+- name: lc_revisit
+  args: {loop_closure: 'true', revisit: 'true', map_rebuild: 'true'}

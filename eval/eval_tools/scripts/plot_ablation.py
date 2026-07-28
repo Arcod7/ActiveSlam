@@ -297,6 +297,63 @@ def by_arm(runs, arm):
 
 # ------------------------------------------------------- fig 1: the ladder
 
+def _box_panel(ax, runs, arms, seeds, field, label, *, logy=False,
+               higher_better=None, reference=None, reference_note=''):
+    """Box-and-whisker per arm, with every sample drawn on top.
+
+    The paired style joins seeds with threads, which reads as clutter once the
+    conclusion is about the arms rather than about any one seed. This is the
+    same data as a plain box plot, except the points stay visible: at four or
+    five seeds the quartiles a box implies are weakly determined, so hiding the
+    samples behind them would overstate what the box knows.
+    """
+    data, positions, used = [], [], []
+    for ai, arm in enumerate(arms):
+        vals = np.array([r[field] for r in by_arm(runs, arm)
+                         if np.isfinite(r[field])])
+        if len(vals) == 0:
+            continue
+        data.append(vals)
+        positions.append(ai)
+        used.append(arm)
+
+    medians = [np.nan] * len(arms)
+    if data:
+        bp = ax.boxplot(data, positions=positions, widths=0.5,
+                        patch_artist=True, showfliers=False, whis=(0, 100),
+                        medianprops=dict(color='#1a1a1a', lw=2.0),
+                        whiskerprops=dict(lw=1.0, color=MUTED),
+                        capprops=dict(lw=1.0, color=MUTED))
+        for patch, arm in zip(bp['boxes'], used):
+            patch.set_facecolor(arm_color(arm))
+            patch.set_alpha(0.30)
+            patch.set_edgecolor(arm_color(arm))
+            patch.set_linewidth(1.3)
+        for ai, vals in zip(positions, data):
+            medians[ai] = float(np.median(vals))
+            jitter = np.linspace(-0.13, 0.13, len(vals))
+            ax.plot(ai + jitter, vals, arm_marker(arms[ai]), lw=0,
+                    color=arm_color(arms[ai]), markersize=5.0,
+                    markeredgecolor=SURFACE, markeredgewidth=1.0, zorder=3)
+
+    if logy:
+        ax.set_yscale('log')
+    if reference is not None:
+        ax.axhline(reference, color=MUTED, lw=1.0, zorder=0)
+    ax.set_xticks(range(len(arms)))
+    rot = 0 if len(arms) <= 4 else 30
+    ax.set_xticklabels([ARM_LABELS.get(a, a) for a in arms], rotation=rot,
+                       ha='right' if rot else 'center')
+    ax.set_xlim(-0.55, len(arms) - 0.45)
+    if higher_better is None:
+        ax.set_ylabel(label)
+    else:
+        arrow = 'higher is better' if higher_better else 'lower is better'
+        ax.set_ylabel(f'{label}\n({arrow})')
+    _despine(ax)
+    return medians
+
+
 def _paired_panel(ax, runs, arms, seeds, field, label, *, logy=False,
                   higher_better=None, reference=None, reference_note=''):
     """Per-arm distribution with every sample drawn and seeds joined.
@@ -413,12 +470,16 @@ def fig_metrics(runs, arms, seeds, out_dir):
     ]
     table = {}
     for ax, (field, label, logy, higher) in zip(axes.ravel(), panels):
-        table[field] = _paired_panel(ax, runs, arms, seeds, field, label,
-                                      logy=logy, higher_better=higher)
+        drawer = _box_panel if PANEL_STYLE == 'box' else _paired_panel
+        table[field] = drawer(ax, runs, arms, seeds, field, label,
+                              logy=logy, higher_better=higher)
 
     top = _titles(fig, 'Active-SLAM ablation on the shipwreck scene',
-                  f'{len(seeds)} seeds · thin lines join the same seed across '
-                  'arms · bar = median · orange = repeatability control')
+                  (f'{len(seeds)} seeds · box = quartiles, whiskers = full range, '
+                   'points = individual seeds'
+                   if PANEL_STYLE == 'box' else
+                   f'{len(seeds)} seeds · thin lines join the same seed across '
+                   'arms · bar = median · orange = repeatability control'))
     fig.tight_layout(rect=(0, 0, 1, top))
     _save(fig, out_dir, 'fig1_ablation_metrics')
 
@@ -994,13 +1055,20 @@ def write_summary(runs, arms, out_dir):
     return path
 
 
+PANEL_STYLE = 'paired'
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('batch_dirs', nargs='+',
                    help='run_matrix.py batch directories (globs are fine)')
     p.add_argument('--out', help='output directory (default: <first batch>/figures)')
+    p.add_argument('--style', choices=('paired', 'box'), default='paired',
+                   help='panel style for fig1 (default: paired)')
     args = p.parse_args()
+    global PANEL_STYLE
+    PANEL_STYLE = args.style
 
     batch_dirs = []
     for pattern in args.batch_dirs:
