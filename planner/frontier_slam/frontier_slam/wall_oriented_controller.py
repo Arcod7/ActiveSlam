@@ -80,28 +80,6 @@ def offset_heading(route_heading: float, wall_side: int, offset_deg: float) -> f
     return wrap_angle(route_heading + side * offset)
 
 
-def sweep_yaw_effort(
-    heading_error: float,
-    direction: int,
-    amplitude_rad: float,
-    sweep_effort: float,
-    acquire_effort: float,
-) -> tuple[float, int]:
-    """Yaw effort and direction for a sweep bounded to +-amplitude_rad about a
-    viewing heading, reversing at each edge.
-
-    An error beyond twice the amplitude is closed at acquire_effort first: at
-    the sweep effort a wall-side switch would spend the whole dwell turning.
-    """
-    if abs(heading_error) > 2.0 * amplitude_rad:
-        direction = 1 if heading_error > 0.0 else -1
-        return direction * acquire_effort, direction
-    if heading_error <= -amplitude_rad:
-        direction = -1
-    elif heading_error >= amplitude_rad:
-        direction = 1
-    return direction * sweep_effort, direction
-
 
 def _side_geometry(
     points: np.ndarray,
@@ -361,10 +339,11 @@ class WallOrientedController(Node):
     GOAL_REACHED_TIMEOUT = 10.0
     SCAN_YAW = 0.08  # open-loop effort; ~0.22 rad/s achieved without boost
     INIT_SCAN_DURATION = 10.0
-    # Sweep half-width and effort held at an arrived revisit target, about the
     # wall-oriented heading — narrow and slow keeps the wall in the sonar.
-    REVISIT_SWEEP_DEG = 5.0
-    REVISIT_SWEEP_YAW = 0.03
+    # Patrol dwell: half-extent of the beat walked along the wall either side of
+    # the target, and how close counts as reaching one end.
+    REVISIT_PATROL_M = 3.0
+    REVISIT_PATROL_REACHED_M = 1.0
     WAYPOINT_ADVANCE_DIST = 1.5
     OBS_SLOW_DIST = 1.5
     EMERGENCY_STOP_DIST = 0.4
@@ -375,6 +354,10 @@ class WallOrientedController(Node):
     STUCK_WINDOW = 5.0
     STUCK_MOVE_MIN = 0.25
     SIDE_SWITCH_DWELL_S = 4.0  # a side change must persist this long to be taken
+    # ...and the previous re-sign must have converged first. 25 deg is a little
+    # over half a 45 deg offset, so the vehicle has clearly committed to the
+    # side it holds before it is allowed to abandon it.
+    SIDE_SWITCH_SETTLED_RAD = math.radians(25.0)
     MAP_STALE_S = 5.0
     CTRL_HZ = 10.0
     LOG_EVERY_N_TICKS = 10
@@ -422,10 +405,17 @@ class WallOrientedController(Node):
         )
         self._scan_slowdown = 1.0
         self._revisiting = False
-        self._sweep_dir = 1
+        # Beat endpoints are anchored to where the vehicle arrived, so the walk
+        # stays centred on the target instead of drifting along the wall.
+        self._patrol_anchor = None
+        self._patrol_sign = 1.0
         # Route heading last driven on, so a stopped vehicle still has one to
         # offset its viewing heading from.
         self._last_route_heading: float | None = None
+        # Previous tick's |look_heading - yaw|, read by the side-switch gate.
+        # _select_wall_side runs before this tick's error exists, so one tick of
+        # staleness is inherent and harmless at control rate.
+        self._last_heading_error = 0.0
         self.create_subscription(
             String, "/frontier_slam/revisit_state", self._revisit_state_cb, 10
         )
@@ -553,31 +543,37 @@ class WallOrientedController(Node):
         """Scan yaw effort, divided down while a revisit is in progress."""
         return self.SCAN_YAW / self._scan_slowdown
 
-    def _revisit_sweep(self, now: float) -> tuple:
-        """Narrow slow sweep about the wall-oriented viewing heading.
+    def _revisit_patrol_target(self, now: float) -> np.ndarray:
+        """Waypoint for a short beat along the wall, centred on the target.
 
-        The route heading is the one held on approach: offsetting from the live
-        yaw instead would re-aim every tick and turn the sweep into a spin.
+        The viewing offset already points look_heading at the wall, so the wall
+        runs roughly perpendicular to it; stepping along that perpendicular
+        walks the structure rather than into or away from it. The vehicle turns
+        round at each end, so it stays within REVISIT_PATROL_M of where it
+        arrived for the whole dwell.
+
+        Falls back to the current pose when no wall has been selected, which
+        makes the vehicle hold station exactly as the sweep would.
         """
-        if self._last_route_heading is None:
-            self._last_route_heading = self._yaw
-        route_heading = self._last_route_heading
-        self._select_wall_side(route_heading, now)
-        look_heading = offset_heading(
-            route_heading, self._wall_side, self._look_offset_deg
-        )
-        heading_error = wrap_angle(look_heading - self._yaw)
-        yaw_cmd, self._sweep_dir = sweep_yaw_effort(
-            heading_error,
-            self._sweep_dir,
-            math.radians(self.REVISIT_SWEEP_DEG),
-            self.REVISIT_SWEEP_YAW / self._scan_slowdown,
-            self._scan_yaw(),
-        )
-        return yaw_cmd, route_heading, look_heading, heading_error
+        if self._patrol_anchor is None:
+            self._patrol_anchor = self._pose[:2].copy()
+        if self._wall_side == 0 or self._last_route_heading is None:
+            return self._patrol_anchor
+        look = offset_heading(
+            self._last_route_heading, self._wall_side, self._look_offset_deg)
+        tangent = look + math.pi / 2.0
+        step = self._patrol_sign * self.REVISIT_PATROL_M
+        target = self._patrol_anchor + step * np.array(
+            [math.cos(tangent), math.sin(tangent)])
+        if float(np.hypot(*(target - self._pose[:2]))) < self.REVISIT_PATROL_REACHED_M:
+            self._patrol_sign = -self._patrol_sign
+        return target
 
     def _revisit_state_cb(self, msg) -> None:
+        was = self._revisiting
         self._revisiting = msg.data == "revisiting"
+        if not self._revisiting and was:
+            self._patrol_anchor = None
         slowdown = self._revisit_scan_slowdown if msg.data == "revisiting" else 1.0
         if slowdown != self._scan_slowdown:
             self._scan_slowdown = slowdown
@@ -624,11 +620,23 @@ class WallOrientedController(Node):
         # not settle it when both sides sit at a similar range: the side flipped
         # 8 times in 107 s, which is the left-right sweep. Make a change earn
         # itself over SIDE_SWITCH_DWELL_S before the setpoint follows it.
+        #
+        # The time dwell alone is not enough, because it is shorter than the
+        # manoeuvre it authorises. Measured 2026-07-28 over 4 runs: the vehicle
+        # yaws at 5.7 deg/s, so a 2*45 deg re-sign takes ~16 s, while the dwell
+        # commits to it on 4 s of evidence. The side could therefore flip again
+        # before the previous swing finished -- 8-12 flips per run, about 24% of
+        # the run spent chasing a setpoint it never reached, which is what made
+        # the vehicle look like it was ignoring the wall and driving straight.
+        # So also require the previous swing to have converged: no new side is
+        # taken while the heading is still far from the one currently commanded.
+        settled = abs(self._last_heading_error) <= self.SIDE_SWITCH_SETTLED_RAD
         if candidate != self._wall_side:
             if candidate != self._side_candidate:
                 self._side_candidate = candidate
                 self._side_candidate_t = now
-            elif now - self._side_candidate_t >= self.SIDE_SWITCH_DWELL_S:
+            elif (settled
+                  and now - self._side_candidate_t >= self.SIDE_SWITCH_DWELL_S):
                 self._wall_side = candidate
                 self._side_candidate_t = now
         else:
@@ -661,6 +669,7 @@ class WallOrientedController(Node):
             look_path_heading, self._wall_side, self._look_offset_deg
         )
         heading_error = wrap_angle(look_heading - self._yaw)
+        self._last_heading_error = heading_error
         yaw_cmd = float(
             np.clip(
                 self.KP_YAW * heading_error,
@@ -724,47 +733,35 @@ class WallOrientedController(Node):
             return
 
         goal_dist = float(np.hypot(*(self._goal[:2] - self._pose[:2])))
+        patrol_target = None
         if goal_dist < self.GOAL_RADIUS:
             if self._revisiting:
-                # The detour came back for this structure, so sweep across it
-                # rather than spin past it. The goal is not cleared either:
-                # revisit_planner owns it until the dwell ends, and clearing it
-                # drops the next tick into the no-goal spin.
-                yaw_cmd, route_heading, look_heading, heading_error = (
-                    self._revisit_sweep(now)
-                )
-                self._send_thrust(0.0, 0.0, yaw_cmd, heave)
+                # Walk the wall instead of holding station. Falls through to the
+                # normal drive below rather than commanding thrust here, so the
+                # dwell keeps the obstacle slowdown and emergency stop that
+                # guard every other metre of the mission.
+                patrol_target = self._revisit_patrol_target(now)
+            if patrol_target is None:
+                if self._goal_reached_at is None:
+                    self._goal_reached_at = now
+                elif now - self._goal_reached_at > self.GOAL_REACHED_TIMEOUT:
+                    self._goal = None
+                    self._goal_reached_at = None
+                self._send_thrust(0.0, 0.0, self._scan_yaw(), heave)
                 if write_csv:
                     self._write_csv(
                         0.0,
                         0.0,
-                        yaw_cmd,
+                        self._scan_yaw(),
                         heave,
-                        "REVISIT_SWEEP",
-                        goal_dist,
-                        route_heading,
-                        look_heading,
-                        heading_error,
+                        "GOAL_REACHED",
+                        distance=goal_dist,
                     )
                 return
-            if self._goal_reached_at is None:
-                self._goal_reached_at = now
-            elif now - self._goal_reached_at > self.GOAL_REACHED_TIMEOUT:
-                self._goal = None
-                self._goal_reached_at = None
-            self._send_thrust(0.0, 0.0, self._scan_yaw(), heave)
-            if write_csv:
-                self._write_csv(
-                    0.0,
-                    0.0,
-                    self._scan_yaw(),
-                    heave,
-                    "GOAL_REACHED",
-                    distance=goal_dist,
-                )
-            return
 
-        if self._path:
+        if patrol_target is not None:
+            target_xy = patrol_target
+        elif self._path:
             while (
                 self._wp_idx < len(self._path) - 1
                 and math.hypot(
@@ -788,7 +785,7 @@ class WallOrientedController(Node):
             heading_error,
             look_path_heading,
         ) = self._drive(target_xy, now)
-        event = ""
+        event = "REVISIT_PATROL" if patrol_target is not None else ""
         if self._min_front_dist < self.EMERGENCY_STOP_DIST:
             surge, sway = -self.BACK_SURGE_SPEED, 0.0
             event = "EMERG_STOP"

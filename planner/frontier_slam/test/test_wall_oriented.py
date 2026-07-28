@@ -5,7 +5,6 @@ from frontier_slam.wall_oriented_controller import (
     choose_wall_side,
     lookahead_path_heading,
     offset_heading,
-    sweep_yaw_effort,
     wall_side_distances,
 )
 import numpy as np
@@ -85,32 +84,8 @@ def test_lookahead_falls_back_when_the_remaining_path_does_not_reach_circle():
     assert heading == pytest.approx(0.7)
 
 
-AMPLITUDE = math.radians(10.0)
 
 
-def test_sweep_holds_its_direction_inside_the_window():
-    effort, direction = sweep_yaw_effort(0.0, 1, AMPLITUDE, 0.03, 0.08)
-    assert (effort, direction) == (0.03, 1)
-    effort, direction = sweep_yaw_effort(0.0, -1, AMPLITUDE, 0.03, 0.08)
-    assert (effort, direction) == (-0.03, -1)
 
 
-def test_sweep_reverses_at_each_edge_of_the_window():
-    # heading_error = look - yaw, so a yaw above the viewing heading is negative.
-    effort, direction = sweep_yaw_effort(-AMPLITUDE, 1, AMPLITUDE, 0.03, 0.08)
-    assert (effort, direction) == (-0.03, -1)
-    effort, direction = sweep_yaw_effort(AMPLITUDE, -1, AMPLITUDE, 0.03, 0.08)
-    assert (effort, direction) == (0.03, 1)
 
-
-def test_sweep_never_commands_the_faster_effort_inside_the_window():
-    for error in np.linspace(-2.0 * AMPLITUDE, 2.0 * AMPLITUDE, 41):
-        effort, _ = sweep_yaw_effort(float(error), 1, AMPLITUDE, 0.03, 0.08)
-        assert abs(effort) == pytest.approx(0.03)
-
-
-def test_a_large_error_is_closed_toward_the_viewing_heading_at_acquire_effort():
-    effort, direction = sweep_yaw_effort(1.0, -1, AMPLITUDE, 0.03, 0.08)
-    assert (effort, direction) == (0.08, 1)
-    effort, direction = sweep_yaw_effort(-1.0, 1, AMPLITUDE, 0.03, 0.08)
-    assert (effort, direction) == (-0.08, -1)
