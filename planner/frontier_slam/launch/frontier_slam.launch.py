@@ -257,13 +257,20 @@ def generate_launch_description():
         description='TSDF frontier goal offset from the surface along its outward normal, in metres.',
     )
     projected_map_band_arg = DeclareLaunchArgument(
-        'projected_map_band_m', default_value='3.0',
+        'projected_map_band_m', default_value='1.0',
         description=(
             'Display only: the Z half-range one /projected_map cell collapses, '
             'drawn as the band_columns marker on /frontier_slam/frontier_debug. '
-            "Match the mapper publishing the map — tsdf.launch.py's "
-            'projected_map_band_m (3.0), or octomap.launch.py (0.25 with an '
-            'explicit depth, otherwise the full water column).'),
+            'Must match the mapper publishing the map — pass the same value '
+            'here and to octomap.launch.py/tsdf.launch.py, which demo.launch.py '
+            'does from its own projected_map_band_m.'),
+    )
+    voxel_size_arg = DeclareLaunchArgument(
+        'voxel_size', default_value='0.2',
+        description=(
+            'Display only: sizes the selected-wall highlight walllooking and '
+            'walloriented draw on /motion/selected_wall. Must match the '
+            'mapper\'s voxel_size, which demo.launch.py passes from its own.'),
     )
     wall_points_topic_arg = DeclareLaunchArgument(
         'wall_points_topic', default_value='/octomap_point_cloud_centers',
@@ -341,6 +348,13 @@ def generate_launch_description():
                     'come back down before giving up on the detour. Counts from '
                     'arrival, so the drive out never shortens it.',
     )
+    stall_exit_arg = DeclareLaunchArgument(
+        'stall_exit_s', default_value='5.0',
+        description='End the dwell once neither the keyframe count nor the closure '
+                    'count has moved for this long: a parked vehicle saturates '
+                    "pose_graph's per-cell keyframe cap, after which no covariance "
+                    'change is possible. 0 disables, leaving arrival_dwell_s.',
+    )
     revisit_scan_slowdown_arg = DeclareLaunchArgument(
         'revisit_scan_slowdown', default_value='1.0',
         description='Divide the scan yaw rate by this while a revisit is in progress, '
@@ -348,7 +362,7 @@ def generate_launch_description():
                     'to re-observe. 1.0 = off (default; untested in a full run).',
     )
     wall_z_band_arg = DeclareLaunchArgument(
-        'wall_z_band_m', default_value='3.0',
+        'wall_z_band_m', default_value='1.5',
         description='Half-thickness (m) of the depth slice wall_oriented uses to pick '
                     'which side to look at. Depth is directly observed, so geometry '
                     'further above or below than this cannot be collided with and '
@@ -376,6 +390,7 @@ def generate_launch_description():
         revisit_scan_slowdown_arg,
         revisit_min_closures_arg,
         arrival_dwell_arg,
+        stall_exit_arg,
         odom_topic_arg,
         safety_start_enabled_arg,
         actuator_backend_arg,
@@ -400,6 +415,7 @@ def generate_launch_description():
         wall_orientation_lookahead_arg,
         tsdf_frontier_standoff_arg,
         projected_map_band_arg,
+        voxel_size_arg,
         wall_points_topic_arg,
         wall_standoff_arg,
         wall_switch_goal_distance_arg,
@@ -510,6 +526,7 @@ def generate_launch_description():
                 'map_points_topic': LaunchConfiguration('wall_points_topic'),
                 'speed_factor': _float_parameter('speed_factor'),
                 'turn_factor': _float_parameter('turn_factor'),
+                'voxel_size': _float_parameter('voxel_size'),
             }],
             condition=LaunchConfigurationEquals('motion', 'walloriented'),
         ),
@@ -531,6 +548,7 @@ def generate_launch_description():
                 'path_heading_weight': _float_parameter('wall_path_heading_weight'),
                 'speed_factor': _float_parameter('speed_factor'),
                 'turn_factor': _float_parameter('turn_factor'),
+                'voxel_size': _float_parameter('voxel_size'),
             }],
             condition=LaunchConfigurationEquals('motion', 'walllooking'),
         ),
@@ -548,6 +566,7 @@ def generate_launch_description():
                 'revisit_min_closures': ParameterValue(
                     LaunchConfiguration('revisit_min_closures'), value_type=int),
                 'arrival_dwell_s': _float_parameter('arrival_dwell_s'),
+                'stall_exit_s': _float_parameter('stall_exit_s'),
             }],
             condition=IfCondition(LaunchConfiguration('revisit')),
         ),

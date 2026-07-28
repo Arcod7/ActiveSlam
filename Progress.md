@@ -2540,3 +2540,56 @@ headlessly and fit the 31-column panel; the HUD line is 79 characters.
 HUD's two-line fit in the docked panel and the cause reported by a real trigger
 are both unconfirmed. Which axis actually dominates in this scene is therefore
 still an open question, not a result.
+
+## Phase 59 — Keyframe density doubled, and the gates counted in keyframes rescaled with it
+
+`keyframe_dist_m` 1.0 → 0.5 and `keyframe_angle_rad` 0.3 → 0.2 (~17° → ~11°):
+roughly twice the pose-graph nodes per metre travelled, and one node per 11° of
+in-place rotation. The motivation is overlap — Phase 3b already slowed path
+translation 10% (`0.315` rather than `0.35`) for the same reason, and denser
+nodes give sequential scan matching a shorter baseline to register over and
+give a return pass more old nodes to close against.
+
+Both gates now sit above a floor they cannot usefully cross. With
+`keyframe_max_per_cell` 3 over a 0.5 m / 0.5 rad cell, a straight traverse at
+spacing `d` puts `floor(0.5/d)` earlier keyframes inside the candidate's cell,
+so the cap starts rejecting at `d <= 0.5/3 ≈ 0.17`; the same arithmetic holds
+for pure rotation against `keyframe_cell_angle_rad`. Below ~0.17 m / ~0.17 rad
+the cap absorbs the extra keyframes and lowering the gates buys nothing. 0.5 /
+0.2 leaves headroom; the floor is now recorded in `STATE.md` next to the cell
+row so the next person tuning this does not walk into a silent clamp.
+
+Three gates counted in **keyframes** rather than metres were rescaled to hold
+their previous distance, because keyframe density is exactly what they are
+denominated in: `loop_closure_min_gap` 10 → 20 (`pose_graph.py`), and
+`min_keyframes` 15 → 30 with `min_index_gap` 10 → 20 (`revisit_planner.py`).
+Left alone, each would have protected half the travel it did before — a closure
+could have fired against a node ~5 m back on the same pass, coinciding with
+`loop_closure_radius_m` itself, and revisits could have triggered after half the
+mileage.
+
+That rescaling is what keeps the method comparable to Suresh et al. (2020),
+whose graph nodes are *submaps* — "an accumulation of sequential sonar scans
+over a defined time period", 100 scans each (their Table III), 20–25 nodes for a
+whole tank mission. Adjacent nodes there are already far apart by construction,
+so the paper has no index-gap parameter at all; candidacy is GloSSy saliency
+with the top N=3 kept, and a closure happens because the revisit policy
+deliberately drove back. Per-scan keyframes plus a radius search is the
+fine-grained opportunistic analogue, and `loop_closure_min_gap` is the only
+stand-in this implementation has for that submap granularity. Loop-closure
+count is also a headline metric in the paper's Tables I and II (17.4 vs 12.6 in
+simulation, 8.34 vs 12.67 real-world), so letting density inflate our count
+would have moved a reported number for a reason unrelated to the method.
+
+**Verified**: 104/104 `slam_backend` and 49/49 `frontier_slam`
+revisit/rebuild tests pass. No test asserted any of the five defaults — every
+one passes its values explicitly — so the suites exercise the new values
+without having been rewritten to expect them. Run the suites from the package
+directory: `test_odom_noise.py` loads `config/noise_realistic.yaml` by a
+CWD-relative path and its 9 tests fail from the repo root, before and after
+this change.
+
+**Not verified**: no sim run. The predicted ~2x keyframe rate, its effect on
+per-keyframe cost (`/slam/timing/keyframe_ms`, which should be watched against
+the 5 Hz cloud interval), and whether closure count and ATE move at all are
+all unmeasured. Nothing here is a result yet.

@@ -59,8 +59,8 @@ def test_stopped_stack_relaunches_slam_at_the_spawn_pose(tmp_path, link):
     values = dict(model.DEFAULTS)
     values.update({"slam": "slam", "mode": "frontier", "mapper": "tsdf",
                    "rviz": False})
-    # robot_x/robot_y track odometry while the stack runs; launch_values() masks
-    # them back to the configured spawn pose for the respawn.
+    # The robot_* options are the spawn pose and never follow the vehicle; it is
+    # RosLink's cached odometry that tracks it, and only slam_seed reads that.
     values.update(DRIVEN)
     link.forget_pose()                      # K: the stack, and the vehicle, stop
     values.update(SPAWN)

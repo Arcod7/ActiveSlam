@@ -16,7 +16,9 @@ the list anyway — which is how the first attempt at this failed on the real
 screen while passing a timing-only test.
 """
 import os
+import re
 import sys
+import textwrap
 import time
 
 import curses
@@ -26,10 +28,14 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import launcher as ui                 # noqa: E402
+import launcher_model as model        # noqa: E402
 
 MENU = ["Launch", "---", "Update", "Rebuild", "---", "Infos", "Exit", "---",
         "Keyboard layout"]
 SEPARATOR = lambda i: MENU[i] == "---"                          # noqa: E731
+# Roughly the description pane on an 80-column terminal, which is the
+# narrowest the launcher runs in (MIN_TERM_WIDTH).
+DESC_PANE_W = ui.MIN_TERM_WIDTH - 6
 
 
 class FakeScreen:
@@ -110,9 +116,28 @@ def test_first_press_is_never_a_repeat():
 
 
 def test_back_to_back_presses_read_as_auto_repeat():
+    """A fast run is a hold — but only once it is longer than tapping manages.
+
+    A couple of quick presses is a fast finger, not auto-repeat: treating them
+    as a hold is what stopped a deliberate press at the end of the list from
+    wrapping (see test_fast_taps_at_the_end_still_wrap).
+    """
     nav = ui.NavRepeat()
-    nav.held(curses.KEY_DOWN)
+    for _ in range(ui.NavRepeat.HOLD_RUN):
+        assert nav.held(curses.KEY_DOWN) is False, "a tap read as a hold"
     assert nav.held(curses.KEY_DOWN) is True
+
+
+def test_fast_taps_at_the_end_still_wrap():
+    """The reported bug: arrowing down quickly at the bottom would not wrap."""
+    nav, idx = ui.NavRepeat(), 5
+    for press in range(3):
+        # Faster than the gap, so the old rule called every one of these a
+        # hold and parked the cursor on the last row.
+        time.sleep(ui.NAV_REPEAT_GAP_S / 2)
+        idx = ui.step_row(idx, 1, 6, repeated=nav.held(curses.KEY_DOWN))
+        assert idx == 0, f"tap {press + 1} at the last row did not wrap"
+        idx = 5                       # back to the end for the next tap
 
 
 def test_a_different_key_resets():
@@ -138,12 +163,28 @@ def test_long_press_parks_at_the_last_row_then_wraps():
     assert idx == 0, "a fresh press at the end did not wrap"
 
 
-def test_a_buffered_key_is_a_repeat_however_slow_the_frame():
+def test_a_buffered_key_keeps_the_run_alive_however_slow_the_frame():
+    """Auto-repeat through slow frames still reaches a hold.
+
+    A frame that spins ROS and repaints can outlast the gap, so the presses
+    are observed further apart than the keyboard sent them. Finding the key
+    already waiting is what says the run never actually broke.
+    """
     nav = ui.NavRepeat()
-    nav.held(curses.KEY_DOWN)
-    time.sleep(ui.NAV_REPEAT_GAP_S + 0.05)   # a frame slower than the gap
+    for _ in range(ui.NavRepeat.HOLD_RUN):
+        time.sleep(ui.NAV_REPEAT_GAP_S + 0.02)   # frames slower than the gap
+        nav.held(curses.KEY_DOWN, buffered=True)
+    time.sleep(ui.NAV_REPEAT_GAP_S + 0.02)
     assert nav.held(curses.KEY_DOWN, buffered=True) is True, \
         "a slow frame broke the hold"
+
+
+def test_a_queued_burst_is_a_hold_on_the_first_frame():
+    """Presses drained inside one frame came from one burst, so they count in
+    full — a hold is caught without waiting for the run to build."""
+    nav = ui.NavRepeat()
+    assert nav.held(curses.KEY_DOWN, buffered=True,
+                    queued=ui.NavRepeat.HOLD_RUN) is True
 
 
 def test_a_pause_after_a_burst_still_reads_as_a_fresh_press():
@@ -298,3 +339,34 @@ def test_infos_last_line_is_still_reachable(no_colors):
     tail = ui.model.INFOS[-1][1][-1]
     drawn = [t for row in screen.frames[-1].values() for _, t in row]
     assert any(tail in t for t in drawn), "the pane hid the last line of text"
+
+
+# -- section headings
+
+
+def test_every_section_describes_itself():
+    """A heading's pane says what is in the section.
+
+    It used to report the option count, whether the section was folded and
+    what Left/Right would do — all three of which the heading row itself
+    already shows, so the one place with room to explain the grouping
+    explained nothing about it.
+    """
+    for sid in model.SECTION_ORDER:
+        text = model.SECTION_DESCRIPTIONS.get(sid)
+        assert text, f"{sid} has no description"
+        assert "left/right" not in text.lower(), \
+            f"{sid} explains the keys, which the key line already does"
+        assert not re.match(r"^\s*\d+\s+option", text), \
+            f"{sid} is back to counting its contents"
+
+
+def test_section_descriptions_fit_the_pane():
+    """Four lines under the divider; anything past that is drawn and lost.
+
+    Measured on the composed line, name included — the name is what the pane
+    opens with, so it is what eats the first line.
+    """
+    for sid in model.SECTION_ORDER:
+        lines = textwrap.wrap(model.section_pane_text(sid), DESC_PANE_W)
+        assert len(lines) <= 4, f"{sid} needs {len(lines)} lines"

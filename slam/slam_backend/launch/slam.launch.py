@@ -15,6 +15,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 
@@ -45,6 +46,35 @@ def generate_launch_description():
         'initial_y', default_value='0.0',
         description='Initial dead-reckoning Y position in world_ned (m)',
     )
+
+    # Pose-graph structure and factor noise. Defaults mirror pose_graph.py's
+    # own declare_parameter values, so passing none of these changes nothing.
+    graph_args = [
+        ('keyframe_dist_m', '0.5', float,
+         'Distance travelled (m) before a new keyframe is added'),
+        ('keyframe_angle_rad', '0.2', float,
+         'Rotation (rad) before a new keyframe is added'),
+        ('keyframe_max_per_cell', '3', int,
+         'Keyframes kept per spatial cell — the cap a parked vehicle saturates'),
+        ('loop_closure_radius_m', '5.0', float,
+         'Radius (m) searched for loop-closure candidates'),
+        ('loop_closure_min_gap', '20', int,
+         'Minimum keyframe index gap before two poses may close a loop'),
+        ('min_inlier_ratio', '0.3', float,
+         'Registration inlier ratio a candidate closure must reach to be accepted'),
+        ('scan_sigma_trans', '0.12', float,
+         'Translational sigma (m) on a scan-matching factor'),
+        ('scan_sigma_rot', '0.08', float,
+         'Rotational sigma (rad) on a scan-matching factor'),
+        ('odom_sigma_trans', '0.002', float,
+         'Translational sigma (m) on a dead-reckoning odometry factor'),
+        ('odom_sigma_rot', '0.02', float,
+         'Rotational sigma (rad) on a dead-reckoning odometry factor'),
+    ]
+    graph_arg_actions = [
+        DeclareLaunchArgument(name, default_value=default, description=doc)
+        for name, default, _, doc in graph_args
+    ]
 
     pkg_share = FindPackageShare('slam_backend')
     per_sensor_args = [
@@ -84,12 +114,15 @@ def generate_launch_description():
             'noise_profile_path': noise_file,
             'loop_closure_enabled': LaunchConfiguration('loop_closure'),
             'map_rebuild_enabled': LaunchConfiguration('map_rebuild'),
+            **{name: ParameterValue(LaunchConfiguration(name), value_type=kind)
+               for name, _, kind, _ in graph_args},
         }],
     )
 
     return LaunchDescription([
         noise_profile_arg, loop_closure_arg, noise_seed_arg, map_rebuild_arg,
         *per_sensor_args,
+        *graph_arg_actions,
         initial_x_arg, initial_y_arg,
         sensors,
         pose_graph_node,

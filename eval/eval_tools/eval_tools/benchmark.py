@@ -37,7 +37,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Point, PoseWithCovarianceStamped
-from std_msgs.msg import Float64, Int32, ColorRGBA
+from std_msgs.msg import Float64, Int32, ColorRGBA, String
 from visualization_msgs.msg import Marker, MarkerArray
 from scipy.spatial.transform import Rotation
 
@@ -61,6 +61,14 @@ def _stamp_to_float(stamp) -> float:
 def _fmt(value, digits: int = 6) -> str:
     """CSV cell: empty when the signal has not been published yet."""
     return '' if value is None else f'{value:.{digits}f}'
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    """HUD clock: mm:ss, growing to h:mm:ss only once a run passes the hour."""
+    total = int(seconds)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f'{hours}:{minutes:02d}:{secs:02d}' if hours else f'{minutes:02d}:{secs:02d}'
 
 
 def _odom_to_sample(msg: Odometry) -> PoseSample:
@@ -128,10 +136,15 @@ class BenchmarkNode(Node):
         # Consistency columns update at keyframe rate and are carried forward on
         # the intervening odometry-rate rows, the same way dopt already is.
         self._metrics_file = open(os.path.join(out_dir, 'metrics.csv'), 'w')
+        # kf_count, revisit_state, revisit_last_exit and cache_scans exist because
+        # analysing the 2026-07-27 matrix needed all four and none was recorded:
+        # they had to be recovered by grepping launch.log and timestamp-matching
+        # the per-node session CSVs, which only works while those files survive.
         self._metrics_file.write(
             't,abs_error,ate,rpe_trans,rpe_rot_deg,dopt,nees,anees,nis,chi2_norm,'
             'lc_count,rebuild_count,revisit_count,anees_robust,nees_rejected,'
-            'sigma_xy,sigma_yaw,u_ratio\n')
+            'sigma_xy,sigma_yaw,u_ratio,kf_count,revisit_state,revisit_last_exit,'
+            'cache_scans,icp_calls\n')
 
         self._matched_pairs = []   # time-ordered [(gt_sample, est_sample), ...] for RPE
         self._sq_errors = []       # running ATE accumulator
@@ -149,11 +162,29 @@ class BenchmarkNode(Node):
         self._latest_sigma_yaw = None
         self._latest_u_ratio = None
         self._latest_kf_count = 0
+        # '' until revisit_planner runs at all, so a non-revisit arm is visibly
+        # blank rather than falsely 'exploring'.
+        self._latest_revisit_state = ''
+        self._latest_revisit_exit = ''
+        self._latest_cache_scans = ''
+        # Registrations attempted per keyframe. Against lc_count this gives the
+        # closure acceptance rate, which is what distinguishes "few candidates
+        # offered" from "many offered and rejected" -- unanswerable in the
+        # 2026-07-27 matrix because only accepted closures were recorded.
+        self._latest_icp_calls = ''
         self._latest_lc_count = 0
         self._latest_rebuild_count = 0
         self._latest_revisit_count = 0
         self._latest_slam_odom: PoseSample | None = None
         self._last_scored_t: float | None = None
+        # Mirrored from map_metrics.py so the HUD carries the map numbers next to
+        # the pose ones; that node owns them and writes its own CSV.
+        self._latest_map_coverage = None
+        self._latest_map_correct = None
+        self._latest_map_chamfer = None
+        # Wall clock, not the ROS clock: this is "how long has this run been up",
+        # which must stay right even if a sim clock jumps or replays.
+        self._start_monotonic = pytime.monotonic()
 
         gt_topic = self.get_parameter('gt_topic').value
         self.create_subscription(Odometry, gt_topic, self._gt_cb, 50)
@@ -171,6 +202,18 @@ class BenchmarkNode(Node):
         self.create_subscription(Int32, '/slam/loop_closure_count', self._lc_count_cb, 10)
         self.create_subscription(Int32, '/slam/rebuild_count', self._rebuild_count_cb, 10)
         self.create_subscription(Int32, '/frontier_slam/revisit_count', self._revisit_count_cb, 10)
+        self.create_subscription(String, '/frontier_slam/revisit_state',
+                                 self._revisit_state_cb, 10)
+        self.create_subscription(String, '/frontier_slam/revisit_exit',
+                                 self._revisit_exit_cb, 10)
+        # Cache occupancy against tsdf_mapper's cache_max_scans: a map rebuild is
+        # lossless only while the cache still spans the whole run, so this column
+        # is what distinguishes a sound re-integration from a truncating one.
+        self.create_subscription(Int32, '/tsdf/cache_scans', self._cache_scans_cb, 10)
+        self.create_subscription(Int32, '/slam/timing/icp_calls', self._icp_calls_cb, 10)
+        self.create_subscription(Float64, '/eval/map_coverage', self._map_coverage_cb, 10)
+        self.create_subscription(Float64, '/eval/map_chamfer', self._map_chamfer_cb, 10)
+        self.create_subscription(Float64, '/eval/map_correct', self._map_correct_cb, 10)
 
         self.pub_abs_error = self.create_publisher(Float64, '/eval/abs_error', 10)
         self.pub_ate = self.create_publisher(Float64, '/eval/ate', 10)
@@ -248,6 +291,27 @@ class BenchmarkNode(Node):
     def _kf_count_cb(self, msg: Int32):
         self._latest_kf_count = msg.data
 
+    def _revisit_state_cb(self, msg: String):
+        self._latest_revisit_state = msg.data
+
+    def _revisit_exit_cb(self, msg: String):
+        self._latest_revisit_exit = msg.data
+
+    def _cache_scans_cb(self, msg: Int32):
+        self._latest_cache_scans = msg.data
+
+    def _icp_calls_cb(self, msg: Int32):
+        self._latest_icp_calls = msg.data
+
+    def _map_coverage_cb(self, msg: Float64):
+        self._latest_map_coverage = msg.data
+
+    def _map_correct_cb(self, msg: Float64):
+        self._latest_map_correct = msg.data
+
+    def _map_chamfer_cb(self, msg: Float64):
+        self._latest_map_chamfer = msg.data
+
     def _lc_count_cb(self, msg: Int32):
         self._latest_lc_count = msg.data
 
@@ -304,7 +368,9 @@ class BenchmarkNode(Node):
             f'{self._latest_lc_count},{self._latest_rebuild_count},{self._latest_revisit_count},'
             f'{_fmt(self._latest_anees_robust)},{self._nees_rejected},'
             f'{_fmt(self._latest_sigma_xy, 6)},{_fmt(self._latest_sigma_yaw, 6)},'
-            f'{_fmt(self._latest_u_ratio, 4)}\n')
+            f'{_fmt(self._latest_u_ratio, 4)},{self._latest_kf_count},'
+            f'{self._latest_revisit_state},{self._latest_revisit_exit},'
+            f'{self._latest_cache_scans},{self._latest_icp_calls}\n')
         self._metrics_file.flush()
 
         self._publish_eval_markers(gt, sample, abs_error, ate, rpe_trans, rpe_rot_deg)
@@ -361,16 +427,36 @@ class BenchmarkNode(Node):
                          if self._latest_sigma_yaw is not None else 'n/a')
         u_ratio_str = (f'{self._latest_u_ratio:.2f}'
                        if self._latest_u_ratio is not None else 'n/a')
+        # Own section: these score the map, not the trajectory, and they arrive
+        # from map_metrics.py at its own slower period. Absent until that node
+        # has both maps, so an octomap run (no chamfer) shows the rows it has.
+        # Correct leads: coverage is a fraction of what was observed, so read
+        # alone it rewards a run that saw almost nothing.
+        map_rows = []
+        if self._latest_map_correct is not None:
+            map_rows.append(f'Correct {self._latest_map_correct:,.0f} vox')
+        if self._latest_map_coverage is not None:
+            map_rows.append(f'Coverage {self._latest_map_coverage:.1%}')
+        if self._latest_map_chamfer is not None:
+            map_rows.append(f'Chamfer {self._latest_map_chamfer:.3f} m')
+        map_section = ('\n' + '\n'.join(map_rows) + '\n') if map_rows else ''
         # Spaced pipes and spaced units: the HUD panel renders this monospaced.
-        # Two lines, not three — the panel sits in a dock whose height comes
-        # from the saved RViz geometry, and the width is what there is to spare.
+        # Grouped one concern per line — trajectory error, the two sigmas, then
+        # the scalars derived from them — and graph counts set apart, because
+        # they are a size not an error. The panel docks in the narrow left
+        # column, so line width is the budget and height is what there is to
+        # spare; the reverse of the two-line layout this replaced.
         text.text = (
-            f'err {abs_error:.2f} m  |  ATE {ate:.2f} m  |  '
-            f'RPE {rpe_t_str} / {rpe_r_str}  |  '
-            f'KF {self._latest_kf_count}  |  LC {self._latest_lc_count}\n'
-            f'sigma xy {sigma_xy_str}  |  sigma yaw {sigma_yaw_str}  |  '
+            f'err {abs_error:.2f} m  |  ATE {ate:.2f} m\n'
+            f'RPE {rpe_t_str} / {rpe_r_str}\n'
+            f'sigma xy {sigma_xy_str}  |  sigma yaw {sigma_yaw_str}\n'
             f'D-opt {dopt_str}  |  U_r {u_ratio_str}  |  '
-            f'ANEES {anees_str}{rejected_str}'
+            f'ANEES {anees_str}{rejected_str}\n'
+            f'{map_section}'
+            f'\n'
+            f'Key Frames {self._latest_kf_count}  |  '
+            f'Loop Closures {self._latest_lc_count}\n'
+            f'Run time {_fmt_elapsed(pytime.monotonic() - self._start_monotonic)}'
         )
         markers.markers.append(text)
 

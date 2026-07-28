@@ -19,13 +19,21 @@ from frontier_slam.path_planner import CostGrid, PAD_CELLS
 #   Occupied 0.063,0.255,0.620 (blue, set on the OctoMap display in frontier.rviz)
 #   Path     set on the Path display in frontier.rviz   |  Background dark (kept)
 C_FRONTIER = (0.000, 0.659, 0.757)   # teal-cyan
-C_GOAL     = (0.961, 0.761, 0.157)   # amber
 C_OCCUPIED = (16,  65,  158)         # blue   (planning dashboard, 0-255)
 C_FREE     = (245, 245, 245)         # near-white
 C_UNKNOWN  = (208, 217, 238)         # light blue
 C_PATH     = (150, 90,  40)          # brown
 C_GOAL255  = (245, 194, 40)          # amber  (planning dashboard, 0-255)
 C_PATH01   = (0.588, 0.353, 0.157)   # C_PATH as RGB 0-1
+# The goal is the end of the path, so it carries the path's colour. Kept in
+# sync with launcher.py's goto target sphere — one goal marker in both modes.
+C_GOAL     = C_PATH01
+GOAL_SCALE = 0.8
+
+# Frontier arrows (metres) — slim, so a dense boundary stays readable.
+FRONTIER_ARROW_LENGTH = 0.35
+FRONTIER_ARROW_SHAFT  = 0.05
+FRONTIER_ARROW_HEAD   = 0.12
 
 # Chevrons travelling along the planned path (metres).
 FLOW_SPACING = 6.0   # gap between arrows
@@ -101,12 +109,13 @@ class FrontierVisualizer:
             ay = c.wall_wy if math.isfinite(c.wall_wy) else c.wy
             markers.markers.append(_arrow(
                 ns='frontiers', mid=i, x=ax, y=ay, z=gz,
-                dx=c.dx, dy=c.dy, length=0.6, rgba=(*C_FRONTIER, 0.9),
-                stamp=now, lifetime=lifetime,
+                dx=c.dx, dy=c.dy, length=FRONTIER_ARROW_LENGTH,
+                shaft=FRONTIER_ARROW_SHAFT, head=FRONTIER_ARROW_HEAD,
+                rgba=(*C_FRONTIER, 0.9), stamp=now, lifetime=lifetime,
             ))
         markers.markers.append(_sphere(
             ns='goal', mid=0, x=gx, y=gy, z=gz,
-            scale=0.8, rgba=(*C_GOAL, 0.95),
+            scale=GOAL_SCALE, rgba=(*C_GOAL, 0.95),
             stamp=now, lifetime=lifetime,
         ))
 
@@ -288,7 +297,8 @@ def _flow_samples(path: list, spacing: float, phase: float) -> tuple:
     return out, acc
 
 
-def _arrow(*, ns, mid, x, y, z, dx, dy, length, rgba, stamp, lifetime) -> Marker:
+def _arrow(*, ns, mid, x, y, z, dx, dy, length, rgba, stamp, lifetime,
+           shaft: float = 0.12, head: float = 0.28) -> Marker:
     """ARROW marker from (x,y) pointing along (dx,dy) for `length` metres."""
     m = Marker()
     m.header.stamp    = stamp
@@ -301,8 +311,8 @@ def _arrow(*, ns, mid, x, y, z, dx, dy, length, rgba, stamp, lifetime) -> Marker
         Point(x=x,            y=y,            z=z),
         Point(x=x + dx * length, y=y + dy * length, z=z),
     ]
-    m.scale.x = 0.12   # shaft diameter
-    m.scale.y = 0.28   # head diameter
+    m.scale.x = shaft   # shaft diameter
+    m.scale.y = head    # head diameter
     m.color   = ColorRGBA(r=rgba[0], g=rgba[1], b=rgba[2], a=rgba[3])
     m.lifetime = lifetime
     return m

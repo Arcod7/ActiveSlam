@@ -38,6 +38,12 @@ batch_name: active_slam_9h
 duration_s: 1680
 settle_s: 15
 seeds: [101, 102, 103]
+# Per-run rosbag for RViz replay: pose, graph, uncertainty, goals, frontiers,
+# revisit state, executor commands and the occupancy map. ~0.20 GB per run,
+# ~3.7 GB per 18-run batch, measured 2026-07-27. The sonar cloud and both
+# cameras are excluded -- with them a single run is ~30 GB. Override per
+# invocation with --record / --no-record.
+record_bag: true
 
 common_args:
   # Motion gate is fail-closed; headless runs never arm it otherwise.
@@ -109,7 +115,7 @@ common_args:
   # the pose graph and the map rebuild more time on geometry where a closure
   # is actually possible.
   revisit_scan_slowdown: 3.0
-  wall_z_band_m: 2.0
+  wall_z_band_m: 1.5
   wall_orientation_offset_deg: 40.0
   wall_orientation_lookahead_m: 2.0
   tsdf_frontier_standoff_m: 2.5

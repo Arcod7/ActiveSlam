@@ -27,7 +27,7 @@ robot_z: 8.9465
 robot_roll: 0.1378
 robot_pitch: 0.1706
 robot_yaw: 96.0627
-robot_depth_target: 9.0
+robot_depth_target: 8.5
 speed_factor: 1.0
 turn_factor: 0.2
 robot_save_pose_on_exit: false
@@ -39,7 +39,7 @@ scan_style: "sweep"
 scenario: "none"
 hard_inflation_m: 0.5
 inflation_m: 2.0
-plan_inflation_m: 3.7
+plan_inflation_m: 3.5
 noise_profile: "realistic_no_reverb"
 noise_profile_sonar: "inherit"
 noise_profile_dvl: "inherit"
@@ -53,10 +53,12 @@ loop_closure: true
 revisit: true
 revisit_scoring: "keyframe_density"
 revisit_trigger: "live_dopt"
-sigma_allow_xy_m: 0.1
+sigma_allow_xy_m: 0.07
 sigma_allow_yaw_rad: 0.05
 ratio_trigger: 1.0
 ratio_resume: 0.5
+revisit_min_closures: 2
+arrival_dwell_s: 30.0
 map_rebuild: true
 noise_seed: -1
 output_dir: ""
@@ -65,9 +67,9 @@ thrust_boost: false
 scan_sweep_deg: 180.0
 scenario_out_dx: 15.0
 scenario_out_dy: 0.0
-wall_orientation_offset_deg: 50.0
+wall_orientation_offset_deg: 40.0
 wall_orientation_lookahead_m: 2.0
-tsdf_frontier_standoff_m: 1.0
+tsdf_frontier_standoff_m: 3.0
 wall_standoff: 1.5
 wall_switch_goal_distance: 6.0
 wall_switch_scan_angle: 3.14159

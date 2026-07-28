@@ -58,6 +58,66 @@ def test_select_target_dense_cluster_beats_nearer_isolated():
     assert target in (0, 1, 2, 3), f"expected a dense-cluster member, got {target}"
 
 
+def _cluster(cx, cy, k, step=0.4):
+    """k keyframes packed tight enough that every member counts the other k-1
+    as neighbours at candidate_radius_m=3.0 — so density == k-1 exactly."""
+    return [[cx + (i % 5) * step, cy + (i // 5) * step, -1.0] for i in range(k)]
+
+
+def _two_cluster_map(near_k, far_k, far_x=40.0):
+    """A near cluster at the origin, a far one at far_x, and recent padding so
+    both clear min_index_gap. Indices 0..near_k-1 are the near cluster."""
+    padding = [[100.0 + i, 100.0, -1.0] for i in range(10)]
+    return np.array(_cluster(0.0, 0.0, near_k) + _cluster(far_x, 0.0, far_k)
+                    + padding)
+
+
+_SELECT_KW = dict(min_index_gap=10, candidate_radius_m=3.0,
+                  min_target_dist_m=3.0, w_density=1.0, w_travel=0.5)
+
+
+def test_select_target_proximity_breaks_a_density_tie():
+    # Two equally dense clusters: the nearer one must win. Under a pure
+    # density score this is a coin toss decided by index order.
+    kf = _two_cluster_map(near_k=4, far_k=4)
+    target = select_revisit_target(kf, robot_xy=np.array([-5.0, 0.0]), **_SELECT_KW)
+    assert target < 4, f"expected the near cluster, got {target}"
+
+
+def test_select_target_proximity_beats_a_modest_density_edge():
+    # 4 neighbours at the robot's feet vs 6 forty metres away: at w_travel=0.5
+    # the near candidate wins. (Halve its density and it ties instead — the
+    # exchange rate the weight is chosen to state.)
+    kf = _two_cluster_map(near_k=5, far_k=7)
+    target = select_revisit_target(kf, robot_xy=np.array([-4.0, 0.0]), **_SELECT_KW)
+    assert target < 5, f"expected the near cluster, got {target}"
+
+
+def test_select_target_depends_on_the_density_ratio_not_the_raw_counts():
+    # The regression this guards: raw counts traded against a raw length made
+    # travel negligible as keyframes accumulated, so the same map at a later
+    # point in the mission silently changed answer. Both maps hold the same
+    # near:far density ratio (4:9 and 8:18) and the same geometry, so the
+    # decision must not move; scoring on raw counts flips it (gap 5 -> 10).
+    sparse = _two_cluster_map(near_k=5, far_k=10)
+    dense = _two_cluster_map(near_k=9, far_k=19)
+    robot_xy = np.array([-5.0, 0.0])
+    assert (select_revisit_target(sparse, robot_xy, **_SELECT_KW) < 5) == \
+           (select_revisit_target(dense, robot_xy, **_SELECT_KW) < 9)
+
+
+def test_select_target_picks_the_nearest_when_no_candidate_has_neighbours():
+    # All densities zero — the travel term is then the only signal, and must
+    # not collapse into "pick whichever came first".
+    isolated = [[0.0, 0.0, -1.0], [30.0, 0.0, -1.0], [8.0, 0.0, -1.0]]
+    padding = [[100.0 + i, 100.0, -1.0] for i in range(10)]
+    kf = np.array(isolated + padding)
+    target = select_revisit_target(kf, robot_xy=np.array([9.0, 0.0]),
+                                    min_index_gap=10, candidate_radius_m=1.0,
+                                    min_target_dist_m=3.0, w_density=1.0, w_travel=0.5)
+    assert target == 0, f"expected the nearest isolated keyframe, got {target}"
+
+
 def test_select_target_recent_keyframes_never_picked():
     kf = _line_keyframes(20, spacing=1.0)
     robot_xy = np.array([19.0, 0.0])
@@ -202,17 +262,22 @@ def test_exit_on_timeout():
 
 
 def test_exit_on_arrival_dwell_sterile():
+    # lc_count keeps moving, so the stall exit stays out of the way: this is
+    # the case where the graph is alive but the uncertainty never recovers.
     sm = RevisitStateMachine(_cfg(arrival_radius_m=2.5, arrival_dwell_s=10.0))
     kf = _kf_for_trigger()
     sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
     target_xy = kf[sm.target_idx][:2]
     # arrive within arrival_radius_m
     at_target = target_xy + np.array([0.1, 0.0])
-    event = sm.tick(now=1.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=at_target)
+    event = sm.tick(now=1.0, dopt=0.05, lc_count=1, kf_xyz=kf, robot_xy=at_target)
     assert event is None
     assert sm.state == RevisitState.REVISITING
-    # still there past the dwell window, no closure -> sterile give-up
-    event = sm.tick(now=12.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=at_target)
+    # still there past the dwell window, uncertainty never recovered -> give up
+    for i, t in enumerate((5.0, 9.0), start=2):
+        assert sm.tick(now=t, dopt=0.05, lc_count=i, kf_xyz=kf,
+                       robot_xy=at_target) is None
+    event = sm.tick(now=12.0, dopt=0.05, lc_count=4, kf_xyz=kf, robot_xy=at_target)
     assert event == 'ARRIVED_STERILE'
     assert sm.state == RevisitState.COOLDOWN
 
@@ -226,16 +291,101 @@ def test_arrival_dwell_is_not_cut_short_by_the_transit_timeout():
     sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
     at_target = kf[sm.target_idx][:2] + np.array([0.1, 0.0])
 
-    # Arrives at t=9, one second before the transit budget runs out.
-    assert sm.tick(now=9.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+    # Arrives at t=9, one second before the transit budget runs out. lc_count
+    # keeps moving so the stall exit stays out of this test's way.
+    assert sm.tick(now=9.0, dopt=0.05, lc_count=1, kf_xyz=kf,
                    robot_xy=at_target) is None
     # Well past the transit timeout, still inside the dwell -> keeps waiting.
-    assert sm.tick(now=30.0, dopt=0.05, lc_count=0, kf_xyz=kf,
-                   robot_xy=at_target) is None
+    for i, t in enumerate((20.0, 30.0), start=2):
+        assert sm.tick(now=t, dopt=0.05, lc_count=i, kf_xyz=kf,
+                       robot_xy=at_target) is None
     assert sm.state == RevisitState.REVISITING
     # And the dwell, not the timeout, is what finally ends it.
-    assert sm.tick(now=40.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+    assert sm.tick(now=40.0, dopt=0.05, lc_count=4, kf_xyz=kf,
                    robot_xy=at_target) == 'ARRIVED_STERILE'
+
+
+def test_stall_exit_ends_the_dwell_once_the_graph_stops_moving():
+    # Neither the keyframe count nor the closure count moves, so nothing can
+    # change U_r — the rest of arrival_dwell_s would be dead time.
+    sm = RevisitStateMachine(_cfg(arrival_radius_m=2.5, arrival_dwell_s=30.0,
+                                  stall_exit_s=5.0))
+    kf = _kf_for_trigger()
+    sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
+    at_target = kf[sm.target_idx][:2] + np.array([0.1, 0.0])
+
+    assert sm.tick(now=1.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+                   robot_xy=at_target) is None
+    assert sm.tick(now=5.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+                   robot_xy=at_target) is None
+    event = sm.tick(now=7.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=at_target)
+    assert event == 'ARRIVED_SATURATED'
+    assert sm.state == RevisitState.COOLDOWN
+
+
+def test_stall_clock_restarts_on_every_new_keyframe_or_closure():
+    sm = RevisitStateMachine(_cfg(arrival_radius_m=2.5, arrival_dwell_s=30.0,
+                                  stall_exit_s=5.0))
+    kf = _kf_for_trigger()
+    sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
+    at_target = kf[sm.target_idx][:2] + np.array([0.1, 0.0])
+
+    # A closure every 4 s keeps the graph alive past several stall windows.
+    for i, t in enumerate((1.0, 5.0, 9.0, 13.0, 17.0)):
+        assert sm.tick(now=t, dopt=0.05, lc_count=i, kf_xyz=kf,
+                       robot_xy=at_target) is None
+    assert sm.state == RevisitState.REVISITING
+    # It ends only once the closures stop.
+    assert sm.tick(now=23.0, dopt=0.05, lc_count=4, kf_xyz=kf,
+                   robot_xy=at_target) == 'ARRIVED_SATURATED'
+
+
+def test_stall_exit_disabled_leaves_the_dwell_in_charge():
+    sm = RevisitStateMachine(_cfg(arrival_radius_m=2.5, arrival_dwell_s=10.0,
+                                  stall_exit_s=0.0))
+    kf = _kf_for_trigger()
+    sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
+    at_target = kf[sm.target_idx][:2] + np.array([0.1, 0.0])
+
+    assert sm.tick(now=1.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+                   robot_xy=at_target) is None
+    assert sm.tick(now=8.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+                   robot_xy=at_target) is None
+    assert sm.tick(now=12.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+                   robot_xy=at_target) == 'ARRIVED_STERILE'
+
+
+def test_stall_exit_does_not_fire_while_still_driving_out():
+    # In transit the graph can legitimately sit still (saturated cell, paused
+    # optimiser); revisit_timeout_s owns that case, not the stall exit.
+    sm = RevisitStateMachine(_cfg(revisit_timeout_s=30.0, stall_exit_s=5.0))
+    kf = _kf_for_trigger()
+    sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
+    for t in (5.0, 10.0, 20.0):
+        assert sm.tick(now=t, dopt=0.05, lc_count=0, kf_xyz=kf,
+                       robot_xy=np.array([19.0, 0.0])) is None
+    assert sm.state == RevisitState.REVISITING
+
+
+def test_stall_clock_resets_when_the_robot_drifts_back_out():
+    sm = RevisitStateMachine(_cfg(arrival_radius_m=2.5, arrival_dwell_s=60.0,
+                                  revisit_timeout_s=1000.0, stall_exit_s=5.0))
+    kf = _kf_for_trigger()
+    sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
+    target_xy = kf[sm.target_idx][:2]
+    at_target = target_xy + np.array([0.1, 0.0])
+    far_away = target_xy + np.array([50.0, 0.0])
+
+    sm.tick(now=1.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=at_target)
+    sm.tick(now=4.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=far_away)
+    # Re-arrives at t=10 with the graph still frozen: the clock starts again
+    # there, so t=13 is only 3 s in and too early to give up.
+    assert sm.tick(now=10.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+                   robot_xy=at_target) is None
+    assert sm.tick(now=13.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+                   robot_xy=at_target) is None
+    assert sm.tick(now=17.0, dopt=0.05, lc_count=0, kf_xyz=kf,
+                   robot_xy=at_target) == 'ARRIVED_SATURATED'
 
 
 def test_transit_timeout_still_fires_once_the_robot_leaves_the_target():

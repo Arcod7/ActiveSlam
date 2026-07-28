@@ -36,6 +36,11 @@ Published topics:
                              saturation = confidence it is a wall (TSDF depth):
                                           pale = least-confident shown voxel,
                                           vivid = deep solid
+                           voxels inside the planning band — the Z slice
+                           /projected_map is built from — are tinted blue over
+                           that colour, so the height the planner actually
+                           reasons over is visible against the map it ignores.
+                           Only available with publish_projected_map:=true.
   /tsdf/occupied_voxels  (sensor_msgs/PointCloud2) confidently solid TSDF
                            voxel centres for collision-aware goal validation
   /projected_map         (nav_msgs/OccupancyGrid) 2-D planning map for the
@@ -74,6 +79,12 @@ from visualization_msgs.msg import Marker, MarkerArray
 import tf2_ros
 from scipy.spatial.transform import Rotation, Slerp
 from vdbfusion import VDBVolume
+
+
+# Blue-ish tint blended over the voxel colour inside the planning band —
+# keep in sync with the "Map voxels (TSDF)" group in legend_rviz.
+BAND_TINT     = np.array([0.05, 0.20, 1.00], dtype=np.float32)
+BAND_TINT_MIX = 0.5   # 1.0 would erase the weight/confidence shading
 
 
 class TSDFMapper(Node):
@@ -291,6 +302,7 @@ class TSDFMapper(Node):
                 'Map rebuild consumer enabled: will reset+re-integrate cached scans '
                 'on a validated /slam/rebuild/path_old + path_new pair')
 
+        self._cache_scans_pub = self.create_publisher(Int32, '/tsdf/cache_scans', 10)
         self._cloud_pub   = self.create_publisher(PointCloud2, '/tsdf/surface_cloud',   1)
         self._normals_pub = self.create_publisher(MarkerArray, '/tsdf/surface_normals',  1)
         self._normals_cloud_pub = self.create_publisher(
@@ -555,6 +567,9 @@ class TSDFMapper(Node):
         key = (stamp.sec, stamp.nanosec)
         self._scan_cache[key] = (pts_down, T_world_cam)
         _evict_fifo(self._scan_cache, self._cache_max_scans)
+        # Once this saturates at cache_max_scans, a rebuild can no longer
+        # re-integrate the start of the run and permanently drops that surface.
+        self._cache_scans_pub.publish(Int32(data=len(self._scan_cache)))
 
     # ────────────────────────────────────────────────────────────────────
     # Map rebuild consumer (pose_graph.py is the publisher side)
@@ -828,6 +843,12 @@ class TSDFMapper(Node):
         wall_conf = np.clip((self._voxel_max_d - d_vals) / max(band, 1e-6), 0.6, 1.0)
         colors = _confidence_colormap(w_norm, saturation=wall_conf)
 
+        band_mask = self._planning_band_voxel_mask(pts)
+        if band_mask is not None:
+            colors[band_mask, :3] = (
+                BAND_TINT_MIX * BAND_TINT
+                + (1.0 - BAND_TINT_MIX) * colors[band_mask, :3])
+
         m = Marker()
         m.header.stamp    = now
         m.header.frame_id = self._world_frame
@@ -881,6 +902,23 @@ class TSDFMapper(Node):
             occ_max_d=self._voxel_max_d, occ_min_weight=self._voxel_min_weight,
             margin=self._projected_map_margin,
             frame=self._world_frame, stamp=stamp)
+
+    def _planning_band_voxel_mask(self, pts) -> 'np.ndarray | None':
+        """Which voxels lie in the Z band /projected_map is built from.
+
+        Everything outside it is invisible to the planner, so this is the slice
+        its decisions actually rest on — the same [z-band, z+band] test
+        _build_projected_map applies. Returns None when no projected map is
+        published (there is no planning band to show) or its centre has not
+        resolved yet.
+        """
+        if pts is None or len(pts) == 0 or self._projected_map_pub is None:
+            return None
+        z = self._band_center_z()
+        if z is None:
+            return None
+        mask = np.abs(pts[:, 2] - z) <= self._projected_map_band
+        return mask if np.any(mask) else None
 
     def _build_free_voxels_msg(self, coords, d_vals, header):
         """Observed-empty voxel centres, the free half tsdf_to_octomap needs."""

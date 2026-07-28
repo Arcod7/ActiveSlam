@@ -73,6 +73,18 @@ other. Enabled by default:
 - One image view, `Sonar DepthMap` (`/cloud_in/range_image`, published in
   every mode), enabled and docked in the saved window state — a second image
   display would tab into the same dock slot where only the front tab renders.
+- `Camera Follow` (`tools/view_follow_rviz`), docked under `Motion Safety`.
+  `Follow position` points the current view's `Target Frame` at
+  `bluerov2/base_link_gt`, so the camera tracks the simulator pose; clearing
+  it puts the previous target frame back. `Target Frame` only tracks the
+  frame's *position*, so `Follow heading` additionally switches the view to
+  `ThirdPersonFollower`, which turns with the frame's yaw (the horizon stays
+  level — roll and pitch never tilt the scene); clearing it returns the view
+  to its previous type. Both are saved in `demo.rviz` (`Follow:`,
+  `FollowHeading:`), and the label underneath turns amber while that frame is
+  unpublished — it only exists under `slam:=slam`. The view swap is re-applied
+  on a zero-delay timer after `load()`, because RViz loads the Views config
+  after the panels and would otherwise overwrite it.
 
 ## Ground-truth reference map (`slam:=slam` only)
 
@@ -214,13 +226,13 @@ published used `ideal`, so no quoted numbers are affected. Override with `noise_
 ### `pose_graph.py` key parameters (defaults)
 | Parameter | Value | Purpose |
 |---|---|---|
-| `keyframe_dist_m` | 1.0 | Min travel to trigger a new keyframe |
-| `keyframe_angle_rad` | 0.3 | Min rotation (~17°) to trigger a new keyframe |
+| `keyframe_dist_m` | 0.5 | Min travel to trigger a new keyframe |
+| `keyframe_angle_rad` | 0.2 | Min rotation (~11°) to trigger a new keyframe |
 | `keyframe_max_per_cell` | 3 | Max keyframes sharing one position+heading cell; 0 disables |
-| `keyframe_cell_radius_m` / `keyframe_cell_angle_rad` | 0.5 / 0.5 | Extent of that cell |
+| `keyframe_cell_radius_m` / `keyframe_cell_angle_rad` | 0.5 / 0.5 | Extent of that cell. With the cap at 3 this puts a floor of ~0.17 m / ~0.17 rad under the two gates above: below that the cap absorbs the extra keyframes and lowering them buys nothing |
 | `loop_closure_enabled` | true | Master on/off switch (A/B benchmarking) |
 | `loop_closure_radius_m` | 5.0 | Proximity search radius for loop closure |
-| `loop_closure_min_gap` | 10 | Min keyframe-index gap for a valid closure |
+| `loop_closure_min_gap` | 20 | Min keyframe-index gap for a valid closure. Counted in keyframes, so it tracks `keyframe_dist_m`: 20 at 0.5 m spacing protects the same ~10 m of travel that 10 did at 1.0 m |
 | `loop_closure_max_candidates` | 4 | Max registrations attempted per keyframe |
 | `loop_closure_cluster_radius_m` | 1.0 | Candidates closer than this collapse to one representative |
 | `loop_closure_retry_move_m` | 0.5 | Endpoint motion required before a failed pair is retried |
@@ -270,7 +282,7 @@ every tick, so `ros2 param set` takes effect without a restart)
 | `min_index_gap` | 10 | Candidate keyframes must be at least this many indices old |
 | `candidate_radius_m` | 5.0 | Neighbourhood radius used to score candidate density |
 | `min_target_dist_m` | 3.0 | Candidates closer than this to the robot are excluded |
-| `w_density` / `w_travel` | 1.0 / 0.2 | Target score = density − w_travel·dist |
+| `w_density` / `w_travel` | 1.0 / 0.5 | Target score = `w_density`·d − `w_travel`·t, with density and travel distance each scaled to 0..1 against the largest among the candidates in contention. A preference ratio, not a count traded against a length: at 0.5 the furthest-but-densest neighbourhood exactly ties a candidate half as dense at the robot's feet, and that meaning holds as keyframes accumulate |
 | `revisit_timeout_s` * | 120 | Transit budget from the trigger: give up if the target is never reached. Suspended once arrived, so a long drive cannot shorten the dwell |
 | `arrival_radius_m` | 2.5 | "Arrived at target" threshold |
 | `arrival_dwell_s` * | 30 | Recovery window at an arrived target: how long to wait for `U_r` to fall before declaring the detour sterile. Counts from arrival |

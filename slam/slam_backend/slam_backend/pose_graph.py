@@ -163,17 +163,19 @@ class PoseGraphNode(Node):
         self.declare_parameter('world_frame', 'world_ned')
         self.declare_parameter('base_frame', 'bluerov2/base_link')
         self.declare_parameter('camera_frame', 'bluerov2/Dcam')
-        self.declare_parameter('keyframe_dist_m', 1.0)
-        self.declare_parameter('keyframe_angle_rad', 0.3)
+        # Floor is ~0.17 for both: below that the per-cell cap absorbs the extra.
+        self.declare_parameter('keyframe_dist_m', 0.5)
+        self.declare_parameter('keyframe_angle_rad', 0.2)
         # Station-keeping cap: without it a hover (or a sweep rotating in place)
         # keeps crossing keyframe_angle_rad and piles up co-located keyframes,
         # which is what makes closure candidacy degenerate to all-pairs.
         self.declare_parameter('keyframe_max_per_cell', 3)
         self.declare_parameter('keyframe_cell_radius_m', 0.5)
-        self.declare_parameter('keyframe_cell_angle_rad', 0.5)
+        self.declare_parameter('keyframe_cell_angle_rad', 0.175)   # 10 deg
         self.declare_parameter('loop_closure_enabled', True)
         self.declare_parameter('loop_closure_radius_m', 5.0)
-        self.declare_parameter('loop_closure_min_gap', 10)
+        # Counted in keyframes, so it tracks keyframe_dist_m to stay ~10 m of travel.
+        self.declare_parameter('loop_closure_min_gap', 20)
         # Per-keyframe registration budget. Candidates are thinned to at most
         # max_candidates, spread at least cluster_radius apart, so the budget is
         # not spent on many near-identical targets from one hover.

@@ -21,7 +21,9 @@ unit-testable): EXPLORING -> REVISITING -> COOLDOWN -> EXPLORING.
     enough from the robot, scored by how many other old keyframes cluster
     nearby (reward) minus travel distance (penalty) — a dense old
     neighbourhood is likely to yield a closure once the robot is within
-    pose_graph's own loop_closure_radius_m of it.
+    pose_graph's own loop_closure_radius_m of it. Both terms are scaled to
+    0..1 across the candidates in contention, so w_density and w_travel are a
+    plain preference ratio rather than a count traded against a length.
   - Suspends frontier_extractor's goal publication (/frontier_slam/suspend)
     while revisiting and publishes the revisit goal directly onto
     /frontier_slam/goal; waypoint_controller's own >1m goal-change hysteresis
@@ -119,12 +121,14 @@ class RevisitConfig:
     # (U_r = D(Sigma)/D(Sigma_allow), Suresh et al. 2020 eq. 5), so the
     # symmetric exit is "uncertainty restored", not "a closure happened".
     min_closures: int = 0
-    min_keyframes: int = 15
-    min_index_gap: int = 10
+    min_keyframes: int = 30
+    min_index_gap: int = 20
     candidate_radius_m: float = 5.0
     min_target_dist_m: float = 3.0
+    # Weights over 0..1 terms, so this is a preference ratio. Keep in step with
+    # the declare_parameter default, which is what the node runs on.
     w_density: float = 1.0
-    w_travel: float = 0.2
+    w_travel: float = 1.0
     # Transit budget only, measured from the trigger: give up if the target
     # cannot even be reached. Once there, arrival_dwell_s owns the clock.
     revisit_timeout_s: float = 120.0
@@ -132,7 +136,16 @@ class RevisitConfig:
     # How long to sit at the target waiting for the uncertainty to come back
     # down before declaring the detour sterile.
     arrival_dwell_s: float = 30.0
+    # Leave sooner once the graph saturates pose_graph's per-cell keyframe cap:
+    # with no keyframe and no closure, no covariance change is possible. 0 = off.
+    stall_exit_s: float = 5.0
     cooldown_s: float = 60.0
+
+
+def _unit_scale(values: np.ndarray) -> np.ndarray:
+    """0..1 against the largest value present; an all-zero input stays zero."""
+    peak = float(np.max(values)) if values.size else 0.0
+    return values / peak if peak > 0.0 else np.zeros(values.shape)
 
 
 def select_revisit_target(kf_xyz: np.ndarray, robot_xy: np.ndarray,
@@ -147,8 +160,20 @@ def select_revisit_target(kf_xyz: np.ndarray, robot_xy: np.ndarray,
     cluster within candidate_radius_m of each candidate — irrespective of
     the candidate's own distance from the robot), then candidates closer
     than min_target_dist_m to the robot right now are excluded (a closure
-    there would already have fired). score = w_density*density -
-    w_travel*distance_to_robot; returns the argmax.
+    there would already have fired). What remains is in contention.
+
+    score = w_density*d - w_travel*t, where d and t are the density and the
+    travel distance each divided by their largest value among the contenders.
+    Scaling both matters: a raw density is an unbounded count that keeps
+    growing as the mission lays down keyframes, so trading it against a raw
+    length made travel negligible by the end of a run. Against 0..1 terms, the
+    furthest-but-densest neighbourhood ties one at the robot's feet whose scaled
+    density is 1 - w_travel: at 1.0 only a candidate the scoring calls maximally
+    dense can justify the longest drive in contention, and every partial one
+    loses to a nearer candidate. Travel is weighted as heavily as density
+    because the drive out is where a detour spends its time, and it adds drift
+    on the way — a 17 m outbound leg raised U_r 1.03 -> 1.51 before the target
+    was even reached.
     """
     n = len(kf_xyz)
     if n == 0:
@@ -172,10 +197,10 @@ def select_revisit_target(kf_xyz: np.ndarray, robot_xy: np.ndarray,
         eligible_xy[:, None, :] - eligible_xy[None, :, :], axis=2)
     density = np.sum(pairwise < candidate_radius_m, axis=1) - 1   # exclude self
 
-    score = w_density * density - w_travel * dist_to_robot
-    score = np.where(far_mask, score, -np.inf)
-    best = int(np.argmax(score))
-    return int(eligible_idx[best])
+    d = _unit_scale(density[far_mask].astype(float))
+    t = _unit_scale(dist_to_robot[far_mask])
+    score = w_density * d - w_travel * t
+    return int(eligible_idx[far_mask][int(np.argmax(score))])
 
 
 class RevisitStateMachine:
@@ -192,6 +217,8 @@ class RevisitStateMachine:
         self._lc_at_start = 0
         self._t_start = None
         self._arrived_since = None
+        self._graph_state = None
+        self._graph_changed_at = None
         self._last_revisit_end = None
 
     @property
@@ -208,8 +235,8 @@ class RevisitStateMachine:
              kf_xyz: np.ndarray, robot_xy: np.ndarray,
              sigma_xy=None, sigma_yaw=None) -> "str | None":
         """Advance one tick. Returns an event string ('TRIGGER', 'CLOSED',
-        'RESUMED_DOPT', 'TIMEOUT', 'ARRIVED_STERILE', 'COOLDOWN_DONE') or
-        None if nothing changed this tick.
+        'RESUMED_DOPT', 'TIMEOUT', 'ARRIVED_SATURATED', 'ARRIVED_STERILE',
+        'COOLDOWN_DONE') or None if nothing changed this tick.
 
         The sigmas only label a trigger with its cause; without them the
         machine behaves exactly as before and the cause stays None.
@@ -243,6 +270,8 @@ class RevisitStateMachine:
         self._lc_at_start = lc_count
         self._t_start = now
         self._arrived_since = None
+        self._graph_state = None
+        self._graph_changed_at = None
         return 'TRIGGER'
 
     def _tick_revisiting(self, now, dopt, lc_count, kf_xyz, robot_xy):
@@ -258,9 +287,11 @@ class RevisitStateMachine:
             return self._end_revisit(now, 'RESUMED_DOPT')
 
         self._track_arrival(now, kf_xyz, robot_xy, cfg.arrival_radius_m)
-        if (self._arrived_since is not None
-                and now - self._arrived_since > cfg.arrival_dwell_s):
-            return self._end_revisit(now, 'ARRIVED_STERILE')
+        if self._arrived_since is not None:
+            if self._graph_has_stalled(now, len(kf_xyz), lc_count):
+                return self._end_revisit(now, 'ARRIVED_SATURATED')
+            if now - self._arrived_since > cfg.arrival_dwell_s:
+                return self._end_revisit(now, 'ARRIVED_STERILE')
         # The two clocks are separate on purpose: revisit_timeout_s budgets the
         # transit, so a long drive can never eat into the recovery window the
         # dwell grants once the robot is actually at the target.
@@ -269,6 +300,19 @@ class RevisitStateMachine:
             return self._end_revisit(now, 'TIMEOUT')
         return None
 
+    def _graph_has_stalled(self, now, n_kf: int, lc_count: int) -> bool:
+        """True once neither the keyframe count nor the closure count has moved
+        for stall_exit_s. Nothing else feeds the covariance, so the rest of the
+        dwell cannot change U_r — the vehicle may as well go back to exploring.
+        """
+        state = (n_kf, lc_count)
+        if state != self._graph_state:
+            self._graph_state = state
+            self._graph_changed_at = now
+            return False
+        return (self.cfg.stall_exit_s > 0.0
+                and now - self._graph_changed_at > self.cfg.stall_exit_s)
+
     def _track_arrival(self, now, kf_xyz, robot_xy, arrival_radius_m) -> None:
         if self.target_idx is None or self.target_idx >= len(kf_xyz):
             return
@@ -276,6 +320,8 @@ class RevisitStateMachine:
             np.asarray(kf_xyz)[self.target_idx][:2] - np.asarray(robot_xy)[:2]))
         if dist >= arrival_radius_m:
             self._arrived_since = None
+            self._graph_state = None
+            self._graph_changed_at = None
         elif self._arrived_since is None:
             self._arrived_since = now
 
@@ -306,15 +352,17 @@ class RevisitPlanner(Node):
         self.declare_parameter('ratio_trigger', 1.0)
         self.declare_parameter('ratio_resume', 0.5)
         self.declare_parameter('revisit_min_closures', 0)
-        self.declare_parameter('min_keyframes', 15)
-        self.declare_parameter('min_index_gap', 10)
+        # Both counted in keyframes; scaled with keyframe_dist_m to hold their metres.
+        self.declare_parameter('min_keyframes', 30)
+        self.declare_parameter('min_index_gap', 20)
         self.declare_parameter('candidate_radius_m', 5.0)
         self.declare_parameter('min_target_dist_m', 3.0)
         self.declare_parameter('w_density', 1.0)
-        self.declare_parameter('w_travel', 0.2)
+        self.declare_parameter('w_travel', 1.0)
         self.declare_parameter('revisit_timeout_s', 120.0)
         self.declare_parameter('arrival_radius_m', 2.5)
         self.declare_parameter('arrival_dwell_s', 30.0)
+        self.declare_parameter('stall_exit_s', 5.0)
         self.declare_parameter('cooldown_s', 60.0)
 
         odom_topic = str(self.get_parameter('odom_topic').value)
@@ -334,6 +382,7 @@ class RevisitPlanner(Node):
             revisit_timeout_s=float(self.get_parameter('revisit_timeout_s').value),
             arrival_radius_m=float(self.get_parameter('arrival_radius_m').value),
             arrival_dwell_s=float(self.get_parameter('arrival_dwell_s').value),
+            stall_exit_s=float(self.get_parameter('stall_exit_s').value),
             cooldown_s=float(self.get_parameter('cooldown_s').value),
         )
         self._sm = RevisitStateMachine(cfg)
@@ -345,6 +394,7 @@ class RevisitPlanner(Node):
         self._kf_xyz = np.empty((0, 3))
         self._robot_xy = None
         self._last_goal_pub_time = None
+        self._last_exit = ''
 
         self._log = open_session_log('revisit', CSV_COLUMNS, _LOG_DIR,
                                      precision={'dopt': 8, 'u_ratio': 4,
@@ -364,6 +414,11 @@ class RevisitPlanner(Node):
         self._count_pub = self.create_publisher(Int32, '/frontier_slam/revisit_count', 10)
         self._state_pub = self.create_publisher(String, '/frontier_slam/revisit_state', 10)
         self._cause_pub = self.create_publisher(String, '/frontier_slam/revisit_cause', 10)
+        # How the last revisit ended. Latched, so a subscriber that samples at
+        # its own rate still sees it: the exit is one tick wide and TIMEOUT vs
+        # RESUMED_DOPT is the difference between a revisit that worked and one
+        # that merely ran out of budget.
+        self._exit_pub = self.create_publisher(String, '/frontier_slam/revisit_exit', 10)
         self._ratio_pub = self.create_publisher(Float64, '/frontier_slam/uncertainty_ratio', 10)
 
         self.create_timer(1.0 / self.TICK_HZ, self._tick)
@@ -411,6 +466,7 @@ class RevisitPlanner(Node):
         cfg.min_closures = int(self.get_parameter('revisit_min_closures').value)
         cfg.revisit_timeout_s = float(self.get_parameter('revisit_timeout_s').value)
         cfg.arrival_dwell_s = float(self.get_parameter('arrival_dwell_s').value)
+        cfg.stall_exit_s = float(self.get_parameter('stall_exit_s').value)
 
     def _tick(self) -> None:
         self._refresh_live_params()
@@ -421,6 +477,11 @@ class RevisitPlanner(Node):
         prev_state = self._sm.state
         event = self._sm.tick(now, self._dopt, self._lc_count, self._kf_xyz,
                               self._robot_xy, self._sigma_xy, self._sigma_yaw)
+
+        if event in ('CLOSED', 'RESUMED_DOPT', 'TIMEOUT', 'ARRIVED_SATURATED',
+                     'ARRIVED_STERILE'):
+            self._last_exit = event
+        self._exit_pub.publish(String(data=self._last_exit))
 
         suspended = self._sm.suspended
         self._suspend_pub.publish(Bool(data=suspended))

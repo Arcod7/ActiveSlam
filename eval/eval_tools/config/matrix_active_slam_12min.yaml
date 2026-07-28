@@ -1,0 +1,101 @@
+batch_name: active_slam_12min
+duration_s: 720
+settle_s: 15
+seeds:
+- 101
+- 102
+- 103
+record_bag: true
+common_args:
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  mapper: tsdf
+  rviz: 'false'
+  scene: target
+  obj_mesh: shipwreck.obj
+  obj_x: 40.55
+  obj_y: -13.62
+  obj_z: 17.38
+  obj_scale: 0.6901
+  obj_roll: 0.0
+  obj_pitch: -180.0
+  obj_yaw: 15.0
+  robot_x: 10.8225
+  robot_y: -10.665
+  robot_z: 8.9465
+  robot_roll: 0.1378
+  robot_pitch: 0.1706
+  robot_yaw: 96.0627
+  depth: 8.5
+  survey_radius_m: 0.0
+  tsdf_octomap: 'true'
+  directional_tsdf: 'true'
+  voxel_size: 0.3
+  voxel_min_weight: 5.0
+  voxel_min_solid_confidence: 0.7
+  motion: walloriented
+  scan_style: sweep
+  scan_sweep_deg: 180.0
+  speed_factor: 1.0
+  turn_factor: 0.2
+  thrust_boost: 'false'
+  scenario: none
+  hard_inflation_m: 0.7
+  inflation_m: 1.7
+  plan_inflation_m: 3.0
+  min_goal_separation_m: 0.0
+  revisit_scan_slowdown: 3.0
+  wall_z_band_m: 1.5
+  wall_orientation_offset_deg: 40.0
+  wall_orientation_lookahead_m: 2.0
+  tsdf_frontier_standoff_m: 2.5
+  wall_standoff: 2.5
+  wall_switch_goal_distance: 6.0
+  wall_switch_scan_angle: 3.14159
+  wall_switch_scan_yaw: 0.08
+  wall_path_influence: 0.7
+  wall_path_look_offset_deg: 30.0
+  wall_normal_offset_deg: 0.0
+  wall_path_heading_weight: 0.35
+  noise_profile: realistic_no_reverb
+  noise_profile_dvl: degraded
+  near_cutoff: -1.0
+  near_fade: -1.0
+  sigma_allow_xy_m: 0.07
+  sigma_allow_yaw_rad: 0.05
+  ratio_trigger: 1.0
+  ratio_resume: 0.5
+  revisit_min_closures: 2
+  cache_max_scans: 8400
+runs:
+- name: nolc
+  args:
+    loop_closure: 'false'
+    revisit: 'false'
+    map_rebuild: 'false'
+- name: lc
+  args:
+    loop_closure: 'true'
+    revisit: 'false'
+    map_rebuild: 'false'
+- name: lc_repeat
+  args:
+    loop_closure: 'true'
+    revisit: 'false'
+    map_rebuild: 'false'
+- name: lc_rebuild
+  args:
+    loop_closure: 'true'
+    revisit: 'false'
+    map_rebuild: 'true'
+- name: lc_revisit
+  args:
+    loop_closure: 'true'
+    revisit: 'true'
+    map_rebuild: 'false'
+- name: full
+  args:
+    loop_closure: 'true'
+    revisit: 'true'
+    map_rebuild: 'true'

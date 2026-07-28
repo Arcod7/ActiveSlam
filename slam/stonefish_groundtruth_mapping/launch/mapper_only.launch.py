@@ -61,7 +61,8 @@ def _octomap_node(context, *args, **kwargs):
         'sensor_model/max_range': 15.0,       # matches Dcam depth_max in .scn
         'latch':                  True,
     }
-    params.update(octomap_z_band_params(depth))
+    params.update(octomap_z_band_params(
+        depth, float(LaunchConfiguration('projected_map_band_m').perform(context))))
     return [Node(
         package='octomap_server',
         executable='octomap_server_node',
@@ -125,6 +126,12 @@ def generate_launch_description():
         description='Map cell size in metres, for both backends: octomap_server '
         'resolution, TSDF voxel_size, and the tsdf_to_octomap octree',
     )
+    cache_max_scans_arg = DeclareLaunchArgument(
+        'cache_max_scans', default_value='6000',
+        description='Scans held for map rebuild replay. A rebuild re-integrates '
+                    'only what is still cached, so one fired after the cache '
+                    'saturates permanently drops the start of the run.',
+    )
     voxel_min_weight_arg = DeclareLaunchArgument(
         'voxel_min_weight', default_value='10.0',
         description='TSDF only: how many times a voxel must be observed before '
@@ -176,6 +183,8 @@ def generate_launch_description():
                 LaunchConfiguration('directional_tsdf'), value_type=bool),
             'voxel_min_weight': ParameterValue(
                 LaunchConfiguration('voxel_min_weight'), value_type=float),
+            'cache_max_scans': ParameterValue(
+                LaunchConfiguration('cache_max_scans'), value_type=int),
             'voxel_min_solid_confidence': ParameterValue(
                 LaunchConfiguration('voxel_min_solid_confidence'), value_type=float),
             'publish_projected_map': ParameterValue(
@@ -222,7 +231,8 @@ def generate_launch_description():
                               publish_projected_map_arg, target_depth_m_arg,
                               projected_map_band_m_arg, projected_map_margin_cells_arg,
                               tsdf_octomap_arg, voxel_size_arg,
-                              voxel_min_weight_arg, voxel_min_solid_confidence_arg,
+                              voxel_min_weight_arg, cache_max_scans_arg,
+                              voxel_min_solid_confidence_arg,
                               trunc_distance_arg, space_carving_arg,
                               directional_tsdf_arg,
                               octomap, tsdf_mapper, tsdf_to_octomap])

@@ -14,6 +14,10 @@ Subscribed topics:
 
 Published topics:
   /motion/body_command  (geometry_msgs/Twist; normalized safety-gate input)
+  /motion/selected_wall  (visualization_msgs/MarkerArray) the one voxel the
+      current heading is taken from, and a link to it from the vehicle — every
+      other display says where the vehicle went, this says why it is pointing
+      there (see wall_markers; wall_oriented_controller fills the same topic)
 
 Behaviour:
   SEARCH — no usable wall (empty/stale TSDF, or nothing wall-like within
@@ -50,10 +54,12 @@ from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import Image, PointCloud2, PointField
 from std_msgs.msg import String
+from visualization_msgs.msg import MarkerArray
 
 from frontier_slam.control_utils import (
     depth_hold_effort, LowPassRate, wrap_angle, yaw_from_quat)
 from frontier_slam.session_log import open_session_log
+from frontier_slam.wall_markers import selected_wall_markers, TOPIC as WALL_MARKER_TOPIC
 
 
 _LOG_DIR = os.path.join(
@@ -129,7 +135,11 @@ class WallLooking(Node):
         self.declare_parameter('command_topic', '/motion/body_command')
         self.declare_parameter('speed_factor', 1.0)
         self.declare_parameter('turn_factor', 1.0)
+        # Only sizes the selected-wall highlight; must match the mapper's grid
+        # or the marker straddles two cubes.
+        self.declare_parameter('voxel_size', 0.2)
 
+        self._voxel_size = float(self.get_parameter('voxel_size').value)
         self._standoff   = float(self.get_parameter('standoff_m').value)
         self._tan_speed  = float(self.get_parameter('tangent_speed').value)
         self._direction  = 1 if int(self.get_parameter('direction').value) >= 0 else -1
@@ -182,6 +192,8 @@ class WallLooking(Node):
         # doing, for the launcher's status panel.
         self._activity_pub = self.create_publisher(
             String, '/frontier_slam/activity', 1)
+        self._selected_wall_pub = self.create_publisher(
+            MarkerArray, WALL_MARKER_TOPIC, 1)
 
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
         self.get_logger().info(
@@ -354,6 +366,23 @@ class WallLooking(Node):
 
         return pts[i], n_xy, len(candidates)
 
+    def _select_wall(self, target_xy: np.ndarray | None = None):
+        """_nearest_wall, plus the RViz marker for whatever it chose.
+
+        Wrapped rather than published inside the selection so that stays a pure
+        function of the cloud, and so every branch of the loop that asks for a
+        wall redraws the marker — including the ones that get None back.
+        """
+        wall = self._nearest_wall(target_xy)
+        self._publish_selected_wall(wall)
+        return wall
+
+    def _publish_selected_wall(self, wall) -> None:
+        """Mark the surface sample the heading is being taken from."""
+        self._selected_wall_pub.publish(selected_wall_markers(
+            self._pose, None if wall is None else wall[0], self._voxel_size,
+            self.get_clock().now().to_msg()))
+
     def _search_yaw(self, target_xy: np.ndarray | None) -> float:
         """Turn toward the requested route while scanning for another wall."""
         if self._search_yaw_cmd is not None:
@@ -430,7 +459,7 @@ class WallLooking(Node):
             self._search_turned_rad = 0.0
 
         if target_xy is None:
-            wall = self._nearest_wall()
+            wall = self._select_wall()
             yaw = 0.0 if wall is not None else self.SCAN_YAW
             self._send_thrust(0.0, yaw, heave, 0.0)
             if write_csv:
@@ -446,7 +475,7 @@ class WallLooking(Node):
                 self._write_csv(0.0, 0.0, 0.0, heave, 'GOAL_REACHED')
             return
 
-        wall = self._nearest_wall(target_xy)
+        wall = self._select_wall(target_xy)
 
         if wall is None:
             # Rotate to acquire structure. The planner only receives BLOCKED

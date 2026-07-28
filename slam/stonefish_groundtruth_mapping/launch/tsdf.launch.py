@@ -56,6 +56,10 @@ def generate_launch_description():
         'target_depth_m', default_value='-1.0',
         description='Cruise depth (world_ned Z) the /projected_map band centres on',
     )
+    projected_map_band_m_arg = DeclareLaunchArgument(
+        'projected_map_band_m', default_value='1.0',
+        description='Half-thickness (m) of the Z band projected into /projected_map',
+    )
     tsdf_octomap_arg = DeclareLaunchArgument(
         'tsdf_octomap', default_value='false',
         description='Rebuild an octomap::OcTree from this TSDF grid and publish '
@@ -64,6 +68,13 @@ def generate_launch_description():
     voxel_size_arg = DeclareLaunchArgument(
         'voxel_size', default_value='0.2',
         description='TSDF cell size in metres; the truncation band follows at 3x',
+    )
+    cache_max_scans_arg = DeclareLaunchArgument(
+        'cache_max_scans', default_value='6000',
+        description='Scans held for map rebuild replay. A rebuild re-integrates '
+                    'only what is still cached, so one fired after this saturates '
+                    'permanently drops the start of the run; keep it above '
+                    'duration_s x 5 Hz.',
     )
     voxel_min_weight_arg = DeclareLaunchArgument(
         'voxel_min_weight', default_value='10.0',
@@ -101,9 +112,11 @@ def generate_launch_description():
             'carve_no_return': LaunchConfiguration('carve_no_return'),
             'publish_projected_map': LaunchConfiguration('publish_projected_map'),
             'target_depth_m': LaunchConfiguration('target_depth_m'),
+            'projected_map_band_m': LaunchConfiguration('projected_map_band_m'),
             'tsdf_octomap': LaunchConfiguration('tsdf_octomap'),
             'voxel_size': LaunchConfiguration('voxel_size'),
             'voxel_min_weight': LaunchConfiguration('voxel_min_weight'),
+            'cache_max_scans': LaunchConfiguration('cache_max_scans'),
             'voxel_min_solid_confidence': LaunchConfiguration(
                 'voxel_min_solid_confidence'),
             'trunc_distance': LaunchConfiguration('trunc_distance'),
@@ -114,8 +127,10 @@ def generate_launch_description():
 
     return LaunchDescription([map_rebuild_arg, carve_no_return_arg,
                               publish_projected_map_arg, target_depth_m_arg,
+                              projected_map_band_m_arg,
                               tsdf_octomap_arg, voxel_size_arg,
-                              voxel_min_weight_arg, voxel_min_solid_confidence_arg,
+                              voxel_min_weight_arg, cache_max_scans_arg,
+                              voxel_min_solid_confidence_arg,
                               trunc_distance_arg, space_carving_arg,
                               directional_tsdf_arg,
                               pointcloud, tsdf_mapper])
