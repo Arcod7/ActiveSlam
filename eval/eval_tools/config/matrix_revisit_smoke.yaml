@@ -1,0 +1,105 @@
+# Smoke test: does the revisit policy fire for the right reason?
+#
+# The 9 h matrix (active_slam_9h_20260727_0345) triggered revisit 1.7 times per
+# 28-min run, and where it did fire TIMEOUT dominated the exits. Two causes were
+# identified:
+#   * sigma_allow_xy_m 0.12 makes D_allow 0.00803, ~4x the 0.00203 the live
+#     tuning session used -- U_r sat at a median 0.49-0.77 against a trigger
+#     of 1.0.
+#   * revisit_min_closures 0 removed the only exit that fired reliably, so
+#     revisits ran to the 120 s transit budget without U_r reaching
+#     ratio_resume.
+#
+# This config changes exactly those two values against the 9 h matrix and runs
+# ONE seed -- 101, the seed that produced zero triggers, i.e. the hardest case.
+# Everything else is byte-identical to the 9 h matrix so the comparison is clean.
+#
+# Pass/fail decided before running:
+#   1. U_r crosses 1.0 several times (the trigger is reachable at all)
+#   2. exits are mostly RESUMED_DOPT / ARRIVED_STERILE, not TIMEOUT
+#   3. time spent revisiting is a meaningful but not dominant fraction (~20-50%)
+# Failing 1 means the threshold is still too hard. Failing 2 means ratio_resume
+# is unreachable within the budget and the exit criterion, not the trigger, is
+# what needs changing.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py \
+#       eval/eval_tools/config/matrix_revisit_smoke.yaml
+batch_name: revisit_smoke
+duration_s: 900
+settle_s: 15
+seeds: [101]
+record_bag: true
+
+common_args:
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  mapper: tsdf
+  rviz: 'false'
+
+  scene: target
+  obj_mesh: shipwreck.obj
+  obj_x: 40.55
+  obj_y: -13.62
+  obj_z: 17.38
+  obj_scale: 0.6901
+  obj_roll: 0.0
+  obj_pitch: -180.0
+  obj_yaw: 15.0
+  robot_x: 10.8225
+  robot_y: -10.665
+  robot_z: 8.9465
+  robot_roll: 0.1378
+  robot_pitch: 0.1706
+  robot_yaw: 96.0627
+  depth: 9.0
+  survey_radius_m: 0.0
+
+  tsdf_octomap: 'true'
+  directional_tsdf: 'true'
+  voxel_size: 0.30
+  voxel_min_weight: 5.0
+  voxel_min_solid_confidence: 0.7
+
+  motion: walloriented
+  scan_style: sweep
+  scan_sweep_deg: 180.0
+  speed_factor: 1.0
+  turn_factor: 0.2
+  thrust_boost: 'false'
+  scenario: none
+
+  hard_inflation_m: 0.7
+  inflation_m: 1.7
+  plan_inflation_m: 3.0
+
+  min_goal_separation_m: 0.0
+  revisit_scan_slowdown: 3.0
+  wall_z_band_m: 1.5
+  wall_orientation_offset_deg: 40.0
+  wall_orientation_lookahead_m: 2.0
+  tsdf_frontier_standoff_m: 2.5
+  wall_standoff: 2.5
+  wall_switch_goal_distance: 6.0
+  wall_switch_scan_angle: 3.14159
+  wall_switch_scan_yaw: 0.08
+  wall_path_influence: 0.7
+  wall_path_look_offset_deg: 30.0
+  wall_normal_offset_deg: 0.0
+  wall_path_heading_weight: 0.35
+
+  noise_profile: "realistic_no_reverb"
+  noise_profile_dvl: degraded
+  near_cutoff: -1.0
+  near_fade: -1.0
+
+  # The two changes under test.
+  sigma_allow_xy_m: 0.08        # was 0.12 -> D_allow 0.00803 -> 0.00408
+  sigma_allow_yaw_rad: 0.05
+  ratio_trigger: 1.0
+  ratio_resume: 0.5
+  revisit_min_closures: 2       # was 0
+
+runs:
+  - name: full
+    args: {loop_closure: 'true', revisit: 'true', map_rebuild: 'true'}

@@ -1,0 +1,146 @@
+# Loop-closure / revisit comparison on the launcher config tuned 2026-07-27.
+#
+# Three arms differing ONLY in the two flags that define them -- loop_closure
+# and revisit. Everything else, including map_rebuild, is identical across all
+# three, so any difference is attributable to those two switches alone:
+#
+#     nolc        dead reckoning, no closures
+#     lc          passive SLAM
+#     lc_revisit  active SLAM: uncertainty-driven revisit on top of lc
+#
+# common_args is config.yaml (config_version 2) flattened to launch arguments.
+# Five keys in that file are launcher-side selectors with a single
+# implementation each and no launch argument, so they are not lost by being
+# absent here: revisit_scoring (keyframe_density), revisit_trigger (live_dopt),
+# frontier_space (2d), exploration (frontier), goal_order (greedy).
+# noise_attenuation: "none" is expressed as near_cutoff/near_fade = -1.
+#
+# mapper: tsdf_directional in the launcher is mapper:=tsdf plus
+# directional_tsdf:=true here -- demo.launch.py has no separate backend.
+#
+# rviz: true, so the runs are watchable. Note this costs GPU against the
+# headless batches and makes wall-time-sensitive numbers (CPU shares, mapper
+# duty) not directly comparable with them.
+#
+# 3 configs x 2 seeds = 6 runs x 10 min ~= 1.2 h.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py \
+#       eval/eval_tools/config/matrix_tuned_lc_revisit.yaml
+batch_name: tuned_lc_revisit
+duration_s: 600
+settle_s: 15
+seeds: [101, 102]
+record_bag: true
+
+common_args:
+  # --- tools
+  rviz: 'true'
+  safety_start_enabled: 'true'
+
+  # --- localisation
+  slam: slam
+  noise_profile_dvl: degraded
+  noise_profile_imu: realistic
+  noise_profile_compass: realistic
+  noise_profile_pressure: realistic
+
+  # graph
+  keyframe_dist_m: 0.5
+  keyframe_angle_rad: 0.2
+  keyframe_max_per_cell: 3
+  loop_closure_radius_m: 5.0
+  loop_closure_min_gap: 20
+  min_inlier_ratio: 0.3
+
+  # pose-graph noise model
+  noise_profile: realistic
+  scan_sigma_trans: 0.12
+  scan_sigma_rot: 0.08
+  odom_sigma_trans: 0.002
+  odom_sigma_rot: 0.02
+
+  # revisit trigger (inert in nolc/lc, which run revisit:=false)
+  sigma_allow_xy_m: 0.1
+  sigma_allow_yaw_rad: 0.05
+  ratio_trigger: 1.0
+  ratio_resume: 0.5
+  revisit_min_closures: 1
+  arrival_dwell_s: 6.0
+  stall_exit_s: 5.0
+  revisit_scan_slowdown: 1.0
+
+  # motion
+  speed_factor: 1.2
+  turn_factor: 0.2
+  depth: 9.0
+  motion: walloriented
+  scan_style: sweep
+  scan_sweep_deg: 180.0
+  thrust_boost: 'false'
+
+  # wall-oriented executor
+  wall_orientation_offset_deg: 45.0
+  wall_orientation_lookahead_m: 2.0
+  wall_z_band_m: 1.5
+  wall_standoff: 1.5
+  wall_switch_goal_distance: 6.0
+  wall_switch_scan_angle: 3.14159
+  wall_switch_scan_yaw: 0.08
+  wall_path_influence: 0.7
+  wall_path_look_offset_deg: 30.0
+  wall_normal_offset_deg: 0.0
+  wall_path_heading_weight: 0.35
+
+  # --- mapping
+  mapper: tsdf
+  directional_tsdf: 'true'
+  noise_profile_sonar: realistic_no_reverb
+  near_cutoff: -1.0
+  near_fade: -1.0
+  voxel_size: 0.2
+  trunc_distance: 0.0
+  space_carving: 'true'
+  carve_no_return: 'false'
+  voxel_min_solid_confidence: 0.7
+  voxel_min_weight: 6.0
+  tsdf_octomap: 'true'
+  cache_max_scans: 6000
+  # Held identical across all three arms so the comparison isolates
+  # loop_closure and revisit. The tuned config has it on; a 600 s run caches
+  # ~3000 scans against the 6000 cap, so any rebuild is lossless.
+  map_rebuild: 'true'
+
+  # --- path planning
+  mode: frontier
+  tsdf_frontier_standoff_m: 2.0
+  survey_radius_m: 0.0
+  min_goal_separation_m: 0.0
+  projected_map_band_m: 1.0
+  hard_inflation_m: 0.5
+  inflation_m: 1.5
+  plan_inflation_m: 3.0
+
+  # --- scene
+  scene: target
+  obj_mesh: shipwreck.obj
+  obj_x: 12.05
+  obj_y: -0.12
+  obj_z: 13.38
+  obj_scale: 0.31
+  obj_roll: 0.0
+  obj_pitch: -180.0
+  obj_yaw: 15.0
+  robot_x: -15.4977
+  robot_y: -4.0461
+  robot_z: 8.9393
+  robot_roll: -0.1439
+  robot_pitch: 0.0955
+  robot_yaw: 150.1176
+
+runs:
+  - name: nolc
+    args: {loop_closure: 'false', revisit: 'false'}
+  - name: lc
+    args: {loop_closure: 'true', revisit: 'false'}
+  - name: lc_revisit
+    args: {loop_closure: 'true', revisit: 'true'}

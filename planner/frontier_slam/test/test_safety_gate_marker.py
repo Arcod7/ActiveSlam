@@ -10,12 +10,15 @@ from frontier_slam.safety_gate import (
 
 
 def _gate(enabled=True, revisit_state=None, revisit_age_s=0.0,
+          revisit_cause=None, cause_age_s=0.0,
           activity=None, activity_age_s=0.0):
     """A stand-in with just the fields _marker_state reads — no ROS node."""
     gate = SimpleNamespace(
         _state=SimpleNamespace(enabled=enabled),
         _revisit_state=revisit_state,
         _revisit_state_time=100.0 - revisit_age_s,
+        _revisit_cause=revisit_cause,
+        _revisit_cause_time=100.0 - cause_age_s,
         _activity=activity,
         _activity_time=100.0 - activity_age_s,
         _marker_state_timeout_s=3.0,
@@ -35,6 +38,24 @@ def test_enabled_without_planner_state_is_green():
 
 def test_revisiting_is_cyan():
     assert _state(revisit_state='revisiting') == ('REVISITING', REVISIT_COLOR)
+
+
+def test_revisiting_names_the_axis_that_drove_the_trigger():
+    assert _state(revisit_state='revisiting', revisit_cause='position') == (
+        'REVISITING — POSITION DRIFT', REVISIT_COLOR)
+    assert _state(revisit_state='revisiting', revisit_cause='heading') == (
+        'REVISITING — HEADING DRIFT', REVISIT_COLOR)
+
+
+def test_revisiting_without_a_usable_cause_stays_unqualified():
+    # Empty string is what the planner publishes outside a revisit, and an
+    # unknown value must not reach the HUD raw.
+    assert _state(revisit_state='revisiting', revisit_cause='') == (
+        'REVISITING', REVISIT_COLOR)
+    assert _state(revisit_state='revisiting', revisit_cause='something_new') == (
+        'REVISITING', REVISIT_COLOR)
+    assert _state(revisit_state='revisiting', revisit_cause='position',
+                  cause_age_s=4.0) == ('REVISITING', REVISIT_COLOR)
 
 
 def test_initial_scan_is_white():

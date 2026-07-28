@@ -215,6 +215,57 @@ def generate_launch_description():
         default_value="1.50",
         description="A* soft-zone radius around occupied cells (high cost, last-resort passage)",
     )
+    survey_radius_arg = DeclareLaunchArgument(
+        "survey_radius_m",
+        default_value="0.0",
+        description="Radius (m) of the survey working area: frontier goals outside "
+        "it are not candidates, so exploration stays on the structure instead of "
+        "following open water outward without bound. 0 = unbounded (default).",
+    )
+    survey_center_x_arg = DeclareLaunchArgument(
+        "survey_center_x", default_value="nan",
+        description="Survey-area centre X (NED north, m). nan = the deployment point.",
+    )
+    survey_center_y_arg = DeclareLaunchArgument(
+        "survey_center_y", default_value="nan",
+        description="Survey-area centre Y (NED east, m). nan = the deployment point.",
+    )
+    revisit_min_closures_arg = DeclareLaunchArgument(
+        "revisit_min_closures", default_value="0",
+        description="Loop closures required before a revisit ends on closure count "
+        "alone. 0 = not taken into account, leaving the uncertainty ratio as the only "
+        "uncertainty-based exit.",
+    )
+    arrival_dwell_arg = DeclareLaunchArgument(
+        "arrival_dwell_s", default_value="30.0",
+        description="Seconds to wait at the revisit target for the uncertainty to come "
+        "back down before giving up on the detour. Counts from arrival, so the drive "
+        "out never shortens it.",
+    )
+    stall_exit_arg = DeclareLaunchArgument(
+        "stall_exit_s", default_value="5.0",
+        description="End the dwell once neither the keyframe count nor the closure "
+        "count has moved for this long: a parked vehicle saturates pose_graph's "
+        "per-cell keyframe cap, after which no covariance change is possible. "
+        "0 disables, leaving arrival_dwell_s.",
+    )
+    revisit_scan_slowdown_arg = DeclareLaunchArgument(
+        "revisit_scan_slowdown", default_value="1.0",
+        description="Divide the scan yaw rate by this while a revisit is in progress. "
+        "1.0 = off (default; untested in a full run as of 2026-07-27).",
+    )
+    wall_z_band_arg = DeclareLaunchArgument(
+        "wall_z_band_m", default_value="1.5",
+        description="Half-thickness (m) of the depth slice wall_oriented uses to pick "
+        "which side to look at. Depth is directly observed, so geometry further above "
+        "or below cannot be collided with and should not steer the look direction.",
+    )
+    min_goal_separation_arg = DeclareLaunchArgument(
+        "min_goal_separation_m", default_value="0.0",
+        description="Minimum distance (m) between consecutive frontier goals, so the "
+        "planner moves on rather than re-picking beside the goal it just reached. "
+        "Waived when no other candidate qualifies. 0 = off.",
+    )
     plan_inflation_arg = DeclareLaunchArgument(
         "plan_inflation_m",
         default_value="3.00",
@@ -241,12 +292,40 @@ def generate_launch_description():
         "before it counts as a wall, in the voxel view, /tsdf/occupied_voxels "
         "and /projected_map",
     )
+    cache_max_scans_arg = DeclareLaunchArgument(
+        "cache_max_scans",
+        default_value="6000",
+        description="mapper:=tsdf only: how many scans the rebuild cache holds. A "
+        "map rebuild re-integrates only what is still cached, so a rebuild fired "
+        "after this saturates permanently drops the start of the run. Needs to be "
+        "at least duration_s x sonar rate (5 Hz) to keep re-integration lossless.",
+    )
     voxel_min_solid_confidence_arg = DeclareLaunchArgument(
         "voxel_min_solid_confidence",
         default_value="0.80",
         description="mapper:=tsdf only: how far behind the zero crossing a voxel "
         "must sit to count as a wall — 0.5 = at the surface, 1.0 = fully "
         "saturated solid",
+    )
+    trunc_distance_arg = DeclareLaunchArgument(
+        "trunc_distance",
+        default_value="0.0",
+        description="mapper:=tsdf only: truncation band half-width in metres. "
+        "0 = follow voxel_size at 3x. Structure thinner than 2x this cannot hold "
+        "a zero crossing when both its faces are observed",
+    )
+    space_carving_arg = DeclareLaunchArgument(
+        "space_carving",
+        default_value="true",
+        description="mapper:=tsdf only: free the whole ray from the sensor to the "
+        "return, not just the band ahead of the surface. Off stops rays that miss "
+        "a thin target from carving away its far face",
+    )
+    directional_tsdf_arg = DeclareLaunchArgument(
+        "directional_tsdf",
+        default_value="false",
+        description="mapper:=tsdf only (WIP): keep one volume per view-direction "
+        "bin so a surface observed from both faces does not average itself away",
     )
     rviz_arg = DeclareLaunchArgument(
         "rviz",
@@ -266,13 +345,15 @@ def generate_launch_description():
         choices=[
             "ideal", "sonar_only", "odom_pos_only", "odom_only",
             "realistic", "realistic_no_reverb", "degraded",
+            "degraded_no_reverb",
         ],
         description="Sensor noise profile for slam:=slam (ignored otherwise); "
         "sonar_only = realistic sonar noise, near-ideal nav sensors; "
         "odom_pos_only = realistic DVL/pressure, exact orientation and sonar; "
         "odom_only = ground-truth sonar, realistic nav sensors; "
         "realistic_no_reverb = realistic with the near-field volume "
-        "reverberation off, close geometry still reported",
+        "reverberation off, close geometry still reported; "
+        "degraded_no_reverb = the same for degraded",
     )
     loop_closure_arg = DeclareLaunchArgument(
         "loop_closure",
@@ -464,6 +545,41 @@ def generate_launch_description():
         "Also centres the /projected_map Z band — octomap_server's through "
         "z_band.py, the TSDF mapper's through target_depth_m",
     )
+    projected_map_band_m_arg = DeclareLaunchArgument(
+        "projected_map_band_m", default_value="1.0",
+        description="half-thickness (m) of the Z band collapsed into "
+        "/projected_map, centred on depth. One value for every backend: "
+        "octomap_server takes it as occupancy_min_z/max_z (z_band.py), the "
+        "TSDF mapper and the frontier extractor as projected_map_band_m",
+    )
+    # Pose-graph structure and factor noise, forwarded to slam.launch.py.
+    # Defaults mirror pose_graph.py's own, so leaving them alone changes nothing.
+    pose_graph_args = [
+        DeclareLaunchArgument("keyframe_dist_m", default_value="0.5",
+                              description="pose_graph keyframe_dist_m"),
+        DeclareLaunchArgument("keyframe_angle_rad", default_value="0.2",
+                              description="pose_graph keyframe_angle_rad"),
+        DeclareLaunchArgument("keyframe_max_per_cell", default_value="3",
+                              description="pose_graph keyframe_max_per_cell"),
+        DeclareLaunchArgument("loop_closure_radius_m", default_value="5.0",
+                              description="pose_graph loop_closure_radius_m"),
+        DeclareLaunchArgument("loop_closure_min_gap", default_value="20",
+                              description="pose_graph loop_closure_min_gap"),
+        DeclareLaunchArgument("min_inlier_ratio", default_value="0.3",
+                              description="pose_graph min_inlier_ratio"),
+        DeclareLaunchArgument("scan_sigma_trans", default_value="0.12",
+                              description="pose_graph scan_sigma_trans"),
+        DeclareLaunchArgument("scan_sigma_rot", default_value="0.08",
+                              description="pose_graph scan_sigma_rot"),
+        DeclareLaunchArgument("odom_sigma_trans", default_value="0.002",
+                              description="pose_graph odom_sigma_trans"),
+        DeclareLaunchArgument("odom_sigma_rot", default_value="0.02",
+                              description="pose_graph odom_sigma_rot"),
+    ]
+    rpe_delta_arg = DeclareLaunchArgument(
+        "rpe_delta", default_value="1.0",
+        description="time window (s) relative pose error is measured over",
+    )
     speed_factor_arg = DeclareLaunchArgument(
         "speed_factor", default_value="1.0",
         description="Multiplies commanded surge/sway/heave in both teleop and "
@@ -512,6 +628,7 @@ def generate_launch_description():
         ),
         launch_arguments={
             "depth": LaunchConfiguration("depth"),
+            "projected_map_band_m": LaunchConfiguration("projected_map_band_m"),
             "voxel_size": LaunchConfiguration("voxel_size"),
         }.items(),
         condition=LaunchConfigurationEquals("mapper", "octomap"),
@@ -532,11 +649,16 @@ def generate_launch_description():
                  "' == 'frontier' else 'false'"]
             ),
             "target_depth_m": LaunchConfiguration("depth"),
+            "projected_map_band_m": LaunchConfiguration("projected_map_band_m"),
             "tsdf_octomap": LaunchConfiguration("tsdf_octomap"),
             "voxel_size": LaunchConfiguration("voxel_size"),
             "voxel_min_weight": LaunchConfiguration("voxel_min_weight"),
+            "cache_max_scans": LaunchConfiguration("cache_max_scans"),
             "voxel_min_solid_confidence": LaunchConfiguration(
                 "voxel_min_solid_confidence"),
+            "trunc_distance": LaunchConfiguration("trunc_distance"),
+            "space_carving": LaunchConfiguration("space_carving"),
+            "directional_tsdf": LaunchConfiguration("directional_tsdf"),
         }.items(),
         condition=LaunchConfigurationEquals("mapper", "tsdf"),
     )
@@ -575,6 +697,9 @@ def generate_launch_description():
             "voxel_min_weight": LaunchConfiguration("voxel_min_weight"),
             "voxel_min_solid_confidence": LaunchConfiguration(
                 "voxel_min_solid_confidence"),
+            "trunc_distance": LaunchConfiguration("trunc_distance"),
+            "space_carving": LaunchConfiguration("space_carving"),
+            "directional_tsdf": LaunchConfiguration("directional_tsdf"),
         }.items(),
         condition=LaunchConfigurationEquals("slam", "slam"),
     )
@@ -624,9 +749,20 @@ def generate_launch_description():
         ),
         launch_arguments={
             "depth": LaunchConfiguration("depth"),
+            "projected_map_band_m": LaunchConfiguration("projected_map_band_m"),
+            "voxel_size": LaunchConfiguration("voxel_size"),
             "hard_inflation_m": LaunchConfiguration("hard_inflation_m"),
             "inflation_m": LaunchConfiguration("inflation_m"),
             "plan_inflation_m": LaunchConfiguration("plan_inflation_m"),
+            "survey_radius_m": LaunchConfiguration("survey_radius_m"),
+            "survey_center_x": LaunchConfiguration("survey_center_x"),
+            "survey_center_y": LaunchConfiguration("survey_center_y"),
+            "min_goal_separation_m": LaunchConfiguration("min_goal_separation_m"),
+            "wall_z_band_m": LaunchConfiguration("wall_z_band_m"),
+            "revisit_scan_slowdown": LaunchConfiguration("revisit_scan_slowdown"),
+            "revisit_min_closures": LaunchConfiguration("revisit_min_closures"),
+            "arrival_dwell_s": LaunchConfiguration("arrival_dwell_s"),
+            "stall_exit_s": LaunchConfiguration("stall_exit_s"),
             "odom_topic": PythonExpression(
                 [
                     "'/slam/odometry' if '",
@@ -705,6 +841,8 @@ def generate_launch_description():
             "map_rebuild": LaunchConfiguration("map_rebuild"),
             "initial_x": LaunchConfiguration("robot_x"),
             "initial_y": LaunchConfiguration("robot_y"),
+            **{name: LaunchConfiguration(name) for name, _ in (
+                ('keyframe_dist_m', '0.5'), ('keyframe_angle_rad', '0.2'), ('keyframe_max_per_cell', '3'), ('loop_closure_radius_m', '5.0'), ('loop_closure_min_gap', '20'), ('min_inlier_ratio', '0.3'), ('scan_sigma_trans', '0.12'), ('scan_sigma_rot', '0.08'), ('odom_sigma_trans', '0.002'), ('odom_sigma_rot', '0.02'))},
         }.items(),
         condition=LaunchConfigurationEquals("slam", "slam"),
     )
@@ -716,6 +854,8 @@ def generate_launch_description():
         launch_arguments={
             "output_dir": LaunchConfiguration("output_dir"),
             "mapper": LaunchConfiguration("mapper"),
+            "voxel_size": LaunchConfiguration("voxel_size"),
+            "rpe_delta": LaunchConfiguration("rpe_delta"),
         }.items(),
         condition=LaunchConfigurationEquals("slam", "slam"),
     )
@@ -882,9 +1022,22 @@ def generate_launch_description():
             hard_inflation_arg,
             inflation_arg,
             plan_inflation_arg,
+            survey_radius_arg,
+            survey_center_x_arg,
+            survey_center_y_arg,
+            min_goal_separation_arg,
+            wall_z_band_arg,
+            revisit_scan_slowdown_arg,
+            revisit_min_closures_arg,
+            arrival_dwell_arg,
+            stall_exit_arg,
             tsdf_octomap_arg,
             voxel_size_arg,
+            trunc_distance_arg,
+            space_carving_arg,
+            directional_tsdf_arg,
             voxel_min_weight_arg,
+            cache_max_scans_arg,
             voxel_min_solid_confidence_arg,
             rviz_arg,
             slam_arg,
@@ -928,6 +1081,9 @@ def generate_launch_description():
             robot_pitch_arg,
             robot_yaw_arg,
             depth_arg,
+            *pose_graph_args,
+            rpe_delta_arg,
+            projected_map_band_m_arg,
             speed_factor_arg,
             turn_factor_arg,
             set_use_gt_tf,

@@ -68,6 +68,23 @@ def _motion_arg(motion):
     return "forward"
 
 
+# Pose-graph structure and factor noise: launcher id == slam.launch.py argument
+# == pose_graph.py parameter, so one list drives the command line and the
+# restart dependency both.
+POSE_GRAPH_ARGS = (
+    "keyframe_dist_m",
+    "keyframe_angle_rad",
+    "keyframe_max_per_cell",
+    "loop_closure_radius_m",
+    "loop_closure_min_gap",
+    "min_inlier_ratio",
+    "scan_sigma_trans",
+    "scan_sigma_rot",
+    "odom_sigma_trans",
+    "odom_sigma_rot",
+)
+
+
 def _odom_topic(v):
     return "/slam/odometry" if v["slam"] == "slam" else "/StoneFish/Odometry"
 
@@ -77,6 +94,24 @@ def _octomap_band_depth(v):
     occupancy Z band. The TSDF mapper takes it live (target_depth_m), so
     re-centring the projection band there costs no map."""
     return v["robot_depth_target"] if v["mapper"] == "octomap" else None
+
+
+def _mapper_backend(v):
+    """The launch files take mapper:=octomap|tsdf. tsdf_directional is not a
+    backend of its own — it is the TSDF one with directional_tsdf set."""
+    return "octomap" if v["mapper"] == "octomap" else "tsdf"
+
+
+def _map_rebuild(v):
+    """A rebuild is triggered by a loop closure, so closure off means never."""
+    return v["map_rebuild"] and v["loop_closure"]
+
+
+def _revisit_arg(v):
+    """Revisit drives back to force a loop closure — pointless with closure off,
+    and it would still cost the detour."""
+    return (v["revisit"] and v["loop_closure"] and v["slam"] == "slam"
+            and v["mode"] in ("frontier", "goto"))
 
 
 def _planner_mode(v):
@@ -140,7 +175,8 @@ class Group:
         # Parameter ids that force a restart. An entry may also be
         # (id, project): the group then restarts only when project(values)
         # changes, for a parameter it reads through a coarser distinction than
-        # its own value — mode reaches the mapper only as planner-vs-teleop.
+        # its own value — map_rebuild reaches the mapper only once loop closure
+        # is on to trigger one.
         self.depends = tuple(depends)
         self.visible = visible
         # Extra environment for this group only — LD_PRELOAD in particular must
@@ -205,42 +241,62 @@ def build_groups(bringup_share=""):
                  f"near_fade_range:={fade_range}"]]
 
     def mapper(v):
-        # Under mode:=frontier mapper:=tsdf the mapper derives /projected_map
-        # from its own grid (banded around the cruise depth), so frontier
-        # detection + A* share the belief map — no separate octomap_server.
-        publish_projected = v["mode"] in ("frontier", "goto") and v["mapper"] == "tsdf"
+        # Under mapper:=tsdf the mapper derives /projected_map from its own grid
+        # (banded around the cruise depth), so frontier detection + A* share the
+        # belief map — no separate octomap_server. Published in every mode, not
+        # only the planning ones: gating it on mode made the mapper restart when
+        # the mode changed, and a restart discards the map. Nothing consumes the
+        # topic under teleop; it costs one projection per cycle and means the
+        # planning map is already there the moment a planner starts.
+        publish_projected = _mapper_backend(v) == "tsdf"
         return [["ros2", "launch", "stonefish_groundtruth_mapping",
                  "mapper_only.launch.py",
-                 f"mapper:={v['mapper']}",
-                 f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}",
+                 f"mapper:={_mapper_backend(v)}",
+                 f"map_rebuild:={'true' if _map_rebuild(v) else 'false'}",
                  # octomap_server bands its own /projected_map around this depth
                  # (z_band.py); the TSDF mapper bands its projection through
                  # target_depth_m. Same cruise depth, one knob.
                  f"depth:={v['robot_depth_target']}",
                  f"publish_projected_map:={'true' if publish_projected else 'false'}",
                  f"target_depth_m:={v['robot_depth_target']}",
+                 f"projected_map_band_m:={v['projected_map_band_m']}",
                  f"tsdf_octomap:={'true' if v['tsdf_octomap'] else 'false'}",
                  f"voxel_size:={v['voxel_size']}",
                  f"voxel_min_weight:={v['voxel_min_weight']}",
+                 f"cache_max_scans:={v['cache_max_scans']}",
                  "voxel_min_solid_confidence:="
-                 f"{v['voxel_min_solid_confidence']}"]]
+                 f"{v['voxel_min_solid_confidence']}",
+                 *_tsdf_grid_args(v)]]
 
     def gt_map(v):
         # Built at the belief map's cell size and wall thresholds: the map
         # metrics compare the two grids directly, so a mismatch here would
         # register as map error.
         return [["ros2", "launch", "stonefish_groundtruth_mapping",
-                 "gt_map.launch.py", f"mapper:={v['mapper']}",
+                 "gt_map.launch.py", f"mapper:={_mapper_backend(v)}",
                  f"voxel_size:={v['voxel_size']}",
                  f"voxel_min_weight:={v['voxel_min_weight']}",
                  "voxel_min_solid_confidence:="
-                 f"{v['voxel_min_solid_confidence']}"]]
+                 f"{v['voxel_min_solid_confidence']}",
+                 *_tsdf_grid_args(v)]]
+
+    def _tsdf_grid_args(v):
+        """Options the VDB volume is constructed from — belief and ground-truth
+        map take the identical set, or the map metrics compare two grids built
+        on different geometry."""
+        return [f"trunc_distance:={v['trunc_distance']}",
+                f"space_carving:={'true' if v['space_carving'] else 'false'}",
+                f"carve_no_return:={'true' if v['carve_no_return'] else 'false'}",
+                "directional_tsdf:="
+                f"{'true' if v['mapper'] == 'tsdf_directional' else 'false'}"]
 
     def _sensor_profiles(v, names):
-        """Only pass an override that is actually set; 'inherit' means the
-        launch file's own default, which is the master profile."""
-        return [f"noise_profile_{n}:={v[f'noise_profile_{n}']}" for n in names
-                if v.get(f"noise_profile_{n}", "inherit") != "inherit"]
+        """Each sensor names its own profile, so all of them are passed.
+
+        The launch files still default these to the master profile for a
+        hand-run `ros2 launch`; the launcher never relies on that.
+        """
+        return [f"noise_profile_{n}:={v[f'noise_profile_{n}']}" for n in names]
 
     def slam(v):
         return [["ros2", "launch", "slam_backend", "slam.launch.py",
@@ -248,15 +304,18 @@ def build_groups(bringup_share=""):
                  *_sensor_profiles(v, ("pressure", "imu", "compass", "dvl")),
                  f"loop_closure:={'true' if v['loop_closure'] else 'false'}",
                  f"noise_seed:={v['noise_seed']}",
-                 f"map_rebuild:={'true' if v['map_rebuild'] else 'false'}",
+                 f"map_rebuild:={'true' if _map_rebuild(v) else 'false'}",
                  # Seeded where the vehicle is now, not at the spawn pose — a
                  # restart mid-run would otherwise re-anchor X/Y at the origin.
                  f"initial_x:={v.get('slam_seed_x', v['robot_x'])}",
-                 f"initial_y:={v.get('slam_seed_y', v['robot_y'])}"]]
+                 f"initial_y:={v.get('slam_seed_y', v['robot_y'])}",
+                 *(f"{k}:={v[k]}" for k in POSE_GRAPH_ARGS)]]
 
     def evaluation(v):
         cmd = ["ros2", "launch", "eval_tools", "eval.launch.py",
-               f"mapper:={v['mapper']}"]
+               f"mapper:={_mapper_backend(v)}",
+               f"voxel_size:={v['voxel_size']}",
+               f"rpe_delta:={v['rpe_delta']}"]
         if v["output_dir"]:
             cmd.append(f"output_dir:={v['output_dir']}")
         return [cmd]
@@ -267,8 +326,7 @@ def build_groups(bringup_share=""):
         # pose uncertainty bounded. The launcher stops republishing the
         # operator's point while a revisit is in progress, so the two never
         # fight over /frontier_slam/goal (see control_screen).
-        revisit = "true" if (v["revisit"] and v["slam"] == "slam"
-                             and v["mode"] in ("frontier", "goto")) else "false"
+        revisit = "true" if _revisit_arg(v) else "false"
         return [["ros2", "launch", "frontier_slam", "frontier_slam.launch.py",
                  f"hard_inflation_m:={v['hard_inflation_m']}",
                  f"inflation_m:={v['inflation_m']}",
@@ -278,15 +336,20 @@ def build_groups(bringup_share=""):
                  f"scenario:={v['scenario']}",
                  f"scenario_out_dx:={v['scenario_out_dx']}",
                  f"scenario_out_dy:={v['scenario_out_dy']}",
+                 f"survey_radius_m:={v['survey_radius_m']}",
+                 f"min_goal_separation_m:={v['min_goal_separation_m']}",
+                 f"revisit_scan_slowdown:={v['revisit_scan_slowdown']}",
                  f"scan_style:={v['scan_style']}",
                  f"scan_sweep_deg:={v['scan_sweep_deg']}",
                  f"depth:={v['robot_depth_target']}",
+                 f"projected_map_band_m:={v['projected_map_band_m']}",
                  f"safety_start_enabled:={'true' if v['safety_start_enabled'] else 'false'}",
                  f"motion:={_motion_arg(v['motion'])}",
                  f"wall_orientation_offset_deg:={v['wall_orientation_offset_deg']}",
                  f"wall_orientation_lookahead_m:={v['wall_orientation_lookahead_m']}",
                  f"tsdf_frontier_standoff_m:={v['tsdf_frontier_standoff_m']}",
-                 "wall_points_topic:=" + ("/tsdf/surface_cloud" if v["mapper"] == "tsdf"
+                 "wall_points_topic:=" + ("/tsdf/surface_cloud"
+                                          if _mapper_backend(v) == "tsdf"
                                           else "/octomap_point_cloud_centers"),
                  f"wall_standoff:={v['wall_standoff']}",
                  f"wall_switch_goal_distance:={v['wall_switch_goal_distance']}",
@@ -340,23 +403,37 @@ def build_groups(bringup_share=""):
               "only, so the backend can be swapped without touching the sim.",
               # The wall thresholds are absent: tsdf_mapper takes them live, and
               # under octomap they reach no node at all.
-              mapper, depends=["mapper", "map_rebuild", ("mode", _planner_mode),
-                               "tsdf_octomap", "voxel_size",
+              # The grid options restart rather than push live: the VDB volume
+              # is constructed from them, so changing one discards the map.
+              # map_rebuild through _map_rebuild: loop_closure changes it, but a
+              # toggle that leaves it false must not restart (and discard) a map.
+              # No mode dependency: the map is the expensive state in this
+              # stack and switching how goals are picked is no reason to throw
+              # it away. Only the planner layer starts and stops with the mode.
+              mapper, depends=["mapper", ("map_rebuild", _map_rebuild),
+                               "tsdf_octomap", "voxel_size", "trunc_distance",
+                               "space_carving", "carve_no_return",
+                               "cache_max_scans", "projected_map_band_m",
                                ("robot_depth_target", _octomap_band_depth)]),
         Group("gt_map", "Ground-truth reference map",
               "A second map built from the exact simulator pose, overlaid "
               "against the belief map so map drift is visible directly.",
-              gt_map, depends=["mapper", "voxel_size"], visible=is_slam),
+              gt_map, depends=["mapper", "voxel_size", "trunc_distance",
+                               "space_carving", "carve_no_return"],
+              visible=is_slam),
         Group("slam", "SLAM backend (GTSAM)",
               "Simulated pressure/IMU/DVL sensors, dead-reckoning fusion and a "
               "GTSAM iSAM2 pose graph with loop closure.",
               slam, depends=["noise_profile", "noise_profile_pressure",
                              "noise_profile_imu", "noise_profile_compass",
                              "noise_profile_dvl", "loop_closure", "noise_seed",
-                             "map_rebuild", "robot_x", "robot_y"], visible=is_slam),
+                             "map_rebuild", *POSE_GRAPH_ARGS], visible=is_slam),
         Group("eval", "Benchmark + eval",
               "ATE/RPE against ground truth, TUM trajectory export and map "
               "metrics, written to eval/runs/<timestamp>/.",
+              # Not voxel_size, though evaluation passes it: restarting eval
+              # mid-run opens a second run directory and restarts ATE from zero.
+              # map_metrics re-reads it per cycle, so a `ros2 param set` lands.
               evaluation, depends=["output_dir", "mapper"], visible=is_slam),
         Group("planner", "Planner",
               "Frontier detection, A* planning and the path executor. Runs "
@@ -365,7 +442,7 @@ def build_groups(bringup_share=""):
               # No mode dependency: teleop starts and stops this group through
               # `visible`, and frontier <-> goto builds the identical command.
               planner, depends=["motion", "scan_style", "scenario",
-                                "revisit", "slam", "mapper",
+                                ("revisit", _revisit_arg), "slam", "mapper",
                                 "scenario_out_dx", "scenario_out_dy",
                                 "scan_sweep_deg", "robot_depth_target",
                                 "safety_start_enabled",
@@ -376,7 +453,9 @@ def build_groups(bringup_share=""):
                                 "wall_switch_scan_angle", "wall_switch_scan_yaw",
                                 "wall_path_influence", "wall_path_look_offset_deg",
                                 "wall_normal_offset_deg", "wall_path_heading_weight",
-                                "hard_inflation_m", "inflation_m", "plan_inflation_m"],
+                                "hard_inflation_m", "inflation_m", "plan_inflation_m",
+                                "projected_map_band_m", "survey_radius_m",
+                                "min_goal_separation_m", "revisit_scan_slowdown"],
               visible=lambda v: v["mode"] in ("frontier", "goto")),
         Group("teleop_support", "Safety gate + thruster mixer",
               "Fail-closed motion safety gate and the thruster mixer that "

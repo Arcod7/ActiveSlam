@@ -61,7 +61,8 @@ def _octomap_node(context, *args, **kwargs):
         'sensor_model/max_range': 15.0,       # matches Dcam depth_max in .scn
         'latch':                  True,
     }
-    params.update(octomap_z_band_params(depth))
+    params.update(octomap_z_band_params(
+        depth, float(LaunchConfiguration('projected_map_band_m').perform(context))))
     return [Node(
         package='octomap_server',
         executable='octomap_server_node',
@@ -125,6 +126,12 @@ def generate_launch_description():
         description='Map cell size in metres, for both backends: octomap_server '
         'resolution, TSDF voxel_size, and the tsdf_to_octomap octree',
     )
+    cache_max_scans_arg = DeclareLaunchArgument(
+        'cache_max_scans', default_value='6000',
+        description='Scans held for map rebuild replay. A rebuild re-integrates '
+                    'only what is still cached, so one fired after the cache '
+                    'saturates permanently drops the start of the run.',
+    )
     voxel_min_weight_arg = DeclareLaunchArgument(
         'voxel_min_weight', default_value='10.0',
         description='TSDF only: how many times a voxel must be observed before '
@@ -134,6 +141,21 @@ def generate_launch_description():
         'voxel_min_solid_confidence', default_value='0.80',
         description='TSDF only: how far behind the zero crossing a voxel must '
         'sit to count as a wall — 0.5 = at the surface, 1.0 = fully saturated',
+    )
+    trunc_distance_arg = DeclareLaunchArgument(
+        'trunc_distance', default_value='0.0',
+        description='TSDF only: truncation band half-width in metres; '
+        '0 = follow voxel_size at 3x',
+    )
+    space_carving_arg = DeclareLaunchArgument(
+        'space_carving', default_value='true',
+        description='TSDF only: mark the whole ray from the sensor to the '
+        'return as free, not just the band ahead of the surface',
+    )
+    directional_tsdf_arg = DeclareLaunchArgument(
+        'directional_tsdf', default_value='false',
+        description='TSDF only (WIP): keep one volume per view-direction bin so '
+        'a surface seen from both faces does not average itself away',
     )
 
     # Built through an OpaqueFunction so the Z band can be resolved from `depth`
@@ -150,14 +172,19 @@ def generate_launch_description():
             'carve_no_return': LaunchConfiguration('carve_no_return'),
             'voxel_size': ParameterValue(
                 LaunchConfiguration('voxel_size'), value_type=float),
-            # VDBFusion needs >= 3x the voxel size to have a gradient to work
-            # with, so the truncation band tracks the cell size instead of
-            # being a second knob that can silently invalidate the first.
+            # 0 leaves the node to track the cell size at 3x, the minimum
+            # VDBFusion needs for a gradient. Set it lower to map structure
+            # thinner than 2x trunc, which one signed field cannot hold.
             'trunc_distance': ParameterValue(
-                PythonExpression(['3.0 * ', LaunchConfiguration('voxel_size')]),
-                value_type=float),
+                LaunchConfiguration('trunc_distance'), value_type=float),
+            'space_carving': ParameterValue(
+                LaunchConfiguration('space_carving'), value_type=bool),
+            'directional_tsdf': ParameterValue(
+                LaunchConfiguration('directional_tsdf'), value_type=bool),
             'voxel_min_weight': ParameterValue(
                 LaunchConfiguration('voxel_min_weight'), value_type=float),
+            'cache_max_scans': ParameterValue(
+                LaunchConfiguration('cache_max_scans'), value_type=int),
             'voxel_min_solid_confidence': ParameterValue(
                 LaunchConfiguration('voxel_min_solid_confidence'), value_type=float),
             'publish_projected_map': ParameterValue(
@@ -204,5 +231,8 @@ def generate_launch_description():
                               publish_projected_map_arg, target_depth_m_arg,
                               projected_map_band_m_arg, projected_map_margin_cells_arg,
                               tsdf_octomap_arg, voxel_size_arg,
-                              voxel_min_weight_arg, voxel_min_solid_confidence_arg,
+                              voxel_min_weight_arg, cache_max_scans_arg,
+                              voxel_min_solid_confidence_arg,
+                              trunc_distance_arg, space_carving_arg,
+                              directional_tsdf_arg,
                               octomap, tsdf_mapper, tsdf_to_octomap])

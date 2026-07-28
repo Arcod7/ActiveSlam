@@ -69,6 +69,7 @@ class FrontierExtractor(Node):
     MIN_CLUSTER_CELLS = 1
     UPDATE_HZ         = 0.5
     REPLAN_HZ         = 3.0
+    PATH_FLOW_HZ      = 10.0   # animation rate of the path arrows, not a plan rate
     REPLAN_FAIL_MAX   = 6    # consecutive A* failures before blacklisting goal as unreachable
     TSDF_SOLID_STALE_S = 5.0
     TSDF_SURFACE_STALE_S = 5.0
@@ -91,6 +92,20 @@ class FrontierExtractor(Node):
         self.declare_parameter('hard_inflation_m', HARD_INFLATION_M)
         self.declare_parameter('inflation_m', INFLATION_M)
         self.declare_parameter('plan_inflation_m', PLAN_INFLATION_M)
+        # Survey working area. Frontier exploration in open water has no
+        # natural bound -- it follows free space outward indefinitely, so a
+        # run spends its budget leaving the structure instead of surveying it.
+        # <= 0 disables the bound, which is the default.
+        self.declare_parameter('survey_radius_m', 0.0)
+        # NaN centre = the deployment point, taken from the first odometry
+        # fix. A survey area is defined relative to where the vehicle was put
+        # in the water unless the operator names a different centre.
+        self.declare_parameter('survey_center_x', float('nan'))
+        self.declare_parameter('survey_center_y', float('nan'))
+        # Consecutive frontier goals must be at least this far apart, so the
+        # planner moves on instead of re-picking a cluster beside the one it
+        # just reached. Waived when no other candidate qualifies.
+        self.declare_parameter('min_goal_separation_m', 0.0)
         odom_topic = str(self.get_parameter('odom_topic').value)
         depth_arg = float(self.get_parameter('depth_setpoint').value)
         # Same value, same launch arg, as waypoint_controller's own
@@ -139,6 +154,10 @@ class FrontierExtractor(Node):
         self._tsdf_surface_tree: cKDTree | None = None
         self._tsdf_surface_received_at: float | None = None
 
+        survey_radius = float(self.get_parameter('survey_radius_m').value)
+        cx = float(self.get_parameter('survey_center_x').value)
+        cy = float(self.get_parameter('survey_center_y').value)
+        self._survey_center_fixed = not (math.isnan(cx) or math.isnan(cy))
         self._goals = GoalManager(
             min_explore_dist=3.0,
             goal_vanish_dist=3.0,
@@ -147,7 +166,17 @@ class FrontierExtractor(Node):
             stuck_min_progress=0.5,
             blacklist_duration=30.0,
             arrival_blacklist_duration=20.0,
+            survey_radius=max(0.0, survey_radius),
+            survey_center=((cx, cy) if self._survey_center_fixed else None),
+            min_goal_separation=max(0.0, float(
+                self.get_parameter('min_goal_separation_m').value)),
         )
+        if survey_radius > 0.0:
+            where = (f'({cx:.1f}, {cy:.1f})' if self._survey_center_fixed
+                     else 'the deployment point')
+            self.get_logger().info(
+                f'Survey area: {survey_radius:.1f} m around {where}; frontier '
+                'goals outside it are not candidates')
 
         self._log = open_session_log('extractor', CSV_COLUMNS, _LOG_DIR)
 
@@ -166,6 +195,7 @@ class FrontierExtractor(Node):
 
         self.create_timer(1.0 / self.UPDATE_HZ,  self._update)
         self.create_timer(1.0 / self.REPLAN_HZ,  self._replan)
+        self.create_timer(1.0 / self.PATH_FLOW_HZ, self._publish_path_flow)
         self.get_logger().info(
             f'frontier_extractor ready — TSDF solid rejection={self._tsdf_solid_radius:.2f}m '
             f'standoff={self._tsdf_frontier_standoff:.2f}m '
@@ -185,6 +215,15 @@ class FrontierExtractor(Node):
         self._robot_speed = math.hypot(v.x, v.y)
         if self._cruise_z is None:   # first odom, no depth_setpoint launch arg
             self._cruise_z = float(p.z)
+        # Anchor the survey area on the deployment point, once, unless the
+        # operator named a centre explicitly.
+        if (self._goals.survey_radius > 0.0
+                and self._goals.survey_center is None
+                and not self._survey_center_fixed):
+            self._goals.survey_center = (float(p.x), float(p.y))
+            self.get_logger().info(
+                f'Survey area anchored at deployment point '
+                f'({p.x:.1f}, {p.y:.1f})')
 
     def _tsdf_solid_cb(self, msg: PointCloud2) -> None:
         points = _parse_xyz_cloud(msg)
@@ -266,8 +305,9 @@ class FrontierExtractor(Node):
             query, distance_upper_bound=self._tsdf_solid_radius)
         return math.isfinite(distance)
 
-    def _tsdf_surface_standoff(self, frontier_xy: np.ndarray) -> np.ndarray:
-        """Move a frontier goal outward from its nearest TSDF wall surface."""
+    def _tsdf_surface_standoff(self, frontier_xy: np.ndarray,
+                               unknown_dir: np.ndarray | None) -> np.ndarray:
+        """Move a frontier goal outward from its nearest TSDF wall surface, observed side."""
         if (self._tsdf_frontier_standoff <= 0.0 or self._tsdf_surface_tree is None
                 or self._tsdf_surface_received_at is None
                 or self._now() - self._tsdf_surface_received_at > self.TSDF_SURFACE_STALE_S):
@@ -279,7 +319,7 @@ class FrontierExtractor(Node):
             return frontier_xy
         standoff = standoff_point_from_tsdf_surface(
             self._tsdf_surface_points[index], self._tsdf_surface_normals[index],
-            self._tsdf_frontier_standoff)
+            self._tsdf_frontier_standoff, unknown_dir, self._robot_pos[:2])
         return frontier_xy if standoff is None else standoff
 
     # ------------------------------------------------------------------
@@ -298,11 +338,16 @@ class FrontierExtractor(Node):
             return
 
         # Put a TSDF frontier goal in free space, offset along the outward
-        # surface normal.  The nearest normal is queried at the vehicle depth;
-        # vertical surfaces give no horizontal offset and keep the old target.
+        # surface normal, on the observed side of the wall (opposite the
+        # cluster's own direction toward the unknown).  The nearest normal is
+        # queried at the vehicle depth; vertical surfaces give no horizontal
+        # offset and keep the old target.
         raw_centroids = [(c.wx, c.wy) for c in clusters]
         for c in clusters:
-            c.wx, c.wy = self._tsdf_surface_standoff(np.array([c.wx, c.wy]))
+            c.wall_wx, c.wall_wy = c.wx, c.wy
+            unknown_dir = np.array([c.dx, c.dy]) if c.dir_valid else None
+            c.wx, c.wy = self._tsdf_surface_standoff(
+                np.array([c.wx, c.wy]), unknown_dir)
 
         self._publish_frontier_debug(clusters, raw_centroids)
 
@@ -357,7 +402,10 @@ class FrontierExtractor(Node):
 
         if selection.event == 'ALL_BLACKLISTED' or math.isnan(selection.gx):
             self.get_logger().info(
-                'All candidates blacklisted — waiting', throttle_duration_sec=5.0,
+                'Survey area fully explored — every remaining frontier is '
+                'outside it' if selection.event == 'OUTSIDE_SURVEY_AREA'
+                else 'All candidates blacklisted — waiting',
+                throttle_duration_sec=5.0,
             )
             self._current_goal_xy = None
             self._current_path    = []
@@ -464,6 +512,10 @@ class FrontierExtractor(Node):
             self._robot_pos, self._robot_yaw, self._robot_speed,
             self._current_path, self._current_goal_xy, self._last_stuck_pct,
         )
+
+    def _publish_path_flow(self) -> None:
+        z = float(self._robot_pos[2]) if self._robot_pos is not None else 0.0
+        self._viz.publish_path_flow(self._current_path, z)
 
     # ------------------------------------------------------------------
     # Logging

@@ -1,0 +1,166 @@
+# Active-SLAM evaluation, 2x2 factorial + baseline + repeatability control.
+#
+# Replaces the cumulative ladder used on 2026-07-26. That ladder ordered
+# revisit before rebuild, which silently asserted a dependency that does not
+# exist: the two are orthogonal, so `lc_rebuild` (re-integration without
+# revisit) was unmeasurable. The factorial isolates each:
+#
+#                  | rebuild off | rebuild on
+#     revisit off  |   lc        |  lc_rebuild
+#     revisit on   |   lc_revisit|  full
+#
+# plus `nolc` (open loop) as the floor, and `lc_repeat` -- byte-identical to
+# `lc` -- as the noise floor. That control is not optional: on 2026-07-26 two
+# runs of the same configuration differed by a median 32% on ATE, so any rung
+# difference below that is not a result. `full` served as the control then
+# only because map rebuild never fired; now that it does, the control has to
+# be an explicit duplicate arm.
+#
+# Conditions differ from the 2026-07-26 batch in four ways, each deliberate:
+#   * noise_profile_dvl: degraded -- scale error 0.2% -> 1%, the systematic
+#     term loop closure can correct and dead reckoning cannot. Under nominal
+#     sensors nothing got lost (worst error 1.65 m over 470 m), so no arm was
+#     distinguishable on trajectory accuracy.
+#   * Scene, spawn pose and map resolution come from
+#     configs/config_shipwreck_small.yaml verbatim (obj_scale 0.6901,
+#     obj_z 17.38, spawn ~30 m from the wreck facing it, voxel_size 0.15).
+#     obj_scale only takes effect at all since the Stonefish OBJ-scale fix
+#     (patch 0006); before it, shipwreck.obj always loaded at native size
+#     whatever the config said, which is what every run up to 2026-07-26 18:26
+#     actually used.
+#   * speed_factor: 1.0, from the same preset.
+#
+# 6 configs x 3 seeds = 18 runs x 28 min ~= 8.7 h.
+#
+#   python3 eval/eval_tools/scripts/run_matrix.py \
+#       eval/eval_tools/config/matrix_active_slam_9h.yaml
+batch_name: active_slam_9h
+duration_s: 1680
+settle_s: 15
+seeds: [101, 102, 103]
+# Per-run rosbag for RViz replay: pose, graph, uncertainty, goals, frontiers,
+# revisit state, executor commands and the occupancy map. ~0.20 GB per run,
+# ~3.7 GB per 18-run batch, measured 2026-07-27. The sonar cloud and both
+# cameras are excluded -- with them a single run is ~30 GB. Override per
+# invocation with --record / --no-record.
+record_bag: true
+
+common_args:
+  # Motion gate is fail-closed; headless runs never arm it otherwise.
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  mapper: tsdf
+  rviz: 'false'
+
+  # Scene and placement.
+  scene: target
+  obj_mesh: shipwreck.obj
+  obj_x: 40.55
+  obj_y: -13.62
+  obj_z: 17.38
+  obj_scale: 0.6901
+  obj_roll: 0.0
+  obj_pitch: -180.0
+  obj_yaw: 15.0
+  robot_x: 10.8225
+  robot_y: -10.665
+  robot_z: 8.9465
+  robot_roll: 0.1378
+  robot_pitch: 0.1706
+  robot_yaw: 96.0627
+  depth: 9.0
+
+  # No survey bound: the scaled-down wreck is the working area now, and the
+  # fence was never exercised in a matrix -- it bounded goal selection
+  # correctly (0 of 442 goals outside it) but did not bound the vehicle, so
+  # carrying it in would add an untested variable for no measured benefit.
+  survey_radius_m: 0.0
+
+  # Map backend.
+  tsdf_octomap: 'true'
+  # Directional TSDF: one volume per view-direction bin, so a surface seen
+  # from both faces stops averaging itself away. Measured 2026-07-27 against
+  # single-field at the same voxel size: coverage +6.5%, chamfer -7.5%,
+  # precision -7.3%, missing-surface -6.6%, at no CPU cost. Note the merge
+  # takes the most solid bin, so stale voxels are stickier than under a
+  # single field -- map_rebuild is the counterweight.
+  directional_tsdf: 'true'
+  voxel_size: 0.30
+  voxel_min_weight: 5.0
+  voxel_min_solid_confidence: 0.7
+
+  # Motion and scanning.
+  motion: walloriented
+  scan_style: sweep
+  scan_sweep_deg: 180.0
+  speed_factor: 1.0
+  turn_factor: 0.2
+  thrust_boost: 'false'
+  scenario: none
+
+  # A* inflation zones.
+  hard_inflation_m: 0.7
+  inflation_m: 1.7
+  plan_inflation_m: 3.0
+
+  # Wall-oriented executor geometry.
+  # Side selection looks only within this depth slice: depth is directly
+  # observed, so geometry above or below it cannot be collided with.
+  # Explicitly off: the consecutive-goal separation is implemented but
+  # untested in a full run, so it must not ride along in this matrix.
+  min_goal_separation_m: 0.0
+  # Scan three times slower while revisiting. More sonar frames land on the
+  # structure the vehicle went back to re-observe, and the slower pass gives
+  # the pose graph and the map rebuild more time on geometry where a closure
+  # is actually possible.
+  revisit_scan_slowdown: 3.0
+  wall_z_band_m: 1.5
+  wall_orientation_offset_deg: 40.0
+  wall_orientation_lookahead_m: 2.0
+  tsdf_frontier_standoff_m: 2.5
+  wall_standoff: 2.5
+  wall_switch_goal_distance: 6.0
+  wall_switch_scan_angle: 3.14159
+  wall_switch_scan_yaw: 0.08
+  wall_path_influence: 0.7
+  wall_path_look_offset_deg: 30.0
+  wall_normal_offset_deg: 0.0
+  wall_path_heading_weight: 0.35
+
+  # Perception: realistic sonar with the near field clear at its source, and
+  # a degraded DVL as the dominant, systematic navigation error.
+  noise_profile: "realistic_no_reverb"
+  noise_profile_dvl: degraded
+  near_cutoff: -1.0
+  near_fade: -1.0
+
+  # Revisit trigger.
+  sigma_allow_xy_m: 0.12
+  sigma_allow_yaw_rad: 0.05
+  ratio_trigger: 1.0
+  ratio_resume: 0.5
+  # 0 = closure count not taken into account: a revisit ends when U_r falls
+  # below ratio_resume, not the instant one closure fires.
+  revisit_min_closures: 0
+
+runs:
+  # Floor: dead reckoning only.
+  - name: nolc
+    args: {loop_closure: 'false', revisit: 'false', map_rebuild: 'false'}
+  # Passive SLAM.
+  - name: lc
+    args: {loop_closure: 'true', revisit: 'false', map_rebuild: 'false'}
+  # Byte-identical to `lc`. Its spread against `lc` IS the noise floor, and
+  # every other arm-to-arm difference has to clear it to mean anything.
+  - name: lc_repeat
+    args: {loop_closure: 'true', revisit: 'false', map_rebuild: 'false'}
+  # Re-integration without revisit -- the cell the old ladder could not reach.
+  - name: lc_rebuild
+    args: {loop_closure: 'true', revisit: 'false', map_rebuild: 'true'}
+  # Active revisit without re-integration.
+  - name: lc_revisit
+    args: {loop_closure: 'true', revisit: 'true', map_rebuild: 'false'}
+  # Both.
+  - name: full
+    args: {loop_closure: 'true', revisit: 'true', map_rebuild: 'true'}

@@ -38,6 +38,29 @@ from slam_backend.odom_noise import odom_trans_sigma
 from slam_backend.scan_matcher import ScanMatcher
 
 
+def pose_delta(T_old: np.ndarray, T_new: np.ndarray) -> tuple:
+    """Translation (m) and rotation (rad) between two world poses."""
+    T_delta = np.linalg.inv(T_old) @ T_new
+    dist = float(np.linalg.norm(T_delta[:3, 3]))
+    angle = float(np.arccos(np.clip((np.trace(T_delta[:3, :3]) - 1) / 2, -1, 1)))
+    return dist, angle
+
+
+def worst_pose_drift(pairs) -> tuple:
+    """Largest translation/rotation over (T_old, T_new) pairs, and the count.
+
+    Returns (0.0, 0.0, 0) for an empty sequence, so a caller with nothing yet
+    corrected reads as "no drift" rather than raising."""
+    worst_dist = worst_angle = 0.0
+    n = 0
+    for T_old, T_new in pairs:
+        dist, angle = pose_delta(T_old, T_new)
+        worst_dist = max(worst_dist, dist)
+        worst_angle = max(worst_angle, angle)
+        n += 1
+    return worst_dist, worst_angle, n
+
+
 # Rows/cols of a GTSAM [rot|trans] 6x6 that hold the drifting DoF: x, y, yaw.
 XYH_INDICES = [3, 4, 2]
 
@@ -74,6 +97,21 @@ def dopt_xyh(cov_gtsam_6x6: np.ndarray) -> float:
     deflate the geometric mean rather than report drift."""
     cov_xyh = cov_gtsam_6x6[np.ix_(XYH_INDICES, XYH_INDICES)]
     return float(np.power(max(np.linalg.det(cov_xyh), 0.0), 1.0 / 3.0))
+
+
+def sigmas_xyh(cov_gtsam_6x6: np.ndarray) -> "tuple[float, float]":
+    """The same marginal as dopt_xyh(), split into the two interpretable
+    numbers the revisit threshold is stated in: a horizontal sigma in metres
+    and a yaw sigma in radians.
+
+    sigma_xy is the 2x2 XY block's det^(1/4), i.e. the radius of the circle of
+    equal area to the covariance ellipse, so sigma_xy**4 * sigma_yaw**2 is
+    dopt_xyh()**3 up to the XY-yaw cross terms.
+    """
+    cov_xyh = cov_gtsam_6x6[np.ix_(XYH_INDICES, XYH_INDICES)]
+    sigma_xy = np.power(max(np.linalg.det(cov_xyh[:2, :2]), 0.0), 0.25)
+    sigma_yaw = np.sqrt(max(cov_xyh[2, 2], 0.0))
+    return float(sigma_xy), float(sigma_yaw)
 
 
 @dataclass
@@ -125,17 +163,19 @@ class PoseGraphNode(Node):
         self.declare_parameter('world_frame', 'world_ned')
         self.declare_parameter('base_frame', 'bluerov2/base_link')
         self.declare_parameter('camera_frame', 'bluerov2/Dcam')
-        self.declare_parameter('keyframe_dist_m', 1.0)
-        self.declare_parameter('keyframe_angle_rad', 0.3)
+        # Floor is ~0.17 for both: below that the per-cell cap absorbs the extra.
+        self.declare_parameter('keyframe_dist_m', 0.5)
+        self.declare_parameter('keyframe_angle_rad', 0.2)
         # Station-keeping cap: without it a hover (or a sweep rotating in place)
         # keeps crossing keyframe_angle_rad and piles up co-located keyframes,
         # which is what makes closure candidacy degenerate to all-pairs.
         self.declare_parameter('keyframe_max_per_cell', 3)
         self.declare_parameter('keyframe_cell_radius_m', 0.5)
-        self.declare_parameter('keyframe_cell_angle_rad', 0.5)
+        self.declare_parameter('keyframe_cell_angle_rad', 0.175)   # 10 deg
         self.declare_parameter('loop_closure_enabled', True)
         self.declare_parameter('loop_closure_radius_m', 5.0)
-        self.declare_parameter('loop_closure_min_gap', 10)
+        # Counted in keyframes, so it tracks keyframe_dist_m to stay ~10 m of travel.
+        self.declare_parameter('loop_closure_min_gap', 20)
         # Per-keyframe registration budget. Candidates are thinned to at most
         # max_candidates, spread at least cluster_radius apart, so the budget is
         # not spent on many near-identical targets from one hover.
@@ -264,6 +304,9 @@ class PoseGraphNode(Node):
         self.pub_keyframe_count = self.create_publisher(Int32, '/slam/keyframe_count', 10)
         self.pub_loop_closure_count = self.create_publisher(Int32, '/slam/loop_closure_count', 10)
         self.pub_dopt = self.create_publisher(Float64, '/slam/dopt', 10)
+        # The same marginal per axis, so a reader can see which one drove D-opt.
+        self.pub_sigma_xy = self.create_publisher(Float64, '/slam/sigma_xy', 10)
+        self.pub_sigma_yaw = self.create_publisher(Float64, '/slam/sigma_yaw', 10)
         # Consistency diagnostics: unlike D-optimality these say whether the
         # assumed noise models match the residuals actually observed, and need
         # no ground truth, so they are available on a real vehicle too.
@@ -575,13 +618,16 @@ class PoseGraphNode(Node):
             if redetect:
                 self._redetect_and_apply(redetect)
 
+        # Measured against the last rebuild's baseline, not against this
+        # update: the correction the rebuild publishes is cumulative, so the
+        # threshold deciding whether to publish it has to be too. Gated on
+        # `moved` only as a cheap early-out — nothing moved, nothing changed.
         if self.map_rebuild_enabled and moved:
-            max_dist = max(dist for _, dist, _ in moved)
-            max_angle = max(angle for _, _, angle in moved)
+            max_dist, max_angle, n_drifted = self._drift_since_rebuild()
             rebuild_min_move_m = float(self.get_parameter('rebuild_min_move_m').value)
             rebuild_min_move_rad = float(self.get_parameter('rebuild_min_move_rad').value)
             if max_dist > rebuild_min_move_m or max_angle > rebuild_min_move_rad:
-                self._maybe_trigger_rebuild(max_dist, max_angle, len(moved))
+                self._maybe_trigger_rebuild(max_dist, max_angle, n_drifted)
 
         # Marginal covariance is queried only for the node just added — walking
         # every stored keyframe on each update would grow the per-keyframe cost
@@ -768,18 +814,31 @@ class PoseGraphNode(Node):
 
     def _find_moved_keyframes(self, result_values, threshold_m=0.1, threshold_rad=0.05):
         """Returns [(index, dist, angle), ...] for keyframes that shifted more
-        than the threshold; dist/angle are also read by the map-rebuild
-        trigger (a coarser threshold on the same numbers, see _add_keyframe)."""
+        than the threshold *in this update* — the trigger for re-detecting
+        loop closures on keyframes whose pose just changed.
+
+        Deliberately NOT the map-rebuild trigger: see _drift_since_rebuild."""
         moved = []
         for kf in self._keyframes:
             T_new = result_values.atPose3(kf.symbol).matrix()
-            T_delta = np.linalg.inv(kf.T_world) @ T_new
-            dist = np.linalg.norm(T_delta[:3, 3])
-            angle = np.arccos(np.clip((np.trace(T_delta[:3, :3]) - 1) / 2, -1, 1))
+            dist, angle = pose_delta(kf.T_world, T_new)
             if dist > threshold_m or angle > threshold_rad:
                 moved.append((kf.index, dist, angle))
             self._refresh_pose(kf, T_new)
         return moved
+
+    def _drift_since_rebuild(self):
+        """Worst keyframe correction accumulated since the last re-integration.
+
+        This, not the per-update movement, is what the map is stale by: the
+        rebuild publishes its corrections against _rebuild_old_poses, so the
+        trigger has to be measured against the same baseline. With loop
+        closure running continuously a metre of accumulated correction
+        arrives in centimetre increments, and no single update ever crosses
+        a 0.3 m threshold while the map drifts metres behind the graph."""
+        return worst_pose_drift(
+            (old, kf.T_world) for kf in self._keyframes
+            if (old := self._rebuild_old_poses.get(kf.index)) is not None)
 
     def _redetect_and_apply(self, moved_indices):
         """Re-run loop-closure detection for keyframes that shifted after the
@@ -880,6 +939,9 @@ class PoseGraphNode(Node):
         self.pub_loop_closure_count.publish(Int32(data=n_closures))
 
         self.pub_dopt.publish(Float64(data=dopt_xyh(cov_6x6)))
+        sigma_xy, sigma_yaw = sigmas_xyh(cov_6x6)
+        self.pub_sigma_xy.publish(Float64(data=sigma_xy))
+        self.pub_sigma_yaw.publish(Float64(data=sigma_yaw))
 
     def _publish_visualization(self):
         """Paths and markers, on a timer rather than per keyframe.

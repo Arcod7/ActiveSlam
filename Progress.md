@@ -2414,3 +2414,182 @@ reverberation term alone is worth.
 in-process on synthetic organized clouds, as in Phase 55. Setting `reverb_p` to
 zero is a modelling choice about the water, not a hardware-fitted value; like
 every other term here it is argued from acoustics rather than measured.
+
+## Phase 57 — The same near-field fix for the degraded profile
+
+**Objective**: Phase 56 cleared the near field at its source for `realistic`.
+The user asked for the same on `degraded`, which is where the spray is worst:
+turbid water sets `reverb_p: 0.06` over `realistic`'s 0.01 and pushes the band
+out to 2.5 m. Without it, a degraded-noise run could only be de-sprayed with
+`near_cutoff`/`near_fade`, which also erase the close geometry the vehicle needs
+when it approaches a wall.
+
+**What changed**: `slam/slam_backend/config/noise_degraded_no_reverb.yaml`, a
+copy of `noise_degraded.yaml` differing in exactly one field, `reverb_p: 0.0`.
+`reverb_max_m`/`reverb_weak_boost` keep their `degraded` values (unused while
+the probability is zero), `min_range_m` and `near_fade_p` stay off, and every
+nav-sensor section is `degraded` verbatim — so the profile still stresses the
+pose graph with turbid-water DVL/IMU/compass error and only the phantom returns
+are gone.
+
+Selectable everywhere a profile is: `demo.launch.py`'s `choices` list (which
+would otherwise reject it), the three nested launch descriptions, and all six
+launcher enums — as a master profile and, through `noise_profile_sonar`, as a
+sonar-only override.
+
+**Observed impact**: 39 sonar tests (3 new) pass. Measured through
+`SonarNoiseNode` in-process, 10 pings against a 6 m wall on a 67x257 organized
+cloud, near band r < 2.6 m (`degraded`'s `reverb_max_m`):
+
+| profile | near returns/ping | surface returns/ping |
+|---|---|---|
+| `degraded` | 2096.1 | 12160.3 |
+| `degraded_no_reverb` | **0.0** | **14556.9** |
+
+`degraded` sprays 5.6x what `realistic` did in Phase 56 (2096 vs 373), and the
+surface it costs is correspondingly larger: turning reverberation off returns
+2397 beams per ping to the wall, a 19.7% gain in surface returns, again because
+a fired beam reports the volume echo *instead of* its surface rather than in
+addition to it.
+
+A wall the vehicle has closed on — % of beams reporting the true range (±0.2 m):
+
+| wall range | `degraded` | `degraded_no_reverb` |
+|---|---|---|
+| 0.5 m | 90.1% | 93.4% |
+| 1.0 m | 84.7% | 92.9% |
+| 2.0 m | 89.2% | 92.3% |
+
+The dropout/grazing terms cap both columns well under `realistic`'s ~96%, as
+they should — this profile is still the worst case. It differs from `degraded`
+in one parameter, so an A/B against it isolates what reverberation alone costs
+under turbidity, the same control `realistic_no_reverb` gives for clear water.
+
+`matrix_full.yaml`'s `noise_degraded` arm now runs `degraded_no_reverb` in place
+of `degraded` — the same adoption `realistic_no_reverb` got in the geofence,
+motion-A/B and DVL-pilot matrices. The batch stays 7 configs x 5 seeds. The arm
+keeps its name, so nothing downstream of the run directories has to change, but
+`degraded` results from earlier batches are not comparable with later ones: the
+sprayed near field is gone from the input cloud.
+
+**Not verified**: no full sim run — the numbers above drive the node on
+synthetic organized clouds, as in Phases 55 and 56. `matrix_full.yaml` is
+verified only through `run_matrix.py --dry-run`, which emits
+`noise_profile:=degraded_no_reverb` for that arm; the batch itself has not been
+executed. As with every other term in these profiles, `reverb_p: 0` is a
+modelling choice about the water rather than a hardware-fitted value.
+
+## Phase 58 — The revisit trigger says which axis fired it
+
+The trigger stayed exactly what Phase 48 made it: one scalar,
+`U_r = D(Sigma)/D(Sigma_allow)`, against `ratio_trigger`. What was missing is
+that a run could not say *why* it fired. D-optimality is the geometric mean of
+the XYH marginal, so a revisit driven by heading drift and one driven by
+position drift produce the same number, and the operator sees the same
+`REVISITING` label either way — the one question a live viewer asks about an
+active-SLAM detour was the one the HUD could not answer.
+
+`pose_graph.sigmas_xyh()` splits the marginal `dopt_xyh()` already scores into
+the two numbers the threshold is stated in: a horizontal sigma in metres
+(`det^(1/4)` of the XY block, the radius of the circle of equal area to the
+covariance ellipse) and a yaw sigma in radians. `sigma_xy**4 * sigma_yaw**2`
+is `dopt**3` up to the XY-yaw cross terms, so the pair and the scalar cannot
+drift apart. Published on `/slam/sigma_xy` and `/slam/sigma_yaw`.
+
+Attribution is a factorisation, not a second threshold. With
+`r_xy = sigma_xy/sigma_allow_xy` and `r_yaw = sigma_yaw/sigma_allow_yaw`,
+`U_r = r_xy**(4/3) * r_yaw**(2/3)` exactly, so `revisit_cause()` compares those
+two weighted terms rather than the raw sigmas: position carries twice the
+exponent because XY is two axes, and yaw only wins once its exceedance passes
+the square of XY's. The cause is latched at TRIGGER and cleared on exit — the
+reason it fired, not whichever axis dominates later once the detour has already
+changed the marginal. Published on `/frontier_slam/revisit_cause` as
+`position`/`heading`, empty outside a revisit. The sigmas reach the state
+machine as optional arguments, so a missing `/slam/sigma_*` leaves the trigger
+behaviour identical and the cause `None`; a diagnostic can never suppress a
+revisit.
+
+Both viewers read the same wire strings and render them in their own house
+style — the existing `ACTIVITY_LABELS`/`ACTIVITY_TEXT` split. The RViz state
+row (`safety_gate`, and so the eval HUD panel, which mirrors the marker) reads
+`REVISITING — HEADING DRIFT`; the launcher reads
+`driving to the revisit site / — triggered by heading uncertainty`. An unknown
+or stale cause falls back to the unqualified `REVISITING` rather than reaching
+the HUD raw.
+
+The sigmas themselves are now visible in both. The RViz HUD's second line
+became `sigma xy … | sigma yaw … | D-opt … | U_r … | ANEES …`, with `KF`/`LC`
+moved up to the first — two lines, not three, because the panel's dock height
+comes from the saved RViz geometry while its width has ~2400 px to spare. The
+launcher's metrics block gained a `sigma` row above `d-opt` and, whenever
+revisit is armed, an `allow` row next to the existing `trig/res`, so the live
+pair reads directly against the pair that defines the denominator. `metrics.csv`
+gained `sigma_xy,sigma_yaw,u_ratio` and the revisit session log gained
+`sigma_xy,sigma_yaw,cause` — both appended, and every reader uses `DictReader`.
+
+**Verified**: 47 unit tests over the three changed modules pass, including the
+`U_r == r_xy**(4/3) * r_yaw**(2/3)` identity the weighting rests on, the
+`sigma_xy**4 * sigma_yaw**2 == dopt**3` round trip, correlated-XY shrinkage,
+cause latching across a trigger→closure cycle, and the no-sigma path still
+firing a plain `TRIGGER`. Full suites: 104/104 `slam_backend`, 321/324 across
+`frontier_slam`/`eval_tools`/launcher — the 3 failures are the known
+pre-existing `test_tsdf_tf_queue` ones. Launcher rows and state strings rendered
+headlessly and fit the 31-column panel; the HUD line is 79 characters.
+
+**Not verified**: no sim run — nothing here has been seen in a live RViz, so the
+HUD's two-line fit in the docked panel and the cause reported by a real trigger
+are both unconfirmed. Which axis actually dominates in this scene is therefore
+still an open question, not a result.
+
+## Phase 59 — Keyframe density doubled, and the gates counted in keyframes rescaled with it
+
+`keyframe_dist_m` 1.0 → 0.5 and `keyframe_angle_rad` 0.3 → 0.2 (~17° → ~11°):
+roughly twice the pose-graph nodes per metre travelled, and one node per 11° of
+in-place rotation. The motivation is overlap — Phase 3b already slowed path
+translation 10% (`0.315` rather than `0.35`) for the same reason, and denser
+nodes give sequential scan matching a shorter baseline to register over and
+give a return pass more old nodes to close against.
+
+Both gates now sit above a floor they cannot usefully cross. With
+`keyframe_max_per_cell` 3 over a 0.5 m / 0.5 rad cell, a straight traverse at
+spacing `d` puts `floor(0.5/d)` earlier keyframes inside the candidate's cell,
+so the cap starts rejecting at `d <= 0.5/3 ≈ 0.17`; the same arithmetic holds
+for pure rotation against `keyframe_cell_angle_rad`. Below ~0.17 m / ~0.17 rad
+the cap absorbs the extra keyframes and lowering the gates buys nothing. 0.5 /
+0.2 leaves headroom; the floor is now recorded in `STATE.md` next to the cell
+row so the next person tuning this does not walk into a silent clamp.
+
+Three gates counted in **keyframes** rather than metres were rescaled to hold
+their previous distance, because keyframe density is exactly what they are
+denominated in: `loop_closure_min_gap` 10 → 20 (`pose_graph.py`), and
+`min_keyframes` 15 → 30 with `min_index_gap` 10 → 20 (`revisit_planner.py`).
+Left alone, each would have protected half the travel it did before — a closure
+could have fired against a node ~5 m back on the same pass, coinciding with
+`loop_closure_radius_m` itself, and revisits could have triggered after half the
+mileage.
+
+That rescaling is what keeps the method comparable to Suresh et al. (2020),
+whose graph nodes are *submaps* — "an accumulation of sequential sonar scans
+over a defined time period", 100 scans each (their Table III), 20–25 nodes for a
+whole tank mission. Adjacent nodes there are already far apart by construction,
+so the paper has no index-gap parameter at all; candidacy is GloSSy saliency
+with the top N=3 kept, and a closure happens because the revisit policy
+deliberately drove back. Per-scan keyframes plus a radius search is the
+fine-grained opportunistic analogue, and `loop_closure_min_gap` is the only
+stand-in this implementation has for that submap granularity. Loop-closure
+count is also a headline metric in the paper's Tables I and II (17.4 vs 12.6 in
+simulation, 8.34 vs 12.67 real-world), so letting density inflate our count
+would have moved a reported number for a reason unrelated to the method.
+
+**Verified**: 104/104 `slam_backend` and 49/49 `frontier_slam`
+revisit/rebuild tests pass. No test asserted any of the five defaults — every
+one passes its values explicitly — so the suites exercise the new values
+without having been rewritten to expect them. Run the suites from the package
+directory: `test_odom_noise.py` loads `config/noise_realistic.yaml` by a
+CWD-relative path and its 9 tests fail from the repo root, before and after
+this change.
+
+**Not verified**: no sim run. The predicted ~2x keyframe rate, its effect on
+per-keyframe cost (`/slam/timing/keyframe_ms`, which should be watched against
+the 5 Hz cloud interval), and whether closure count and ATE move at all are
+all unmeasured. Nothing here is a result yet.

@@ -1,0 +1,77 @@
+batch_name: geofence_rebuild_validation
+duration_s: 900
+settle_s: 15
+seeds:
+- 101
+common_args:
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  mapper: tsdf
+  rviz: 'false'
+  scene: target
+  obj_mesh: shipwreck.obj
+  obj_x: 40.55
+  obj_y: -13.62
+  obj_z: 20.38
+  obj_scale: 0.1501
+  obj_roll: 0.0
+  obj_pitch: -180.0
+  obj_yaw: 15.0
+  robot_x: 20.2753
+  robot_y: 17.8031
+  robot_z: 8.9324
+  robot_roll: 0.3412
+  robot_pitch: -0.3558
+  robot_yaw: -129.5052
+  depth: 9.0
+  tsdf_octomap: 'true'
+  voxel_size: 0.2
+  voxel_min_weight: 3.0
+  voxel_min_solid_confidence: 0.6
+  motion: walloriented
+  scan_style: sweep
+  scan_sweep_deg: 180.0
+  speed_factor: 1.0
+  turn_factor: 0.2
+  thrust_boost: 'false'
+  scenario: none
+  hard_inflation_m: 0.5
+  inflation_m: 2.0
+  plan_inflation_m: 3.7
+  wall_orientation_offset_deg: 50.0
+  wall_orientation_lookahead_m: 2.0
+  tsdf_frontier_standoff_m: 1.0
+  wall_standoff: 1.5
+  wall_switch_goal_distance: 6.0
+  wall_switch_scan_angle: 3.14159
+  wall_switch_scan_yaw: 0.08
+  wall_path_influence: 0.7
+  wall_path_look_offset_deg: 30.0
+  wall_normal_offset_deg: 0.0
+  wall_path_heading_weight: 0.35
+  noise_profile: realistic_no_reverb
+  near_cutoff: -1.0
+  near_fade: -1.0
+  sigma_allow_xy_m: 0.1
+  sigma_allow_yaw_rad: 0.05
+  ratio_trigger: 1.0
+  ratio_resume: 0.5
+  noise_profile_dvl: degraded
+  survey_radius_m: 60.0
+runs:
+- name: lc
+  args:
+    loop_closure: 'true'
+    revisit: 'false'
+    map_rebuild: 'false'
+- name: lc_rebuild
+  args:
+    loop_closure: 'true'
+    revisit: 'false'
+    map_rebuild: 'true'
+- name: full
+  args:
+    loop_closure: 'true'
+    revisit: 'true'
+    map_rebuild: 'true'

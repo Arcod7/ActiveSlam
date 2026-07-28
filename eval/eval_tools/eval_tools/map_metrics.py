@@ -19,6 +19,10 @@ nearest-neighbour KD-tree:
   coverage = fraction of GT surface points with a belief neighbour within
              tsdf_coverage_radius_m
 
+Both backends also report explored (what the sonar observed: distinct GT
+voxels, or known GT cells) and correct = explored * coverage. Coverage alone
+rewards observing less, so the absolute extent travels with it.
+
 Appends flushed-per-write rows to <output_dir>/map_metrics.csv (blank fields
 for the metric family that doesn't apply to the configured backend).
 """
@@ -86,9 +90,24 @@ def _occupancy_metrics(grid_belief: OccupancyGrid, grid_gt: OccupancyGrid, occ_t
     known_b = sub_b >= 0
     known_g = sub_g >= 0
     n_known_g = np.count_nonzero(known_g)
-    coverage = (np.count_nonzero(known_b & known_g) / n_known_g) if n_known_g > 0 else float('nan')
+    n_correct = np.count_nonzero(known_b & known_g)
+    coverage = (n_correct / n_known_g) if n_known_g > 0 else float('nan')
 
-    return coverage, iou_occ, sub_b.size, sub_g.size
+    return coverage, iou_occ, sub_b.size, sub_g.size, n_known_g, n_correct
+
+
+def _explored_voxels(pts: np.ndarray, voxel_size: float) -> int:
+    """Distinct voxels in the ground-truth cloud: what the sonar observed.
+
+    Counted on the full cloud, before subsampling — coverage is a fraction of
+    this, so an arm can raise coverage simply by observing less, and the
+    absolute quantity has to be carried alongside it. Mirrors
+    scripts/plot_ablation.py's offline `explored`, which bins the saved GT
+    cloud the same way, so the live number and the ablation table agree.
+    """
+    if len(pts) == 0 or voxel_size <= 0.0:
+        return 0
+    return len(np.unique(np.floor(pts / voxel_size).astype(np.int32), axis=0))
 
 
 def _subsample(pts: np.ndarray, max_points: int, rng: np.random.Generator) -> np.ndarray:
@@ -99,9 +118,10 @@ def _subsample(pts: np.ndarray, max_points: int, rng: np.random.Generator) -> np
 
 
 def _tsdf_metrics(pts_belief: np.ndarray, pts_gt: np.ndarray, coverage_radius_m: float,
-                   max_points: int, rng: np.random.Generator):
+                   max_points: int, rng: np.random.Generator, voxel_size: float = 0.2):
     if len(pts_belief) == 0 or len(pts_gt) == 0:
         return None
+    explored = _explored_voxels(pts_gt, voxel_size)
     pts_belief = _subsample(pts_belief, max_points, rng)
     pts_gt = _subsample(pts_gt, max_points, rng)
 
@@ -114,8 +134,12 @@ def _tsdf_metrics(pts_belief: np.ndarray, pts_gt: np.ndarray, coverage_radius_m:
     rmse_b2g = float(np.sqrt(np.mean(d_b2g ** 2)))
     rmse_g2b = float(np.sqrt(np.mean(d_g2b ** 2)))
     coverage = float(np.mean(d_g2b < coverage_radius_m))
+    # Coverage is a fraction of what was observed, so the absolute size of the
+    # correctly-placed surface is the other half of the reading.
+    correct = explored * coverage
 
-    return coverage, chamfer, rmse_b2g, rmse_g2b, len(pts_belief), len(pts_gt)
+    return (coverage, chamfer, rmse_b2g, rmse_g2b, len(pts_belief), len(pts_gt),
+            explored, correct)
 
 
 class MapMetricsNode(Node):
@@ -128,6 +152,9 @@ class MapMetricsNode(Node):
         self.declare_parameter('occ_threshold', 50)
         self.declare_parameter('tsdf_coverage_radius_m', 0.4)
         self.declare_parameter('max_points', 20000)
+        # Bin the GT cloud at the resolution the run mapped at: a run at 0.15 m
+        # counted on a 0.2 m grid under-reports its extent.
+        self.declare_parameter('voxel_size', 0.2)
 
         out_dir = self.get_parameter('output_dir').value
         if not out_dir:
@@ -143,13 +170,19 @@ class MapMetricsNode(Node):
         self._metrics_file = open(os.path.join(out_dir, 'map_metrics.csv'), 'w')
         self._metrics_file.write(
             't,backend,coverage,iou_occ,chamfer,rmse_belief_to_gt,rmse_gt_to_belief,'
-            'n_belief,n_gt\n')
+            'n_belief,n_gt,explored,correct\n')
 
         # Live feed for the launcher's metrics panel; accuracy is IoU under
         # octomap and belief->GT RMSE under TSDF, so the reader must know the
         # backend to label it.
         self.pub_coverage = self.create_publisher(Float64, '/eval/map_coverage', 10)
         self.pub_accuracy = self.create_publisher(Float64, '/eval/map_accuracy', 10)
+        # Chamfer separately from accuracy: it is the one map number that means
+        # the same thing across runs, and the HUD shows it beside coverage.
+        self.pub_chamfer = self.create_publisher(Float64, '/eval/map_chamfer', 10)
+        # Correctly-mapped extent: coverage times what was observed, so a run
+        # cannot look good on the HUD by having seen almost nothing.
+        self.pub_correct = self.create_publisher(Float64, '/eval/map_correct', 10)
 
         self._latest_belief_grid = None
         self._latest_gt_grid = None
@@ -197,13 +230,15 @@ class MapMetricsNode(Node):
                                      self._occ_threshold)
         if result is None:
             return
-        coverage, iou_occ, n_belief, n_gt = result
+        coverage, iou_occ, n_belief, n_gt, explored, correct = result
         t = self.get_clock().now().nanoseconds * 1e-9
         self._metrics_file.write(
-            f'{t:.6f},octomap,{coverage:.6f},{iou_occ:.6f},,,,{n_belief},{n_gt}\n')
+            f'{t:.6f},octomap,{coverage:.6f},{iou_occ:.6f},,,,{n_belief},{n_gt},'
+            f'{explored},{correct:.1f}\n')
         self._metrics_file.flush()
         self.pub_coverage.publish(Float64(data=float(coverage)))
         self.pub_accuracy.publish(Float64(data=float(iou_occ)))
+        self.pub_correct.publish(Float64(data=float(correct)))
 
     def _compute_tsdf_metrics(self):
         if self._latest_belief_cloud is None or self._latest_gt_cloud is None:
@@ -212,18 +247,23 @@ class MapMetricsNode(Node):
             self._latest_belief_cloud, field_names=['x', 'y', 'z'], skip_nans=True).astype(np.float64)
         pts_gt = point_cloud2.read_points_numpy(
             self._latest_gt_cloud, field_names=['x', 'y', 'z'], skip_nans=True).astype(np.float64)
+        # Re-read per cycle: a voxel_size edit restarts the mapper, not this
+        # node (that would open a second run directory), so it arrives by push.
+        voxel_size = float(self.get_parameter('voxel_size').value)
         result = _tsdf_metrics(pts_belief, pts_gt, self._coverage_radius_m,
-                                self._max_points, self._rng)
+                                self._max_points, self._rng, voxel_size)
         if result is None:
             return
-        coverage, chamfer, rmse_b2g, rmse_g2b, n_belief, n_gt = result
+        coverage, chamfer, rmse_b2g, rmse_g2b, n_belief, n_gt, explored, correct = result
         t = self.get_clock().now().nanoseconds * 1e-9
         self._metrics_file.write(
             f'{t:.6f},tsdf,{coverage:.6f},,{chamfer:.6f},{rmse_b2g:.6f},{rmse_g2b:.6f},'
-            f'{n_belief},{n_gt}\n')
+            f'{n_belief},{n_gt},{explored},{correct:.1f}\n')
         self._metrics_file.flush()
         self.pub_coverage.publish(Float64(data=float(coverage)))
         self.pub_accuracy.publish(Float64(data=float(rmse_b2g)))
+        self.pub_chamfer.publish(Float64(data=float(chamfer)))
+        self.pub_correct.publish(Float64(data=float(correct)))
 
     def destroy_node(self):
         self._metrics_file.close()

@@ -1,0 +1,55 @@
+name: degraded_no_reverb
+# `degraded` with volume reverberation off: turbid-water range/dropout/multipath
+# errors kept in full, but no phantom near-field returns. Removes the spray at
+# its source rather than gating it after the fact, so unlike near_cutoff nothing
+# real is lost. Every other sonar term, and every nav-sensor section, is
+# `degraded` verbatim.
+seed: -1
+pressure:
+  sigma_depth_m: 0.05
+  bias_m: 0.02
+  publish_rate_hz: 10.0
+imu:                         # degraded gyro-integrated attitude
+  sigma_roll_rad: 0.05
+  sigma_pitch_rad: 0.05
+  sigma_yaw_rad: 0.05        # ~2.9° short-term gyro attitude
+  gyro_bias_drift_rad_s: 0.001
+  publish_rate_hz: 50.0
+compass:                     # magnetic interference dominates absolute heading
+  sigma_yaw_rad: 0.20        # ~11.5°
+  bias_drift_rad_s: 0.001
+  publish_rate_hz: 10.0
+dvl:
+  sigma_pct: 0.03            # 3% — degraded bottom-lock
+  sigma_floor_m_s: 0.005
+  bias_m_s: 0.005
+  scale_error_pct: 0.01      # 1% constant scale error
+  publish_rate_hz: 10.0
+sonar:                       # WaterLinked Sonar 3D-15, turbid/degraded conditions
+  range_quant_m: 0.0015      # range resolution is a hardware constant
+  range_sigma0_m: 0.02
+  range_sigma_k: 0.005       # speckle term, ~0.5% of range (turbidity)
+  lat_sigma_h_per_m: 0.006   # full tan(0.35 deg beam separation)
+  lat_sigma_v_per_m: 0.010   # full tan(0.60 deg beam separation)
+  dropout_p0: 0.10
+  dropout_p_range: 0.20
+  dropout_p_grazing: 0.60    # specular loss, worse in turbid water
+  corr_length_px: 10.0       # larger dropout patches
+  corr_rho_time: 0.85
+  range_corr_frac: 0.7
+  sos_scale_error_pct: 0.015 # uncalibrated speed of sound
+  outlier_p: 0.01
+  outlier_range_min_m: 0.3
+  outlier_range_max_m: 5.0
+  argmax_window_px: 5        # coarser range image, more edge bleed
+  argmax_beam_sigma_px: 2.0
+  lat_sigma_beam_frac: 0.8
+  reverb_p: 0.0             # off: the near-field spray this profile exists to avoid
+  reverb_max_m: 2.5         # unused while reverb_p is 0; kept as the `degraded` value
+  reverb_weak_boost: 5.0    # likewise
+  multipath_p: 0.15
+  multipath_grazing_exp: 1.0
+  min_range_m: 0.0          # no near-field gate: close geometry is kept, not cut
+  near_fade_p: 0.0          # soft gate; override per-run with the near_fade launch arg
+  near_fade_range_m: 2.6    # only consulted if near_fade is turned on
+  near_fade_exp: 1.0

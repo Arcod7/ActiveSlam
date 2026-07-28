@@ -23,3 +23,8 @@ sim/world/data/obj/wave_tank_freecad.obj
 # Saved reference octomaps (octomap_saver_node) from ground-truth runs — same
 # "generated local artifact, not source" reasoning as shipwreck.obj above.
 eval/ground_truth/
+
+# plot_ablation.py / map_snapshot.py output. Regenerated from a batch dir with
+# the scripts in eval/eval_tools/scripts; the batches themselves live in the
+# untracked eval/runs/.
+eval/figures/

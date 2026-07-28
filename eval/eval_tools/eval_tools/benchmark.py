@@ -20,6 +20,11 @@ NEES pairs each keyframe's reported covariance with the true error over the
 same XYH DoF that feed D-optimality, so it measures whether the revisit
 trigger's input is calibrated. A consistent estimator averages NEES ~= 3
 (chi-square, 3 DoF); ANEES >> 3 means overconfident, << 3 conservative.
+
+Two ANEES columns are reported. ``anees`` is the textbook mean; ``anees_robust``
+is the median-based estimator of the same quantity, and is what the RViz HUD
+shows and what the end-of-run verdict is taken from, because the mean is not
+robust to a single degenerate reported covariance.
 """
 import os
 import bisect
@@ -32,7 +37,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Point, PoseWithCovarianceStamped
-from std_msgs.msg import Float64, Int32, ColorRGBA
+from std_msgs.msg import Float64, Int32, ColorRGBA, String
 from visualization_msgs.msg import Marker, MarkerArray
 from scipy.spatial.transform import Rotation
 
@@ -40,9 +45,13 @@ from eval_tools.run_paths import new_run_dir
 from eval_tools.tum_writer import TUMWriter
 from eval_tools.consistency import (
     XYH_ROS_INDICES, NEES_DOF, xyh_tangent_error, normalised_squared_error,
-    anees_bounds, classify_anees)
+    anees_bounds, classify_anees, covariance_rejection, robust_anees)
 
 PoseSample = namedtuple('PoseSample', ['t', 'pos', 'quat'])
+
+# Above this a single sample dominates the running mean, so record what produced
+# it rather than leaving the spike to be reconstructed from the CSV afterwards.
+NEES_OUTLIER_LOG_THRESHOLD = 1e3
 
 
 def _stamp_to_float(stamp) -> float:
@@ -52,6 +61,14 @@ def _stamp_to_float(stamp) -> float:
 def _fmt(value, digits: int = 6) -> str:
     """CSV cell: empty when the signal has not been published yet."""
     return '' if value is None else f'{value:.{digits}f}'
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    """HUD clock: mm:ss, growing to h:mm:ss only once a run passes the hour."""
+    total = int(seconds)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f'{hours}:{minutes:02d}:{secs:02d}' if hours else f'{minutes:02d}:{secs:02d}'
 
 
 def _odom_to_sample(msg: Odometry) -> PoseSample:
@@ -119,30 +136,65 @@ class BenchmarkNode(Node):
         # Consistency columns update at keyframe rate and are carried forward on
         # the intervening odometry-rate rows, the same way dopt already is.
         self._metrics_file = open(os.path.join(out_dir, 'metrics.csv'), 'w')
+        # kf_count, revisit_state, revisit_last_exit and cache_scans exist because
+        # analysing the 2026-07-27 matrix needed all four and none was recorded:
+        # they had to be recovered by grepping launch.log and timestamp-matching
+        # the per-node session CSVs, which only works while those files survive.
         self._metrics_file.write(
             't,abs_error,ate,rpe_trans,rpe_rot_deg,dopt,nees,anees,nis,chi2_norm,'
-            'lc_count,rebuild_count,revisit_count\n')
+            'lc_count,rebuild_count,revisit_count,anees_robust,nees_rejected,'
+            'sigma_xy,sigma_yaw,u_ratio,kf_count,revisit_state,revisit_last_exit,'
+            'cache_scans,icp_calls\n')
 
         self._matched_pairs = []   # time-ordered [(gt_sample, est_sample), ...] for RPE
         self._sq_errors = []       # running ATE accumulator
         self._nees_samples = []    # running ANEES accumulator, one per keyframe
+        self._nees_rejected = 0    # keyframes whose covariance failed the degeneracy gate
         self._latest_nees = None
         self._latest_anees = None
+        self._latest_anees_robust = None
         self._latest_nis = None         # cached from /slam/nis, per loop closure
         self._latest_chi2_norm = None   # cached from /slam/chi2_normalized
         self._latest_dopt = None   # cached from pose_graph.py's /slam/dopt
+        # The same marginal per axis, plus the ratio the revisit trigger reads:
+        # D-opt alone says how uncertain, not in which DoF nor against what.
+        self._latest_sigma_xy = None
+        self._latest_sigma_yaw = None
+        self._latest_u_ratio = None
         self._latest_kf_count = 0
+        # '' until revisit_planner runs at all, so a non-revisit arm is visibly
+        # blank rather than falsely 'exploring'.
+        self._latest_revisit_state = ''
+        self._latest_revisit_exit = ''
+        self._latest_cache_scans = ''
+        # Registrations attempted per keyframe. Against lc_count this gives the
+        # closure acceptance rate, which is what distinguishes "few candidates
+        # offered" from "many offered and rejected" -- unanswerable in the
+        # 2026-07-27 matrix because only accepted closures were recorded.
+        self._latest_icp_calls = ''
         self._latest_lc_count = 0
         self._latest_rebuild_count = 0
         self._latest_revisit_count = 0
         self._latest_slam_odom: PoseSample | None = None
         self._last_scored_t: float | None = None
+        # Mirrored from map_metrics.py so the HUD carries the map numbers next to
+        # the pose ones; that node owns them and writes its own CSV.
+        self._latest_map_coverage = None
+        self._latest_map_correct = None
+        self._latest_map_chamfer = None
+        # Wall clock, not the ROS clock: this is "how long has this run been up",
+        # which must stay right even if a sim clock jumps or replays.
+        self._start_monotonic = pytime.monotonic()
 
         gt_topic = self.get_parameter('gt_topic').value
         self.create_subscription(Odometry, gt_topic, self._gt_cb, 50)
         self.create_subscription(Odometry, '/slam/sensors/dead_reckoned_odom', self._dr_cb, 10)
         self.create_subscription(Odometry, '/slam/odometry', self._slam_odom_cb, 10)
         self.create_subscription(Float64, '/slam/dopt', self._dopt_cb, 10)
+        self.create_subscription(Float64, '/slam/sigma_xy', self._sigma_xy_cb, 10)
+        self.create_subscription(Float64, '/slam/sigma_yaw', self._sigma_yaw_cb, 10)
+        self.create_subscription(Float64, '/frontier_slam/uncertainty_ratio',
+                                 self._u_ratio_cb, 10)
         self.create_subscription(Float64, '/slam/nis', self._nis_cb, 10)
         self.create_subscription(Float64, '/slam/chi2_normalized', self._chi2_cb, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/slam/pose', self._slam_pose_cb, 10)
@@ -150,6 +202,18 @@ class BenchmarkNode(Node):
         self.create_subscription(Int32, '/slam/loop_closure_count', self._lc_count_cb, 10)
         self.create_subscription(Int32, '/slam/rebuild_count', self._rebuild_count_cb, 10)
         self.create_subscription(Int32, '/frontier_slam/revisit_count', self._revisit_count_cb, 10)
+        self.create_subscription(String, '/frontier_slam/revisit_state',
+                                 self._revisit_state_cb, 10)
+        self.create_subscription(String, '/frontier_slam/revisit_exit',
+                                 self._revisit_exit_cb, 10)
+        # Cache occupancy against tsdf_mapper's cache_max_scans: a map rebuild is
+        # lossless only while the cache still spans the whole run, so this column
+        # is what distinguishes a sound re-integration from a truncating one.
+        self.create_subscription(Int32, '/tsdf/cache_scans', self._cache_scans_cb, 10)
+        self.create_subscription(Int32, '/slam/timing/icp_calls', self._icp_calls_cb, 10)
+        self.create_subscription(Float64, '/eval/map_coverage', self._map_coverage_cb, 10)
+        self.create_subscription(Float64, '/eval/map_chamfer', self._map_chamfer_cb, 10)
+        self.create_subscription(Float64, '/eval/map_correct', self._map_correct_cb, 10)
 
         self.pub_abs_error = self.create_publisher(Float64, '/eval/abs_error', 10)
         self.pub_ate = self.create_publisher(Float64, '/eval/ate', 10)
@@ -158,6 +222,7 @@ class BenchmarkNode(Node):
         self.pub_dr_error = self.create_publisher(Float64, '/eval/dr_error', 10)
         self.pub_nees = self.create_publisher(Float64, '/eval/nees', 10)
         self.pub_anees = self.create_publisher(Float64, '/eval/anees', 10)
+        self.pub_anees_robust = self.create_publisher(Float64, '/eval/anees_robust', 10)
         self.pub_markers = self.create_publisher(MarkerArray, '/eval/markers', 10)
         self.pub_markers_live = self.create_publisher(MarkerArray, '/eval/markers_live', 10)
 
@@ -167,6 +232,15 @@ class BenchmarkNode(Node):
 
     def _dopt_cb(self, msg: Float64):
         self._latest_dopt = msg.data
+
+    def _sigma_xy_cb(self, msg: Float64):
+        self._latest_sigma_xy = msg.data
+
+    def _sigma_yaw_cb(self, msg: Float64):
+        self._latest_sigma_yaw = msg.data
+
+    def _u_ratio_cb(self, msg: Float64):
+        self._latest_u_ratio = msg.data
 
     def _nis_cb(self, msg: Float64):
         self._latest_nis = msg.data
@@ -185,6 +259,14 @@ class BenchmarkNode(Node):
         cov = np.asarray(msg.pose.covariance).reshape(6, 6)
         cov_xyh = cov[np.ix_(XYH_ROS_INDICES, XYH_ROS_INDICES)]
 
+        rejection = covariance_rejection(cov_xyh)
+        if rejection is not None:
+            self._nees_rejected += 1
+            self.get_logger().warn(
+                f'NEES sample dropped at t={t:.3f}, degenerate covariance: {rejection}',
+                throttle_duration_sec=10.0)
+            return
+
         err = xyh_tangent_error(gt.pos, gt.quat,
                                 np.array([p.x, p.y, p.z]),
                                 np.array([q.x, q.y, q.z, q.w]))
@@ -192,14 +274,43 @@ class BenchmarkNode(Node):
         if sample is None:
             return
 
+        if sample > NEES_OUTLIER_LOG_THRESHOLD:
+            self.get_logger().warn(
+                f'NEES outlier {sample:.3e} at t={t:.3f}: '
+                f'err_xyh={np.array2string(err, precision=5)} '
+                f'cov_xyh={np.array2string(cov_xyh.ravel(), precision=9)}')
+
         self._nees_samples.append(sample)
         self._latest_nees = sample
         self._latest_anees = float(np.mean(self._nees_samples))
+        self._latest_anees_robust = robust_anees(self._nees_samples)
         self.pub_nees.publish(Float64(data=self._latest_nees))
         self.pub_anees.publish(Float64(data=self._latest_anees))
+        self.pub_anees_robust.publish(Float64(data=self._latest_anees_robust))
 
     def _kf_count_cb(self, msg: Int32):
         self._latest_kf_count = msg.data
+
+    def _revisit_state_cb(self, msg: String):
+        self._latest_revisit_state = msg.data
+
+    def _revisit_exit_cb(self, msg: String):
+        self._latest_revisit_exit = msg.data
+
+    def _cache_scans_cb(self, msg: Int32):
+        self._latest_cache_scans = msg.data
+
+    def _icp_calls_cb(self, msg: Int32):
+        self._latest_icp_calls = msg.data
+
+    def _map_coverage_cb(self, msg: Float64):
+        self._latest_map_coverage = msg.data
+
+    def _map_correct_cb(self, msg: Float64):
+        self._latest_map_correct = msg.data
+
+    def _map_chamfer_cb(self, msg: Float64):
+        self._latest_map_chamfer = msg.data
 
     def _lc_count_cb(self, msg: Int32):
         self._latest_lc_count = msg.data
@@ -254,7 +365,12 @@ class BenchmarkNode(Node):
             f'{_fmt(rpe_trans)},{_fmt(rpe_rot_deg)},{_fmt(self._latest_dopt, 8)},'
             f'{_fmt(self._latest_nees)},{_fmt(self._latest_anees)},'
             f'{_fmt(self._latest_nis)},{_fmt(self._latest_chi2_norm)},'
-            f'{self._latest_lc_count},{self._latest_rebuild_count},{self._latest_revisit_count}\n')
+            f'{self._latest_lc_count},{self._latest_rebuild_count},{self._latest_revisit_count},'
+            f'{_fmt(self._latest_anees_robust)},{self._nees_rejected},'
+            f'{_fmt(self._latest_sigma_xy, 6)},{_fmt(self._latest_sigma_yaw, 6)},'
+            f'{_fmt(self._latest_u_ratio, 4)},{self._latest_kf_count},'
+            f'{self._latest_revisit_state},{self._latest_revisit_exit},'
+            f'{self._latest_cache_scans},{self._latest_icp_calls}\n')
         self._metrics_file.flush()
 
         self._publish_eval_markers(gt, sample, abs_error, ate, rpe_trans, rpe_rot_deg)
@@ -296,14 +412,51 @@ class BenchmarkNode(Node):
         rpe_t_str = f'{rpe_trans:.2f} m' if rpe_trans is not None else 'n/a'
         rpe_r_str = f'{rpe_rot_deg:.1f} deg' if rpe_rot_deg is not None else 'n/a'
         dopt_str = f'{self._latest_dopt:.4f}' if self._latest_dopt is not None else 'n/a'
-        anees_str = (f'{np.mean(self._nees_samples):.1f}'
+        # The robust estimator, unlabelled: on a HUD the number has to be the one
+        # worth acting on. The raw mean stays on /eval/anees and in the CSV.
+        anees_str = (f'{self._latest_anees_robust:.1f}'
                      if self._nees_samples else 'n/a')
+        rejected_str = (f'  |  NEES rej {self._nees_rejected}'
+                        if self._nees_rejected else '')
+        # D-opt is the two sigmas rolled into one scalar, so it sits next to
+        # them: the sigmas say which DoF, U_r says how close that is to firing
+        # a revisit.
+        sigma_xy_str = (f'{self._latest_sigma_xy:.3f} m'
+                        if self._latest_sigma_xy is not None else 'n/a')
+        sigma_yaw_str = (f'{self._latest_sigma_yaw:.3f} rad'
+                         if self._latest_sigma_yaw is not None else 'n/a')
+        u_ratio_str = (f'{self._latest_u_ratio:.2f}'
+                       if self._latest_u_ratio is not None else 'n/a')
+        # Own section: these score the map, not the trajectory, and they arrive
+        # from map_metrics.py at its own slower period. Absent until that node
+        # has both maps, so an octomap run (no chamfer) shows the rows it has.
+        # Correct leads: coverage is a fraction of what was observed, so read
+        # alone it rewards a run that saw almost nothing.
+        map_rows = []
+        if self._latest_map_correct is not None:
+            map_rows.append(f'Correct {self._latest_map_correct:,.0f} vox')
+        if self._latest_map_coverage is not None:
+            map_rows.append(f'Coverage {self._latest_map_coverage:.1%}')
+        if self._latest_map_chamfer is not None:
+            map_rows.append(f'Chamfer {self._latest_map_chamfer:.3f} m')
+        map_section = ('\n' + '\n'.join(map_rows) + '\n') if map_rows else ''
         # Spaced pipes and spaced units: the HUD panel renders this monospaced.
+        # Grouped one concern per line — trajectory error, the two sigmas, then
+        # the scalars derived from them — and graph counts set apart, because
+        # they are a size not an error. The panel docks in the narrow left
+        # column, so line width is the budget and height is what there is to
+        # spare; the reverse of the two-line layout this replaced.
         text.text = (
-            f'err {abs_error:.2f} m  |  ATE {ate:.2f} m  |  '
+            f'err {abs_error:.2f} m  |  ATE {ate:.2f} m\n'
             f'RPE {rpe_t_str} / {rpe_r_str}\n'
-            f'KF {self._latest_kf_count}  |  LC {self._latest_lc_count}  |  '
-            f'D-opt {dopt_str}  |  ANEES {anees_str}'
+            f'sigma xy {sigma_xy_str}  |  sigma yaw {sigma_yaw_str}\n'
+            f'D-opt {dopt_str}  |  U_r {u_ratio_str}  |  '
+            f'ANEES {anees_str}{rejected_str}\n'
+            f'{map_section}'
+            f'\n'
+            f'Key Frames {self._latest_kf_count}  |  '
+            f'Loop Closures {self._latest_lc_count}\n'
+            f'Run time {_fmt_elapsed(pytime.monotonic() - self._start_monotonic)}'
         )
         markers.markers.append(text)
 
@@ -410,10 +563,19 @@ class BenchmarkNode(Node):
             self.get_logger().info('No NEES samples: /slam/pose never paired with GT.')
             return
         anees = float(np.mean(self._nees_samples))
+        robust = robust_anees(self._nees_samples)
         lo, hi = anees_bounds(n)
+        # Classified on the robust value: the mean is the statistic a single
+        # degenerate covariance destroys, so it is reported but not judged on.
         self.get_logger().info(
-            f'ANEES {anees:.2f} over {n} keyframes, {NEES_DOF} DoF — '
-            f'95% acceptance [{lo:.2f}, {hi:.2f}] — {classify_anees(anees, n)}')
+            f'ANEES {robust:.2f} (robust) over {n} keyframes, {NEES_DOF} DoF — '
+            f'95% acceptance (mean-based, narrower than the median estimator warrants) '
+            f'[{lo:.2f}, {hi:.2f}] — {classify_anees(robust, n)}')
+        self.get_logger().info(f'ANEES {anees:.2f} (raw mean, outlier-sensitive)')
+        if self._nees_rejected:
+            self.get_logger().warn(
+                f'{self._nees_rejected} keyframes excluded from ANEES on a '
+                f'degenerate reported covariance.')
 
     def destroy_node(self):
         self._log_consistency_summary()

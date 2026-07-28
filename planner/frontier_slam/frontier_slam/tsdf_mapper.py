@@ -36,6 +36,11 @@ Published topics:
                              saturation = confidence it is a wall (TSDF depth):
                                           pale = least-confident shown voxel,
                                           vivid = deep solid
+                           voxels inside the planning band — the Z slice
+                           /projected_map is built from — are tinted blue over
+                           that colour, so the height the planner actually
+                           reasons over is visible against the map it ignores.
+                           Only available with publish_projected_map:=true.
   /tsdf/occupied_voxels  (sensor_msgs/PointCloud2) confidently solid TSDF
                            voxel centres for collision-aware goal validation
   /projected_map         (nav_msgs/OccupancyGrid) 2-D planning map for the
@@ -76,6 +81,12 @@ from scipy.spatial.transform import Rotation, Slerp
 from vdbfusion import VDBVolume
 
 
+# Blue-ish tint blended over the voxel colour inside the planning band —
+# keep in sync with the "Map voxels (TSDF)" group in legend_rviz.
+BAND_TINT     = np.array([0.05, 0.20, 1.00], dtype=np.float32)
+BAND_TINT_MIX = 0.5   # 1.0 would erase the weight/confidence shading
+
+
 class TSDFMapper(Node):
     """Threading: ingest (cloud + TF drain + replay), viz (surface + voxels) and
     stats each own a MutuallyExclusiveCallbackGroup and run under a
@@ -94,13 +105,20 @@ class TSDFMapper(Node):
         self.declare_parameter('world_frame',      'world_ned')
         self.declare_parameter('cloud_frame',      'bluerov2/Dcam')
         self.declare_parameter('voxel_size',       0.2)
-        self.declare_parameter('trunc_distance',   0.6)    # metres, ≥ 3× voxel_size
+        # <= 0 resolves to 3x voxel_size, the minimum VDBFusion needs for a
+        # usable gradient. Set it explicitly to map structure thinner than
+        # 2x trunc, which a single signed field cannot hold (see
+        # directional_tsdf).
+        self.declare_parameter('trunc_distance',   0.0)
         self.declare_parameter('space_carving',    True)
+        # WIP: one volume per view-direction bin instead of one shared field,
+        # so a surface seen from both faces stops averaging itself away.
+        self.declare_parameter('directional_tsdf', False)
         self.declare_parameter('min_weight',       2.0)
         self.declare_parameter('voxel_min_weight', 10.0)   # hide voxels observed fewer times
         self.declare_parameter('voxel_min_solid_confidence', 0.80)  # see module docstring
         self.declare_parameter('normal_every',     10)
-        self.declare_parameter('max_voxels_viz',   40_000)
+        self.declare_parameter('max_voxels_viz',   100_000)
         self.declare_parameter('show_free_voxels', False)
         # Discard points beyond the simulated Sonar 3D-15 beam range before
         # integration. The depth-camera proxy may produce farther off-axis
@@ -178,18 +196,23 @@ class TSDFMapper(Node):
         voxel_size         = float(self.get_parameter('voxel_size').value)
         trunc              = float(self.get_parameter('trunc_distance').value)
         space_carving      = bool(self.get_parameter('space_carving').value)
+        directional        = bool(self.get_parameter('directional_tsdf').value)
+
+        if trunc <= 0.0:
+            trunc = 3.0 * voxel_size
 
         self._voxel_size = voxel_size
         self._trunc      = trunc
         self._space_carving = space_carving
+        self._directional = directional
         # solid-confidence = (trunc - d) / (2*trunc) >= voxel_min_solid_confidence
         #   <=>  d <= trunc * (1 - 2*voxel_min_solid_confidence)
         self._voxel_max_d = trunc * (1.0 - 2.0 * self._voxel_min_solid_confidence)
-        self._volume     = VDBVolume(voxel_size, trunc, space_carving=space_carving)
-        # Every VDB access is serialised on this; the volume itself is not
-        # thread-safe and a rebuild swaps the object outright.
+        self._volumes    = self._new_volumes()
+        # Every VDB access is serialised on this; the volumes themselves are not
+        # thread-safe and a rebuild swaps them outright.
         self._volume_lock = threading.Lock()
-        self._pyopenvdb = bool(self._volume.pyopenvdb_support_enabled)
+        self._pyopenvdb = bool(self._volumes[0].pyopenvdb_support_enabled)
         # Bumped on every integrate/replay/reset so viz can skip unchanged maps.
         self._map_revision = 0
 
@@ -198,7 +221,8 @@ class TSDFMapper(Node):
                 'VDBFusion built without pyopenvdb — voxel visualisation disabled')
 
         self.get_logger().info(
-            f'TSDF  voxel={voxel_size}m  trunc={trunc}m  space_carving={space_carving}')
+            f'TSDF  voxel={voxel_size}m  trunc={trunc}m  space_carving={space_carving}'
+            + (f'  directional={len(self._volumes)} bins (WIP)' if directional else ''))
 
         # Thresholds that filter what the map publishes rather than what it
         # stores, so they can move without touching the grid. Settable at
@@ -278,6 +302,7 @@ class TSDFMapper(Node):
                 'Map rebuild consumer enabled: will reset+re-integrate cached scans '
                 'on a validated /slam/rebuild/path_old + path_new pair')
 
+        self._cache_scans_pub = self.create_publisher(Int32, '/tsdf/cache_scans', 10)
         self._cloud_pub   = self.create_publisher(PointCloud2, '/tsdf/surface_cloud',   1)
         self._normals_pub = self.create_publisher(MarkerArray, '/tsdf/surface_normals',  1)
         self._normals_cloud_pub = self.create_publisher(
@@ -451,6 +476,42 @@ class TSDFMapper(Node):
             f'viz: surface={self._surface_gate.last_s:.2f}s '
             f'voxels={self._voxels_gate.last_s:.2f}s')
 
+    # ────────────────────────────────────────────────────────────────────
+    # Directional TSDF (WIP)
+    #
+    # A TSDF's sign is defined by the side the sensor observed a surface from,
+    # so a structure thinner than 2x trunc that is seen from both faces writes
+    # opposing fields into the same voxels. VDBFusion weight-averages them, the
+    # zero crossing flattens to ~0 and the surface dissolves into speckle.
+    #
+    # Binning each ray by its dominant view axis keeps the two faces in separate
+    # volumes, which never average; reads merge by picking the most solid bin
+    # per voxel rather than averaging. Splietker & Behnke (IROS 2019) bin by
+    # surface normal — view direction is the cheap proxy, since a face is only
+    # ever observed from the side it points at.
+    #
+    # Not yet validated against the ground-truth map: costs 6 grid walks per viz
+    # cycle, and the merge biases free/solid disputes toward solid.
+    # ────────────────────────────────────────────────────────────────────
+
+    DIRECTION_BINS = 6      # +X -X +Y -Y +Z -Z
+
+    def _new_volumes(self) -> list:
+        n = self.DIRECTION_BINS if self._directional else 1
+        return [VDBVolume(self._voxel_size, self._trunc,
+                          space_carving=self._space_carving) for _ in range(n)]
+
+    def _integrate_into(self, pts_world: np.ndarray, origin: np.ndarray) -> None:
+        """Integrate one scan, split across direction bins when directional."""
+        if not self._directional:
+            self._volumes[0].integrate(pts_world, origin)
+            return
+        bins = _direction_bins(pts_world - origin)
+        for b, volume in enumerate(self._volumes):
+            sel = pts_world[bins == b]
+            if len(sel):
+                volume.integrate(sel, origin)
+
     def _integrate_cloud(self, msg: PointCloud2, tf_msg) -> bool:
         """Filter and integrate one cloud using its exact capture-time TF."""
         pts_cam = _parse_pointcloud2(msg)   # (N,3) float64, sensor frame
@@ -483,7 +544,7 @@ class TSDFMapper(Node):
         origin    = t                       # camera origin in world frame, float64
 
         with self._volume_lock:
-            self._volume.integrate(pts_world, origin)
+            self._integrate_into(pts_world, origin)
         self._map_revision += 1
 
         if self._enable_rebuild:
@@ -506,6 +567,9 @@ class TSDFMapper(Node):
         key = (stamp.sec, stamp.nanosec)
         self._scan_cache[key] = (pts_down, T_world_cam)
         _evict_fifo(self._scan_cache, self._cache_max_scans)
+        # Once this saturates at cache_max_scans, a rebuild can no longer
+        # re-integrate the start of the run and permanently drops that surface.
+        self._cache_scans_pub.publish(Int32(data=len(self._scan_cache)))
 
     # ────────────────────────────────────────────────────────────────────
     # Map rebuild consumer (pose_graph.py is the publisher side)
@@ -553,8 +617,7 @@ class TSDFMapper(Node):
         self._write_back_cache(keyframe_ts, corrections)
 
         with self._volume_lock:
-            self._volume = VDBVolume(
-                self._voxel_size, self._trunc, space_carving=self._space_carving)
+            self._volumes = self._new_volumes()
         self._map_revision += 1
         self._replay_queue = list(self._scan_cache.keys())
         self.get_logger().info(
@@ -581,7 +644,7 @@ class TSDFMapper(Node):
                 pts_cam, T = entry
                 R, t = T[:3, :3], T[:3, 3]
                 pts_world = pts_cam.astype(np.float64) @ R.T + t
-                self._volume.integrate(pts_world, t)
+                self._integrate_into(pts_world, t)
         self._map_revision += 1
         if not self._replay_queue:
             self.get_logger().info('Map rebuild replay complete')
@@ -619,19 +682,29 @@ class TSDFMapper(Node):
         sampled = normals = None
         with self._volume_lock:
             try:
-                verts, _tris = self._volume.extract_triangle_mesh(
-                    fill_holes=False, min_weight=float(self._min_weight))
+                # Each direction bin meshes on its own — a shared marching-cubes
+                # pass is exactly the averaging this mode avoids. reshape keeps
+                # an empty bin at (0,3) so the concatenate below still matches.
+                per_bin = [np.asarray(v.extract_triangle_mesh(
+                    fill_holes=False, min_weight=float(self._min_weight))[0],
+                    dtype=np.float32).reshape(-1, 3) for v in self._volumes]
             except Exception as exc:
                 self.get_logger().warn(
                     f'extract_triangle_mesh failed: {exc}', throttle_duration_sec=5.0)
-                verts = None
-            if verts is not None:
-                verts = np.asarray(verts, dtype=np.float32)
-                # Normals need the TSDF grid (pyopenvdb-only); the cloud does not.
-                if len(verts) and self._pyopenvdb:
-                    sampled = verts[::self._normal_stride(len(verts))]
-                    normals = _compute_normals_vdb(
-                        self._volume.tsdf, sampled, self._voxel_size)
+                per_bin = None
+            verts = None if per_bin is None else np.concatenate(per_bin)
+            # Normals need the TSDF grid (pyopenvdb-only); the cloud does not.
+            if verts is not None and len(verts) and self._pyopenvdb:
+                stride = self._normal_stride(len(verts))
+                # Sampled per bin so each vertex's normal comes from the grid
+                # that actually meshed it.
+                pairs = [(p[::stride], v) for p, v in zip(per_bin, self._volumes)
+                         if len(p[::stride])]
+                if pairs:
+                    sampled = np.concatenate([p for p, _ in pairs])
+                    normals = np.concatenate([
+                        _compute_normals_vdb(v.tsdf, p, self._voxel_size)
+                        for p, v in pairs])
         finished = self._monotonic()
         self._surface_gate.record(finished, finished - started)
         if verts is None:
@@ -697,15 +770,17 @@ class TSDFMapper(Node):
                 # cloud: keep every voxel at/above the low map weight (min_weight)
                 # so free (d>0) cells survive, then re-filter to solids below for
                 # the CUBE_LIST + /tsdf/occupied_voxels.
-                coords, all_d, all_w = _extract_voxel_arrays(
-                    self._volume.tsdf, self._volume.weights, self._min_weight)
+                coords, all_d, all_w = _merge_voxel_parts([
+                    _extract_voxel_arrays(v.tsdf, v.weights, self._min_weight)
+                    for v in self._volumes])
             else:
                 # Only iterate voxels we'll actually show (early filtering inside):
                 # confidently solid (TSDF-derived) AND observed often enough (weight).
                 max_d = self._voxel_max_d if not self._show_free else None
-                pts, d_vals, w_vals = _extract_voxels(
-                    self._volume.tsdf, self._volume.weights,
-                    self._voxel_size, min_weight=self._voxel_min_weight, max_d=max_d)
+                pts, d_vals, w_vals = _merge_voxel_parts([
+                    _extract_voxels(v.tsdf, v.weights, self._voxel_size,
+                                    min_weight=self._voxel_min_weight, max_d=max_d)
+                    for v in self._volumes])
         finished = self._monotonic()
         self._voxels_gate.record(finished, finished - started)
         self._voxels_revision = revision
@@ -736,7 +811,8 @@ class TSDFMapper(Node):
             del_m.action = Marker.DELETE
             self._voxels_cache = (
                 _make_pointcloud2(header, np.empty((0, 3), dtype=np.float32)),
-                MarkerArray(markers=[del_m]), free_cloud, grid)
+                MarkerArray(markers=[del_m, _cap_banner(0, 0, None, header)]),
+                free_cloud, grid)
             return
 
         # This remains a solid-only cloud even if the optional voxel
@@ -746,6 +822,7 @@ class TSDFMapper(Node):
         solid_cloud = _make_pointcloud2(header, solid_pts)
 
         n = len(pts)
+        all_pts = pts   # pre-thinning, so the banner sits over the whole map
         if n > self._max_viz:
             sel    = np.random.choice(n, self._max_viz, replace=False)
             pts    = pts[sel]
@@ -766,6 +843,12 @@ class TSDFMapper(Node):
         wall_conf = np.clip((self._voxel_max_d - d_vals) / max(band, 1e-6), 0.6, 1.0)
         colors = _confidence_colormap(w_norm, saturation=wall_conf)
 
+        band_mask = self._planning_band_voxel_mask(pts)
+        if band_mask is not None:
+            colors[band_mask, :3] = (
+                BAND_TINT_MIX * BAND_TINT
+                + (1.0 - BAND_TINT_MIX) * colors[band_mask, :3])
+
         m = Marker()
         m.header.stamp    = now
         m.header.frame_id = self._world_frame
@@ -781,9 +864,11 @@ class TSDFMapper(Node):
         m.colors   = [ColorRGBA(r=float(c[0]), g=float(c[1]),
                                 b=float(c[2]), a=float(c[3])) for c in colors]
 
-        self._voxels_cache = (solid_cloud, MarkerArray(markers=[m]), free_cloud, grid)
+        banner = _cap_banner(len(pts), n, all_pts, header)
+        self._voxels_cache = (solid_cloud, MarkerArray(markers=[m, banner]),
+                              free_cloud, grid)
         self.get_logger().info(
-            f'Voxels: {len(pts)} published in {self._voxels_gate.last_s:.2f}s',
+            f'Voxels: {len(pts)} of {n} published in {self._voxels_gate.last_s:.2f}s',
             throttle_duration_sec=5.0)
 
     # ────────────────────────────────────────────────────────────────────
@@ -818,6 +903,23 @@ class TSDFMapper(Node):
             margin=self._projected_map_margin,
             frame=self._world_frame, stamp=stamp)
 
+    def _planning_band_voxel_mask(self, pts) -> 'np.ndarray | None':
+        """Which voxels lie in the Z band /projected_map is built from.
+
+        Everything outside it is invisible to the planner, so this is the slice
+        its decisions actually rest on — the same [z-band, z+band] test
+        _build_projected_map applies. Returns None when no projected map is
+        published (there is no planning band to show) or its centre has not
+        resolved yet.
+        """
+        if pts is None or len(pts) == 0 or self._projected_map_pub is None:
+            return None
+        z = self._band_center_z()
+        if z is None:
+            return None
+        mask = np.abs(pts[:, 2] - z) <= self._projected_map_band
+        return mask if np.any(mask) else None
+
     def _build_free_voxels_msg(self, coords, d_vals, header):
         """Observed-empty voxel centres, the free half tsdf_to_octomap needs."""
         if self._free_cloud_pub is None:
@@ -847,8 +949,10 @@ class TSDFMapper(Node):
 
         self._solid_cloud_pub.publish(_make_pointcloud2(header, centers))
 
-        if len(centers) > self._max_viz:
-            centers = centers[np.random.choice(len(centers), self._max_viz, replace=False)]
+        n_total = len(centers)
+        all_centers = centers   # pre-thinning, so the banner sits over the whole map
+        if n_total > self._max_viz:
+            centers = centers[np.random.choice(n_total, self._max_viz, replace=False)]
 
         # No per-voxel weight without the grid, so shade by height for depth —
         # the colormap is repurposed here as a plain low-to-high gradient.
@@ -870,9 +974,10 @@ class TSDFMapper(Node):
         m.colors   = [ColorRGBA(r=float(c[0]), g=float(c[1]),
                                 b=float(c[2]), a=float(c[3])) for c in colors]
 
-        self._voxels_pub.publish(MarkerArray(markers=[m]))
+        banner = _cap_banner(len(centers), n_total, all_centers, header)
+        self._voxels_pub.publish(MarkerArray(markers=[m, banner]))
         self.get_logger().info(
-            f'Voxels (surface-derived): {len(centers)} published',
+            f'Voxels (surface-derived): {len(centers)} of {n_total} published',
             throttle_duration_sec=5.0)
 
 
@@ -1058,6 +1163,41 @@ def _interpolate_correction(t: float, keyframe_ts: np.ndarray,
     A[:3, :3] = rotation
     A[:3, 3] = translation
     return A
+
+
+def _direction_bins(dirs: np.ndarray) -> np.ndarray:
+    """Bin index per ray: dominant axis * 2, +1 when that component is negative.
+
+    Opposite views of one surface land in different bins, which is the whole
+    point — see TSDFMapper's directional-TSDF note.
+    """
+    axis = np.argmax(np.abs(dirs), axis=1)
+    negative = dirs[np.arange(len(dirs)), axis] < 0.0
+    return axis * 2 + negative
+
+
+def _merge_voxel_parts(parts: list) -> tuple:
+    """Collapse per-bin (keys, d, w) triples to one, keeping the lowest d per key.
+
+    Picking the most solid bin rather than averaging is what stops a two-sided
+    surface cancelling itself; keys are VDB index coords or world centres, both
+    bit-identical across bins since every bin shares one grid transform.
+    """
+    parts = [p for p in parts if p[0] is not None]
+    if not parts:
+        return None, None, None
+    if len(parts) == 1:
+        return parts[0]
+
+    keys = np.concatenate([p[0] for p in parts])
+    d_vals = np.concatenate([p[1] for p in parts])
+    w_vals = np.concatenate([p[2] for p in parts])
+    # Primary key is the last lexsort argument: sorts by x, y, z, then d.
+    order = np.lexsort((d_vals, keys[:, 2], keys[:, 1], keys[:, 0]))
+    keys, d_vals, w_vals = keys[order], d_vals[order], w_vals[order]
+    first = np.ones(len(keys), dtype=bool)
+    first[1:] = np.any(keys[1:] != keys[:-1], axis=1)
+    return keys[first], d_vals[first], w_vals[first]
 
 
 def _extract_voxels(tsdf_grid, weights_grid, voxel_size: float,
@@ -1310,6 +1450,43 @@ def _make_normals_cloud(header: Header, points: np.ndarray,
     else:
         msg.data = b''
     return msg
+
+
+def _cap_banner(shown: int, total: int, pts: 'np.ndarray | None',
+                header: Header) -> Marker:
+    """Text banner above the map when max_voxels_viz thins the CUBE_LIST.
+
+    The cap is a render budget on the marker only -- /tsdf/occupied_voxels
+    still carries every solid voxel -- so the wording has to say the map is
+    complete, or a thinned view reads as a mapping failure. DELETEs itself
+    when nothing was dropped, so the banner cannot linger once the map
+    shrinks back under the cap.
+    """
+    m = Marker()
+    m.header.stamp    = header.stamp
+    m.header.frame_id = header.frame_id
+    m.ns       = 'tsdf_voxels_cap'
+    m.id       = 0
+    m.type     = Marker.TEXT_VIEW_FACING
+    m.lifetime = Duration(sec=4)
+    if pts is None or len(pts) == 0 or shown >= total:
+        m.action = Marker.DELETE
+        return m
+
+    m.action  = Marker.ADD
+    m.scale.z = 0.8                                  # text height in metres
+    m.color   = ColorRGBA(r=1.0, g=0.75, b=0.1, a=1.0)
+    # world_ned is +Z down, so min Z is the top of the map.
+    m.pose.position.x = float(pts[:, 0].mean())
+    m.pose.position.y = float(pts[:, 1].mean())
+    m.pose.position.z = float(pts[:, 2].min()) - 1.5
+    m.pose.orientation.w = 1.0
+    m.text = (f'VOXEL VIEW CAPPED FOR PERFORMANCE\n'
+              f'showing {shown} of {total} voxels ({100.0 * shown / total:.0f}%), '
+              f'resampled each redraw\n'
+              f'display limit only - the map itself is complete '
+              f'(see /tsdf/occupied_voxels)')
+    return m
 
 
 def _normals_markers(points: np.ndarray, normals: np.ndarray,

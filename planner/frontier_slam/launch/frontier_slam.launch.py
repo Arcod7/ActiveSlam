@@ -257,13 +257,20 @@ def generate_launch_description():
         description='TSDF frontier goal offset from the surface along its outward normal, in metres.',
     )
     projected_map_band_arg = DeclareLaunchArgument(
-        'projected_map_band_m', default_value='3.0',
+        'projected_map_band_m', default_value='1.0',
         description=(
             'Display only: the Z half-range one /projected_map cell collapses, '
             'drawn as the band_columns marker on /frontier_slam/frontier_debug. '
-            "Match the mapper publishing the map — tsdf.launch.py's "
-            'projected_map_band_m (3.0), or octomap.launch.py (0.25 with an '
-            'explicit depth, otherwise the full water column).'),
+            'Must match the mapper publishing the map — pass the same value '
+            'here and to octomap.launch.py/tsdf.launch.py, which demo.launch.py '
+            'does from its own projected_map_band_m.'),
+    )
+    voxel_size_arg = DeclareLaunchArgument(
+        'voxel_size', default_value='0.2',
+        description=(
+            'Display only: sizes the selected-wall highlight walllooking and '
+            'walloriented draw on /motion/selected_wall. Must match the '
+            'mapper\'s voxel_size, which demo.launch.py passes from its own.'),
     )
     wall_points_topic_arg = DeclareLaunchArgument(
         'wall_points_topic', default_value='/octomap_point_cloud_centers',
@@ -315,6 +322,58 @@ def generate_launch_description():
         'plan_inflation_m', default_value='3.00',
         description='A* planning-margin radius around occupied cells (moderate cost, steers paths away).',
     )
+    survey_radius_arg = DeclareLaunchArgument(
+        'survey_radius_m', default_value='0.0',
+        description='Radius (m) of the survey working area; frontier goals outside '
+                    'it are not candidates, so exploration stays on the structure '
+                    'instead of following open water outward. 0 = unbounded.',
+    )
+    survey_center_x_arg = DeclareLaunchArgument(
+        'survey_center_x', default_value='nan',
+        description='Survey-area centre X (NED north, m). nan = the deployment point.',
+    )
+    survey_center_y_arg = DeclareLaunchArgument(
+        'survey_center_y', default_value='nan',
+        description='Survey-area centre Y (NED east, m). nan = the deployment point.',
+    )
+    revisit_min_closures_arg = DeclareLaunchArgument(
+        'revisit_min_closures', default_value='0',
+        description='Loop closures required before a revisit ends on closure count '
+                    'alone. 0 = not taken into account, leaving the uncertainty ratio '
+                    'as the only uncertainty-based exit.',
+    )
+    arrival_dwell_arg = DeclareLaunchArgument(
+        'arrival_dwell_s', default_value='30.0',
+        description='Seconds to wait at the revisit target for the uncertainty to '
+                    'come back down before giving up on the detour. Counts from '
+                    'arrival, so the drive out never shortens it.',
+    )
+    stall_exit_arg = DeclareLaunchArgument(
+        'stall_exit_s', default_value='5.0',
+        description='End the dwell once neither the keyframe count nor the closure '
+                    'count has moved for this long: a parked vehicle saturates '
+                    "pose_graph's per-cell keyframe cap, after which no covariance "
+                    'change is possible. 0 disables, leaving arrival_dwell_s.',
+    )
+    revisit_scan_slowdown_arg = DeclareLaunchArgument(
+        'revisit_scan_slowdown', default_value='1.0',
+        description='Divide the scan yaw rate by this while a revisit is in progress, '
+                    'so the sweep puts more sonar frames on the structure it went back '
+                    'to re-observe. 1.0 = off (default; untested in a full run).',
+    )
+    wall_z_band_arg = DeclareLaunchArgument(
+        'wall_z_band_m', default_value='1.5',
+        description='Half-thickness (m) of the depth slice wall_oriented uses to pick '
+                    'which side to look at. Depth is directly observed, so geometry '
+                    'further above or below than this cannot be collided with and '
+                    'should not steer the look direction.',
+    )
+    min_goal_separation_arg = DeclareLaunchArgument(
+        'min_goal_separation_m', default_value='0.0',
+        description='Minimum distance (m) between consecutive frontier goals, so '
+                    'the planner moves on rather than re-picking beside the goal it '
+                    'just reached. Waived when no other candidate qualifies. 0 = off.',
+    )
     depth = LaunchConfiguration('depth')
     odom_topic = LaunchConfiguration('odom_topic')
 
@@ -323,6 +382,15 @@ def generate_launch_description():
         hard_inflation_arg,
         inflation_arg,
         plan_inflation_arg,
+        survey_radius_arg,
+        survey_center_x_arg,
+        survey_center_y_arg,
+        min_goal_separation_arg,
+        wall_z_band_arg,
+        revisit_scan_slowdown_arg,
+        revisit_min_closures_arg,
+        arrival_dwell_arg,
+        stall_exit_arg,
         odom_topic_arg,
         safety_start_enabled_arg,
         actuator_backend_arg,
@@ -347,6 +415,7 @@ def generate_launch_description():
         wall_orientation_lookahead_arg,
         tsdf_frontier_standoff_arg,
         projected_map_band_arg,
+        voxel_size_arg,
         wall_points_topic_arg,
         wall_standoff_arg,
         wall_switch_goal_distance_arg,
@@ -420,6 +489,10 @@ def generate_launch_description():
                 'hard_inflation_m': _float_parameter('hard_inflation_m'),
                 'inflation_m': _float_parameter('inflation_m'),
                 'plan_inflation_m': _float_parameter('plan_inflation_m'),
+                'survey_radius_m': _float_parameter('survey_radius_m'),
+                'survey_center_x': _float_parameter('survey_center_x'),
+                'survey_center_y': _float_parameter('survey_center_y'),
+                'min_goal_separation_m': _float_parameter('min_goal_separation_m'),
             }],
         ),
         Node(
@@ -432,6 +505,7 @@ def generate_launch_description():
                 'odom_topic': odom_topic,
                 'scan_style': LaunchConfiguration('scan_style'),
                 'scan_sweep_deg': _float_parameter('scan_sweep_deg'),
+                'revisit_scan_slowdown': _float_parameter('revisit_scan_slowdown'),
                 'speed_factor': _float_parameter('speed_factor'),
                 'turn_factor': _float_parameter('turn_factor'),
             }],
@@ -446,10 +520,13 @@ def generate_launch_description():
                 'depth_setpoint': _float_parameter('depth'),
                 'odom_topic': odom_topic,
                 'look_offset_deg': _float_parameter('wall_orientation_offset_deg'),
+                'wall_z_band_m': _float_parameter('wall_z_band_m'),
+                'revisit_scan_slowdown': _float_parameter('revisit_scan_slowdown'),
                 'lookahead_m': _float_parameter('wall_orientation_lookahead_m'),
                 'map_points_topic': LaunchConfiguration('wall_points_topic'),
                 'speed_factor': _float_parameter('speed_factor'),
                 'turn_factor': _float_parameter('turn_factor'),
+                'voxel_size': _float_parameter('voxel_size'),
             }],
             condition=LaunchConfigurationEquals('motion', 'walloriented'),
         ),
@@ -471,6 +548,7 @@ def generate_launch_description():
                 'path_heading_weight': _float_parameter('wall_path_heading_weight'),
                 'speed_factor': _float_parameter('speed_factor'),
                 'turn_factor': _float_parameter('turn_factor'),
+                'voxel_size': _float_parameter('voxel_size'),
             }],
             condition=LaunchConfigurationEquals('motion', 'walllooking'),
         ),
@@ -485,6 +563,10 @@ def generate_launch_description():
                 'sigma_allow_yaw_rad': _float_parameter('sigma_allow_yaw_rad'),
                 'ratio_trigger': _float_parameter('ratio_trigger'),
                 'ratio_resume': _float_parameter('ratio_resume'),
+                'revisit_min_closures': ParameterValue(
+                    LaunchConfiguration('revisit_min_closures'), value_type=int),
+                'arrival_dwell_s': _float_parameter('arrival_dwell_s'),
+                'stall_exit_s': _float_parameter('stall_exit_s'),
             }],
             condition=IfCondition(LaunchConfiguration('revisit')),
         ),
