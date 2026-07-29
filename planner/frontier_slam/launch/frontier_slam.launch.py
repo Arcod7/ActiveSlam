@@ -25,6 +25,8 @@ Optional arguments:
   depth       Target depth in NED metres (Z-down, so positive = below surface).
               If omitted, the controller locks the robot's depth on first odometry.
   odom_topic  Odometry topic for both nodes.
+  marker_frame  Frame the vehicle arrow is anchored in (world, or the body
+              frame on hardware).
               Default: /StoneFish/Odometry (ground truth)
               Noisy:   /StoneFish/Odometry/noisy (requires odom_to_tf_noisy running)
   actuator_backend
@@ -123,6 +125,14 @@ def generate_launch_description():
         'odom_topic',
         default_value='/StoneFish/Odometry',
         description='Odometry topic for pose. Use /StoneFish/Odometry/noisy for noisy mode.',
+    )
+    marker_frame_arg = DeclareLaunchArgument(
+        'marker_frame',
+        default_value='world_ned',
+        description=(
+            'Frame the vehicle arrow is anchored in. A world frame draws it at '
+            'the watched pose; the vehicle body frame draws it at the origin '
+            'and lets TF place it, which is what hardware wants.'),
     )
     safety_start_enabled_arg = DeclareLaunchArgument(
         'safety_start_enabled',
@@ -336,6 +346,12 @@ def generate_launch_description():
         'survey_center_y', default_value='nan',
         description='Survey-area centre Y (NED east, m). nan = the deployment point.',
     )
+    revisit_schedule_every_m_arg = DeclareLaunchArgument(
+        'revisit_schedule_every_m', default_value='0.0',
+        description='Revisit every N metres travelled instead of on U_r. '
+                    '0 leaves the uncertainty trigger in charge; a positive '
+                    'value is the control arm that asks whether triggering on '
+                    'uncertainty beats triggering on a clock.')
     revisit_min_closures_arg = DeclareLaunchArgument(
         'revisit_min_closures', default_value='0',
         description='Loop closures required before a revisit ends on closure count '
@@ -389,9 +405,11 @@ def generate_launch_description():
         wall_z_band_arg,
         revisit_scan_slowdown_arg,
         revisit_min_closures_arg,
+        revisit_schedule_every_m_arg,
         arrival_dwell_arg,
         stall_exit_arg,
         odom_topic_arg,
+        marker_frame_arg,
         safety_start_enabled_arg,
         actuator_backend_arg,
         mavlink_url_arg,
@@ -432,6 +450,7 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'odom_topic': odom_topic,
+                'marker_frame': LaunchConfiguration('marker_frame'),
                 'start_enabled': _bool_parameter('safety_start_enabled'),
             }],
         ),
@@ -563,6 +582,8 @@ def generate_launch_description():
                 'sigma_allow_yaw_rad': _float_parameter('sigma_allow_yaw_rad'),
                 'ratio_trigger': _float_parameter('ratio_trigger'),
                 'ratio_resume': _float_parameter('ratio_resume'),
+                'revisit_schedule_every_m': _float_parameter(
+                    'revisit_schedule_every_m'),
                 'revisit_min_closures': ParameterValue(
                     LaunchConfiguration('revisit_min_closures'), value_type=int),
                 'arrival_dwell_s': _float_parameter('arrival_dwell_s'),

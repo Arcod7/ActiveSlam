@@ -37,7 +37,6 @@ import re
 import shlex
 import signal
 import subprocess
-import sys
 import time
 
 import yaml
@@ -81,6 +80,7 @@ VALID_KEYS = {
     'survey_radius_m', 'survey_center_x', 'survey_center_y',
     'min_goal_separation_m', 'wall_z_band_m', 'revisit_scan_slowdown',
     'revisit_min_closures', 'arrival_dwell_s', 'stall_exit_s',
+    'revisit_schedule_every_m',
     'cache_max_scans',
     # Pose-graph construction and its noise model: a batch that cannot set
     # these cannot reproduce a config tuned in the launcher.
@@ -369,6 +369,14 @@ def _launch_and_wait(cmd: list, log_path: str, duration_s: float,
                         _terminate(proc)
             else:
                 _terminate(proc)
+        except KeyboardInterrupt:
+            # run_matrix's parent (including the launcher TUI) stops the batch
+            # with SIGINT.  The ros2 launch is in its own session, so it would
+            # otherwise survive its interrupted parent and keep publishing
+            # into the next run.
+            print('  [stop] interrupted — stopping the active ROS launch')
+            _terminate(proc)
+            raise
         finally:
             # In a finally so every exit path -- normal end, motionless abort,
             # exception -- still gives rosbag2 the SIGINT it needs to finalise
@@ -376,6 +384,23 @@ def _launch_and_wait(cmd: list, log_path: str, duration_s: float,
             _stop_recorder(recorder)
     end = time.strftime('%Y-%m-%dT%H:%M:%S')
     return start, end, proc.returncode, motionless
+
+
+def _write_progress(batch_dir: str, **fields) -> None:
+    """Atomically publish batch state for lightweight monitors such as the TUI."""
+    path = os.path.join(batch_dir, 'progress.json')
+    previous = {}
+    try:
+        with open(path) as f:
+            previous = json.load(f)
+    except (OSError, ValueError):
+        pass
+    previous.update(fields)
+    previous['updated_at'] = time.time()
+    tmp = f'{path}.{os.getpid()}.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(previous, f, indent=2)
+    os.replace(tmp, path)
 
 
 def _dvl_scale_error_pct(log_path: str):
@@ -578,38 +603,76 @@ def run_matrix(cfg: dict, batch_root: str, dry_run: bool = False) -> str:
 
     manifests = []
     i = 0
-    for run in cfg['runs']:
-        args = resolve_args(cfg, run)
-        for seed in cfg['seeds']:
-            i += 1
-            run_dir = os.path.join(batch_dir, f"{run['name']}_s{seed}")
-            print(f"[{i}/{total}] {run['name']} seed={seed} -> {run_dir}")
-            manifest = run_one(args, run_dir, seed, cfg['duration_s'],
-                               dry_run=dry_run, record=record)
-            manifest['name'] = run['name']
-            manifest['run_dir'] = run_dir
-            manifests.append(manifest)
-            # Stop the whole batch on the first frozen run: the cause is always
-            # environmental (orphans, a closed motion gate, a stalled sim) and
-            # applies to every run that would follow.
-            if not dry_run and manifest.get('status') == 'motionless':
-                print(f"  [stop] {run_dir} never moved "
-                      f"(path {manifest.get('gt_path_m')}m, "
-                      f"yaw {manifest.get('gt_yaw_deg')}deg). "
-                      f"Aborting the batch after {i}/{total} runs.")
-                leftover = find_orphan_nodes()
-                if leftover:
-                    print('  Leftover nodes are the likely cause:\n  '
-                          + '\n  '.join(leftover))
-                break
-            if not dry_run and i < total:
-                time.sleep(cfg['settle_s'])
-        else:
-            continue
-        break
-
+    interrupted = False
+    raised_error = False
     if not dry_run:
-        aggregate(batch_dir, manifests)
+        _write_progress(
+            batch_dir, state='running', phase='preparing', total=total,
+            completed=0, failed=0, batch_name=cfg['batch_name'],
+            duration_s=cfg['duration_s'], started_at=time.time())
+    try:
+        for run in cfg['runs']:
+            args = resolve_args(cfg, run)
+            for seed in cfg['seeds']:
+                i += 1
+                run_dir = os.path.join(batch_dir, f"{run['name']}_s{seed}")
+                print(f"[{i}/{total}] {run['name']} seed={seed} -> {run_dir}")
+                if not dry_run:
+                    _write_progress(
+                        batch_dir, state='running', phase='running',
+                        current=i, name=run['name'], seed=seed,
+                        run_dir=run_dir, run_started_at=time.time())
+                manifest = run_one(args, run_dir, seed, cfg['duration_s'],
+                                   dry_run=dry_run, record=record)
+                manifest['name'] = run['name']
+                manifest['run_dir'] = run_dir
+                manifests.append(manifest)
+                if not dry_run:
+                    failed_runs = sum(
+                        m.get('status') != 'ok' for m in manifests)
+                    _write_progress(
+                        batch_dir, completed=len(manifests),
+                        failed=failed_runs,
+                        last_status=manifest.get('status', 'unknown'))
+                # Stop the whole batch on the first frozen run: the cause is always
+                # environmental (orphans, a closed motion gate, a stalled sim) and
+                # applies to every run that would follow.
+                if not dry_run and manifest.get('status') == 'motionless':
+                    print(f"  [stop] {run_dir} never moved "
+                          f"(path {manifest.get('gt_path_m')}m, "
+                          f"yaw {manifest.get('gt_yaw_deg')}deg). "
+                          f"Aborting the batch after {i}/{total} runs.")
+                    leftover = find_orphan_nodes()
+                    if leftover:
+                        print('  Leftover nodes are the likely cause:\n  '
+                              + '\n  '.join(leftover))
+                    break
+                if not dry_run and i < total:
+                    _write_progress(
+                        batch_dir, phase='settling',
+                        settle_started_at=time.time())
+                    time.sleep(cfg['settle_s'])
+            else:
+                continue
+            break
+    except KeyboardInterrupt:
+        interrupted = True
+        print(f'[stop] Evaluation stopped after {len(manifests)}/{total} '
+              'completed runs; preserving partial data.')
+    except Exception:
+        raised_error = True
+        raise
+    finally:
+        if not dry_run:
+            _write_progress(batch_dir, phase='aggregating')
+            aggregate(batch_dir, manifests)
+            failed_runs = sum(m.get('status') != 'ok' for m in manifests)
+            final_state = ('failed' if raised_error else
+                           'stopped' if interrupted else 'complete')
+            _write_progress(
+                batch_dir, state=final_state, phase=final_state,
+                completed=len(manifests), failed=failed_runs,
+                finished_at=time.time())
     return batch_dir
 
 

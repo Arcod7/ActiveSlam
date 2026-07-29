@@ -112,6 +112,18 @@ class RevisitConfig:
     sigma_allow_yaw_rad: float = 0.045
     ratio_trigger: float = 1.0
     ratio_resume: float = 0.5
+    # Fire on distance travelled since the last revisit instead of on U_r.
+    # 0 = off, which leaves the uncertainty trigger in charge.
+    #
+    # This exists to be compared against, not to be used. The uncertainty signal
+    # is a weak estimator of true error (AUC 0.65 as a detector of a run's worst
+    # quartile), so it is fair to ask whether triggering on it beats triggering
+    # on a clock. Matching a fixed schedule would mean the D-optimality
+    # machinery earns nothing here; beating it would mean the signal is poorly
+    # calibrated in magnitude yet still usefully ordered in time.
+    schedule_every_m: float = 0.0
+    # A single tick's motion above this is a graph correction, not travel.
+    max_travel_step_m: float = 1.0
     # Closures that must fire before a revisit is allowed to end on closure
     # count alone. 0 = not taken into account, which leaves U_r the only
     # uncertainty-based exit. Default 0: ending on the first closure pre-empts
@@ -220,6 +232,12 @@ class RevisitStateMachine:
         self._graph_state = None
         self._graph_changed_at = None
         self._last_revisit_end = None
+        # Path length since the last revisit ended, for schedule_every_m.
+        # Path length, not displacement: a vehicle orbiting one piece of
+        # structure accumulates exposure to drift without ever getting far from
+        # where it started, and that is exactly when a revisit is due.
+        self._travelled_m = 0.0
+        self._last_xy = None
 
     @property
     def suspended(self) -> bool:
@@ -241,6 +259,7 @@ class RevisitStateMachine:
         The sigmas only label a trigger with its cause; without them the
         machine behaves exactly as before and the cause stays None.
         """
+        self._accumulate_travel(robot_xy)
         if self.state == RevisitState.EXPLORING:
             return self._try_trigger(now, dopt, lc_count, kf_xyz, robot_xy,
                                      sigma_xy, sigma_yaw)
@@ -248,12 +267,27 @@ class RevisitStateMachine:
             return self._tick_revisiting(now, dopt, lc_count, kf_xyz, robot_xy)
         return self._tick_cooldown(now)
 
+    def _accumulate_travel(self, robot_xy) -> None:
+        xy = np.asarray(robot_xy, dtype=float)[:2]
+        if self._last_xy is not None:
+            step = float(np.linalg.norm(xy - self._last_xy))
+            # A pose jump on loop closure is a correction, not travel, so it
+            # must not be banked as progress toward the next scheduled revisit.
+            if step < self.cfg.max_travel_step_m:
+                self._travelled_m += step
+        self._last_xy = xy
+
     def _try_trigger(self, now, dopt, lc_count, kf_xyz, robot_xy,
                      sigma_xy=None, sigma_yaw=None):
         cfg = self.cfg
-        u_ratio = self.ratio(dopt)
-        if u_ratio is None or u_ratio <= cfg.ratio_trigger:
-            return None
+        if cfg.schedule_every_m > 0.0:
+            # Scheduled mode ignores U_r entirely -- that is the point of it.
+            if self._travelled_m < cfg.schedule_every_m:
+                return None
+        else:
+            u_ratio = self.ratio(dopt)
+            if u_ratio is None or u_ratio <= cfg.ratio_trigger:
+                return None
         if len(kf_xyz) < cfg.min_keyframes:
             return None
         target = select_revisit_target(
@@ -282,9 +316,15 @@ class RevisitStateMachine:
         if (cfg.min_closures > 0
                 and lc_count - self._lc_at_start >= cfg.min_closures):
             return self._end_revisit(now, 'CLOSED')
-        u_ratio = self.ratio(dopt)
-        if u_ratio is not None and u_ratio < cfg.ratio_resume:
-            return self._end_revisit(now, 'RESUMED_DOPT')
+        # Scheduled mode entered without consulting U_r, so it must not leave on
+        # U_r either. The schedule fires precisely when uncertainty is low, so a
+        # ratio_resume exit would end every scheduled revisit on its first tick
+        # and the arm would measure nothing. Arrival, closures and the timeout
+        # remain, so it still cannot run forever.
+        if cfg.schedule_every_m <= 0.0:
+            u_ratio = self.ratio(dopt)
+            if u_ratio is not None and u_ratio < cfg.ratio_resume:
+                return self._end_revisit(now, 'RESUMED_DOPT')
 
         self._track_arrival(now, kf_xyz, robot_xy, cfg.arrival_radius_m)
         if self._arrived_since is not None:
@@ -328,6 +368,7 @@ class RevisitStateMachine:
     def _end_revisit(self, now, event):
         self.state = RevisitState.COOLDOWN
         self._last_revisit_end = now
+        self._travelled_m = 0.0
         self.target_idx = None
         self.cause = None
         return event
@@ -352,6 +393,7 @@ class RevisitPlanner(Node):
         self.declare_parameter('ratio_trigger', 1.0)
         self.declare_parameter('ratio_resume', 0.5)
         self.declare_parameter('revisit_min_closures', 0)
+        self.declare_parameter('revisit_schedule_every_m', 0.0)
         # Both counted in keyframes; scaled with keyframe_dist_m to hold their metres.
         self.declare_parameter('min_keyframes', 30)
         self.declare_parameter('min_index_gap', 20)
@@ -373,6 +415,8 @@ class RevisitPlanner(Node):
             ratio_trigger=float(self.get_parameter('ratio_trigger').value),
             ratio_resume=float(self.get_parameter('ratio_resume').value),
             min_closures=int(self.get_parameter('revisit_min_closures').value),
+            schedule_every_m=float(
+                self.get_parameter('revisit_schedule_every_m').value),
             min_keyframes=int(self.get_parameter('min_keyframes').value),
             min_index_gap=int(self.get_parameter('min_index_gap').value),
             candidate_radius_m=float(self.get_parameter('candidate_radius_m').value),
@@ -464,6 +508,8 @@ class RevisitPlanner(Node):
         cfg.ratio_trigger = float(self.get_parameter('ratio_trigger').value)
         cfg.ratio_resume = float(self.get_parameter('ratio_resume').value)
         cfg.min_closures = int(self.get_parameter('revisit_min_closures').value)
+        cfg.schedule_every_m = float(
+            self.get_parameter('revisit_schedule_every_m').value)
         cfg.revisit_timeout_s = float(self.get_parameter('revisit_timeout_s').value)
         cfg.arrival_dwell_s = float(self.get_parameter('arrival_dwell_s').value)
         cfg.stall_exit_s = float(self.get_parameter('stall_exit_s').value)
