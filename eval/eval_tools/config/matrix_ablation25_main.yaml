@@ -1,10 +1,3 @@
-# WARNING: this config predates Phase 50, which raised the hard inflation
-# radius to 1.0 m. tsdf_frontier_standoff_m below is 1.0, which now places
-# every frontier goal on the blocked boundary where A* cannot reach it: the
-# vehicle stalls, travels ~2 m in 25 min, and exits 0 with no error. It also
-# predates directional_tsdf, whose node default (False) integrates zero
-# clouds on current code. Reuse it only to reproduce the 2026-07-26 batch on
-# code of that vintage; for new runs see matrix_ablation25.yaml.
 # Active-SLAM ablation ladder on the shipwreck scene, at the tuned config.
 #
 # Each rung adds exactly one capability, so the change between rungs is
@@ -31,10 +24,10 @@
 #
 #   python3 eval/eval_tools/scripts/run_matrix.py \
 #       eval/eval_tools/config/matrix_shipwreck_ablation.yaml
-batch_name: shipwreck_ablation
+batch_name: ablation25_main
 duration_s: 1500
 settle_s: 15
-seeds: [101, 102, 103, 104]
+seeds: [102, 103, 104, 105]
 
 common_args:
   # Motion gate is fail-closed; headless runs never arm it otherwise.
@@ -109,15 +102,9 @@ common_args:
   ratio_resume: 0.5
 
 runs:
-  # Open loop: dead reckoning only, no closures, no revisit, no re-integration.
-  - name: nolc
-    args: {loop_closure: 'false', revisit: 'false', map_rebuild: 'false'}
-  # Passive SLAM: closures fire, but exploration never breaks off for one.
-  - name: lc
-    args: {loop_closure: 'true', revisit: 'false', map_rebuild: 'false'}
-  # Active SLAM: break off to close a loop when the D-optimality ratio crosses.
-  - name: lc_revisit
-    args: {loop_closure: 'true', revisit: 'true', map_rebuild: 'false'}
-  # Full system: also re-integrate the TSDF at corrected poses after a closure.
-  - name: full
-    args: {loop_closure: 'true', revisit: 'true', map_rebuild: 'true'}
+- name: nolc
+  args: {loop_closure: 'false', revisit: 'false', map_rebuild: 'false'}
+- name: lc
+  args: {loop_closure: 'true', revisit: 'false', map_rebuild: 'true'}
+- name: lc_revisit
+  args: {loop_closure: 'true', revisit: 'true', map_rebuild: 'true'}
