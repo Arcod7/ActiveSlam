@@ -1,88 +1,45 @@
-# Active-SLAM ablation ladder on the shipwreck scene, at the tuned config.
-#
-# Each rung adds exactly one capability, so the change between rungs is
-# attributable to that capability alone (same scene, seeds, motion, noise):
-#
-#   nolc        -> lc          isolates loop closure          (trajectory drift)
-#   lc          -> lc_revisit  isolates uncertainty-triggered revisit
-#   lc_revisit  -> full        isolates TSDF re-integration    (map accuracy)
-#
-# The `full` rung is the interactive config.yaml verbatim, minus the viewers.
-# Every common_arg below is copied from it -- placement, spawn pose, speed,
-# voxel/wall thresholds, inflation radii and the whole wall-oriented executor
-# geometry -- so the ladder measures the system as tuned, not as defaulted.
-#
-# Differences from the earlier matrix_shipwreck_revisit.yaml, which is stale:
-# obj_scale 0.1501 (not 0.0001), speed_factor 0.8 (not 4.0), depth 9.0 (not
-# 6.0), a different spawn pose, and noise_profile realistic_no_reverb -- the
-# near-field reverberation is off at its source, so no near_cutoff/near_fade
-# gate is applied over it (both stay at -1.0, the profile default).
-#
-# 4 configs x 4 seeds = 16 runs x 25 min ~= 7.0 h. Driven seed-major (one
-# batch per seed) so an interrupted sweep still leaves every arm equally
-# sampled; run_matrix.py's own loop is arm-major.
-#
-#   python3 eval/eval_tools/scripts/run_matrix.py \
-#       eval/eval_tools/config/matrix_shipwreck_ablation.yaml
 batch_name: ablation25
 duration_s: 1500
 settle_s: 15
 seeds: [101, 102, 103, 104]
-
+record_bag: true
 common_args:
-  # Motion gate is fail-closed; headless runs never arm it otherwise.
+  rviz: 'false'
   safety_start_enabled: 'true'
   slam: slam
-  mode: frontier
-  mapper: tsdf
-  rviz: 'false'
-
-  # Scene and placement (config.yaml, shipwreck).
-  scene: target
-  obj_mesh: shipwreck.obj
-  obj_x: 40.55
-  obj_y: -13.62
-  obj_z: 20.38
-  obj_scale: 0.1501
-  obj_roll: 0.0
-  obj_pitch: -180.0
-  obj_yaw: 15.0
-  robot_x: 20.2753
-  robot_y: 17.8031
-  robot_z: 8.9324
-  robot_roll: 0.3412
-  robot_pitch: -0.3558
-  robot_yaw: -129.5052
+  noise_profile_dvl: degraded
+  noise_profile_imu: realistic
+  noise_profile_compass: realistic
+  noise_profile_pressure: realistic
+  keyframe_dist_m: 0.5
+  keyframe_angle_rad: 0.2
+  keyframe_max_per_cell: 3
+  loop_closure_radius_m: 5.0
+  loop_closure_min_gap: 20
+  min_inlier_ratio: 0.3
+  noise_profile: realistic
+  scan_sigma_trans: 0.12
+  scan_sigma_rot: 0.08
+  odom_sigma_trans: 0.002
+  odom_sigma_rot: 0.02
+  sigma_allow_xy_m: 0.07
+  sigma_allow_yaw_rad: 0.05
+  ratio_trigger: 1.0
+  ratio_resume: 0.5
+  revisit_min_closures: 1
+  arrival_dwell_s: 6.0
+  stall_exit_s: 5.0
+  revisit_scan_slowdown: 1.0
+  speed_factor: 1.2
+  turn_factor: 0.2
   depth: 9.0
-
-  # Map backend resolution and wall thresholds.
-  tsdf_octomap: 'true'
-  directional_tsdf: 'true'
-  voxel_size: 0.2
-  voxel_min_weight: 3.0
-  voxel_min_solid_confidence: 0.6
-
-  # Motion and scanning.
   motion: walloriented
   scan_style: sweep
   scan_sweep_deg: 180.0
-  speed_factor: 0.8
-  turn_factor: 0.2
   thrust_boost: 'false'
-  scenario: none
-
-  # A* inflation zones.
-  hard_inflation_m: 0.5
-  inflation_m: 2.0
-  plan_inflation_m: 3.7
-
-  # Wall-oriented executor geometry.
-  wall_orientation_offset_deg: 50.0
+  wall_orientation_offset_deg: 45.0
   wall_orientation_lookahead_m: 2.0
-  # >= 2.0 required since the hard inflation radius went to 1.0 m: a goal
-  # placed 1.0 m off a surface lands on the blocked boundary and A* can
-  # never reach it, so the vehicle stalls with nowhere to go.
-  tsdf_frontier_standoff_m: 2.0
+  wall_z_band_m: 1.5
   wall_standoff: 1.5
   wall_switch_goal_distance: 6.0
   wall_switch_scan_angle: 3.14159
@@ -91,24 +48,53 @@ common_args:
   wall_path_look_offset_deg: 30.0
   wall_normal_offset_deg: 0.0
   wall_path_heading_weight: 0.35
-
-  # Perception. realistic_no_reverb leaves the near field empty at its source,
-  # so neither near-field filter is applied on top of it.
-  noise_profile: realistic_no_reverb
+  mapper: tsdf
+  directional_tsdf: 'true'
+  noise_profile_sonar: realistic_no_reverb
   near_cutoff: -1.0
   near_fade: -1.0
-
-  # Revisit trigger, held constant across the ladder so only the `revisit`
-  # switch differs between rungs 2 and 3.
-  sigma_allow_xy_m: 0.1
-  sigma_allow_yaw_rad: 0.05
-  ratio_trigger: 1.0
-  ratio_resume: 0.5
-
+  voxel_size: 0.2
+  trunc_distance: 0.0
+  space_carving: 'true'
+  carve_no_return: 'false'
+  voxel_min_solid_confidence: 0.7
+  voxel_min_weight: 6.0
+  tsdf_octomap: 'true'
+  cache_max_scans: 6000
+  map_rebuild: 'true'
+  mode: frontier
+  tsdf_frontier_standoff_m: 2.0
+  survey_radius_m: 0.0
+  min_goal_separation_m: 0.0
+  projected_map_band_m: 1.0
+  hard_inflation_m: 0.5
+  inflation_m: 1.5
+  plan_inflation_m: 3.0
+  scene: target
+  obj_mesh: shipwreck.obj
+  obj_x: 12.05
+  obj_y: -0.12
+  obj_z: 13.38
+  obj_scale: 0.31
+  obj_roll: 0.0
+  obj_pitch: -180.0
+  obj_yaw: 15.0
+  robot_x: -15.4977
+  robot_y: -4.0461
+  robot_z: 8.9393
+  robot_roll: -0.1439
+  robot_pitch: 0.0955
+  robot_yaw: 150.1176
 runs:
 - name: nolc
   args: {loop_closure: 'false', revisit: 'false', map_rebuild: 'false'}
 - name: lc
   args: {loop_closure: 'true', revisit: 'false', map_rebuild: 'true'}
 - name: lc_revisit
-  args: {loop_closure: 'true', revisit: 'true', map_rebuild: 'true'}
+  args:
+    loop_closure: 'true'
+    revisit: 'true'
+    map_rebuild: 'true'
+    revisit_min_closures: '0'
+    arrival_dwell_s: '30.0'
+    stall_exit_s: '0.0'

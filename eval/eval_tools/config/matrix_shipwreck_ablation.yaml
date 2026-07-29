@@ -1,10 +1,17 @@
-# WARNING: this config predates Phase 50, which raised the hard inflation
-# radius to 1.0 m. tsdf_frontier_standoff_m below is 1.0, which now places
-# every frontier goal on the blocked boundary where A* cannot reach it: the
-# vehicle stalls, travels ~2 m in 25 min, and exits 0 with no error. It also
-# predates directional_tsdf, whose node default (False) integrates zero
-# clouds on current code. Reuse it only to reproduce the 2026-07-26 batch on
-# code of that vintage; for new runs see matrix_ablation25.yaml.
+# WARNING: this config no longer runs. Two independent problems:
+#
+#  1. obj_scale 0.1501 was calibrated against Stonefish BEFORE the mesh-scale
+#     fix (patch 0006, landed 2026-07-26). After it, the same number gives a
+#     much smaller wreck, and the robot spawns 39 m away with nothing in sonar
+#     range: every cloud arrives empty, nothing integrates, no map, no
+#     frontiers, and the vehicle travels ~2 m in 25 minutes.
+#  2. tsdf_frontier_standoff_m 1.0 predates Phase 50, which raised the hard
+#     inflation radius to 1.0 m; a goal 1.0 m off a surface now lands on the
+#     blocked boundary where A* cannot reach it.
+#
+# Both fail silently with exit code 0. Checking out the 2026-07-26 commit does
+# NOT fix (1): the patched simulator is installed at /usr/local/lib, outside
+# the repo. Kept for provenance only; use matrix_ablation25.yaml for new runs.
 # Active-SLAM ablation ladder on the shipwreck scene, at the tuned config.
 #
 # Each rung adds exactly one capability, so the change between rungs is
