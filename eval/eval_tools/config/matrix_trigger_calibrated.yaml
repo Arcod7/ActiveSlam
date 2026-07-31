@@ -26,10 +26,17 @@
 #
 # The schedule interval is a MATCHED CADENCE, not a free parameter: if the two
 # arms revisit a different number of times the comparison measures revisit
-# frequency rather than what triggered them. It is set to the travel at which
-# dead reckoning alone reaches sigma_allow, measured on the closure-free
-# calibration batch (odom_calibration_20260731_0935): sigma_xy crossed 0.2 m at
-# 14.3, 12.0 and 11.7 m of arc on the first three seeds. 13 m is the median.
+# frequency rather than what triggered them. It is the travel at which U_r
+# itself reaches 1 under dead reckoning alone, measured on the closure-free
+# calibration batch (odom_calibration_20260731_0935): 51.4, 34.2 and 26.7 m of
+# arc on three seeds, median 34.
+#
+# Note this is NOT where sigma_xy crosses sigma_allow_xy (11.7-14.3 m). U_r
+# factorises as r_xy^(4/3) * r_yaw^(2/3), and sigma_yaw sits at ~0.023 rad
+# against an allowance of 0.05, so the yaw factor is 0.60 and the effective
+# position trigger is sigma_xy = 0.295 m rather than 0.2 m. A comfortably low
+# yaw ratio dilutes the position trigger -- worth stating, because it means
+# sigma_allow_yaw_rad silently rescales the position threshold.
 batch_name: trigger_calibrated
 duration_s: 300
 settle_s: 15
@@ -127,4 +134,4 @@ runs:
     revisit_schedule_every_m: 0.0
 - name: scheduled
   args:
-    revisit_schedule_every_m: 13.0
+    revisit_schedule_every_m: 34.0

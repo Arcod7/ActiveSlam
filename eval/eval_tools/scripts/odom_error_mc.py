@@ -282,13 +282,13 @@ def plot(gt, results, profile, png):
         ax.plot(gt['arc'], np.sqrt(np.mean(err ** 2, axis=1)),
                 lw=2.0 if name == 'ALL' else 1.1,
                 ls='-' if not name.startswith(' ') else ':', label=name)
-    for label, coh, disp in (('model coherent/arc', True, False),
-                             ('model coherent/disp', True, True),
-                             ('model independent', False, False)):
-        s, sig = model_sigma(gt, profile, coh, disp)
-        ax.plot(s, sig, 'k', lw=1.4,
-                ls={'model coherent/arc': '--', 'model coherent/disp': '-.',
-                    'model independent': ':'}[label], label=label)
+    for label, coh, disp, att, style, col, lw in (
+            ('model: DVL only, arc arm', True, False, False, '--', 'k', 1.2),
+            ('model: DVL only, correct arms', True, True, False, '-.', 'k', 1.2),
+            ('model: per-edge independent', False, False, False, ':', 'k', 1.2),
+            ('MODEL AS SHIPPED (+ attitude)', True, True, True, '-', 'k', 2.4)):
+        s, sig = model_sigma(gt, profile, coh, disp, att)
+        ax.plot(s, sig, color=col, lw=lw, ls=style, label=label)
     ax.set_xlabel('ground-truth arc length (m)')
     ax.set_ylabel('horizontal error, RMS over trials (m)')
     ax.set_title('Dead-reckoning error by term, against what the graph budgets')

@@ -141,7 +141,37 @@ seeds. Samples at a given milestone are independent by construction, so the
 chi-square band for n = number of seeds is legitimate, and the output is a
 calibration curve against distance rather than a single number.
 
-### What the closure-free runs show
+### What the closure-free runs show (n = 3, `odom_calibration_20260731_0935`)
+
+Pooled ANEES over XY, one sample per seed per milestone:
+
+| GT arc | ANEES (2 DoF) | 95% band | verdict |
+|---|---|---|---|
+| 20 m | 0.40 | [0.41, 4.82] | conservative 0.45x |
+| 40 m | 2.22 | [0.41, 4.82] | consistent |
+| 60 m | 3.37 | [0.41, 4.82] | consistent |
+| 80 m | 4.60 | [0.41, 4.82] | consistent, at the edge |
+
+The marginal is statistically consistent over 20-80 m, which the previous model
+was not at any distance. Two honest qualifications: with three seeds the
+chi-square band is very wide, so "consistent" is weak evidence rather than a
+result; and the sequence climbs monotonically toward the upper bound, so more
+seeds would likely fail the later milestones.
+
+The residual is a **growth-rate** gap. In the full pipeline the true error grows
+as `s^1.24` while the marginal grows as `s^0.33`. In the open-loop Monte Carlo
+the two exponents match (0.43 against 0.44), so the gap is not in the model's
+form. Two causes, neither addressed here:
+
+- The controller runs on the SLAM estimate, so estimate error changes where the
+  vehicle physically goes and compounds. The Monte Carlo replays a recorded
+  path open-loop and cannot show this by construction.
+- The displacement arm saturates. On a survey orbiting one object it reaches
+  ~31 m and stops, so the coherent terms stop contributing while the true error
+  keeps accumulating. This is the documented cost of the monotone running-max
+  bound, and it is the strongest argument for the estimated-state formulation.
+
+### Per-keyframe detail on one seed
 
 Loop closure, revisit and map rebuild are all off in
 `config/matrix_odom_calibration.yaml`, because a closure resets both the error
@@ -168,6 +198,31 @@ near-isotropic -- it happens to be here, major/minor 1.1, but that is a
 property of this trajectory and not a licence. And per-run summaries are
 dominated by the single coherent draw, so read the pooled milestone table, not
 one seed's final number.
+
+## Open problem: the reported marginal is not monotone
+
+In a closure-free run the marginal of the newest keyframe should only grow --
+every edge adds variance and nothing removes it. It does not. Across the three
+calibration seeds `sigma_xy` decreases on roughly 46% of keyframe steps, with
+excursions as large as 0.553 -> 0.288 m inside one run.
+
+Ruled out: no pose-graph restart (`PoseGraph started` appears exactly once per
+run), no loop closures (`lc_count` 0 throughout), and the attitude+depth prior
+leaves x and y at sigma 1e3 so it is not constraining horizontal position. The
+most likely remaining cause is the live yaw-prior variance, which
+`prior_sigmas_with_yaw` refreshes from the attitude filter's fluctuating
+posterior on every keyframe; yaw is correlated with XY through the odometry
+chain, so a momentarily tighter yaw prior tightens the XY marginal too.
+iSAM2 relinearisation is a secondary candidate.
+
+This matters for the trigger, not just for tidiness. `revisit_planner` compares
+a **single live D-opt sample** against its threshold. If that sample oscillates
+by up to 2x for reasons unrelated to actual drift, the trigger fires on noise,
+and the spread in where U_r first crosses 1 -- 26.7, 34.2 and 51.4 m on three
+seeds of an identical configuration -- is partly this rather than genuine
+seed-to-seed variation. A running maximum or a short median filter on the
+trigger input would be the cheap mitigation; finding the actual cause is the
+right one.
 
 ## Choosing the allowable uncertainty
 
