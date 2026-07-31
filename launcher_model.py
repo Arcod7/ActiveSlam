@@ -25,6 +25,7 @@ LIVE = {
     "arrival_dwell_s":            ("revisit_planner", "arrival_dwell_s"),
     "stall_exit_s":               ("revisit_planner", "stall_exit_s"),
     "wall_standoff":             ("wall_looking", "standoff_m"),
+    "wall_max_surface_dist":     ("wall_looking", "max_surface_dist_m"),
     "wall_switch_goal_distance": ("wall_looking", "switch_goal_distance_m"),
     "wall_switch_scan_angle":    ("wall_looking", "switch_scan_angle_rad"),
     "wall_switch_scan_yaw":      ("wall_looking", "switch_scan_yaw"),
@@ -32,6 +33,7 @@ LIVE = {
     "wall_path_look_offset_deg": ("wall_looking", "path_look_offset_deg"),
     "wall_normal_offset_deg":    ("wall_looking", "wall_normal_offset_deg"),
     "wall_path_heading_weight":  ("wall_looking", "path_heading_weight"),
+    "wall_yaw_only":             ("wall_looking", "yaw_only"),
 }
 
 # These object-pose fields are applied through Stonefish's /set_entity_pose
@@ -171,10 +173,11 @@ class Section:
 
 
 SECTIONS = [
-    Section("preset", "0. Preset",
-            "Named rungs of the evaluation ladder. Each one adds a single "
-            "piece of the SLAM stack to the one before it, so the difference "
-            "between two runs is the contribution of that piece alone."),
+    Section("preset", "0. Platform & preset",
+            "What the stack is driving — the simulator or a real vehicle — and "
+            "which rung of the evaluation ladder it stands on. Each rung adds "
+            "a single piece of the SLAM stack to the one before it, so the "
+            "difference between two runs is that piece alone."),
 
     Section("localisation", "1. Localisation",
             "Where the vehicle thinks it is: the sensors dead reckoning is "
@@ -238,6 +241,22 @@ SECTIONS = [
             "The 2-D slice A* and frontier detection both work on: how thick "
             "it is, and how close to a wall a route may pass.", "planning"),
 
+    # Shares the number with Scene: both answer "what world does this run
+    # happen in", and the platform switch means only one is ever on screen.
+    Section("hardware", "4. Real vehicle",
+            "The links and hardware geometry a real run needs — the two "
+            "MAVLink endpoints, how much authority ArduSub is given, and where "
+            "the sonar sits on the vehicle."),
+    Section("hardware.link", "MAVLink",
+            "The two BlueOS endpoints this stack opens: one to send body "
+            "demands to ArduSub, one to read its navigation estimate back. "
+            "pymavlink binds each UDP port, so they cannot share one.",
+            "hardware"),
+    Section("hardware.sonar", "Sonar mount",
+            "Where the Sonar 3D-15 is on the vehicle. The mapper integrates "
+            "clouds through this transform, so an error here is an error in "
+            "the map that no amount of SLAM will remove.", "hardware"),
+
     Section("scene", "4. Scene",
             "The world the run happens in and where things start in it — the "
             "Stonefish world, the object under inspection, and the vehicle's "
@@ -283,11 +302,24 @@ SECTION_DEPTH = {s.id: s.depth for s in SECTIONS}
 HIDDEN_SECTIONS_KEY = "hidden_sections"
 DEFAULT_HIDDEN_SECTIONS = [s.id for s in SECTIONS if s.parent is not None]
 
-_frontier = lambda v: v["mode"] == "frontier"
+PLATFORM_SIM = "stonefish"
+PLATFORM_REAL = "real_life"
+
+# Everything downstream of the simulator is gated on this rather than on the
+# option it would otherwise read: a hidden option keeps its last value (see
+# matching_preset), so slam:=slam left over from a sim run must not be able to
+# start a pose graph fed by topics no real vehicle publishes.
+_sim = lambda v: v.get("platform", PLATFORM_SIM) == PLATFORM_SIM
+_real = lambda v: v.get("platform", PLATFORM_SIM) == PLATFORM_REAL
+
+_frontier = lambda v: _sim(v) and v["mode"] == "frontier"
 # goto and frontier both run the planner layer (A* + path executor); they
 # differ only in who picks the goal.
-_planner = lambda v: v["mode"] in ("frontier", "goto")
+_planner = lambda v: _sim(v) and v["mode"] in ("frontier", "goto")
 _slam = lambda v: v["slam"] == "slam"
+# Injected sensor noise and every ground-truth-derived metric are simulator
+# properties; the pose graph consuming them is not.
+_sim_slam = lambda v: _sim(v) and _slam(v)
 # Both TSDF choices run the same VDBFusion backend; they differ only in how
 # many volumes it keeps.
 _tsdf = lambda v: v["mapper"].startswith("tsdf")
@@ -295,7 +327,10 @@ _tsdf = lambda v: v["mapper"].startswith("tsdf")
 # every option under it off the screen.
 _revisit_armed = lambda v: _slam(v) and _planner(v) and v["loop_closure"]
 _revisit = lambda v: _revisit_armed(v) and v["revisit"]
-_target_scene = lambda v: v["scene"] == "target"
+_target_scene = lambda v: _sim(v) and v["scene"] == "target"
+# The sonar mount only matters where a physical sonar has to be located
+# relative to the vehicle; in the sim the scenario file already places it.
+_real_sonar = lambda v: _real(v) and v["real_sonar"]
 
 # The preset line lands here when the options match no rung of the ladder.
 CUSTOM_PRESET = "custom"
@@ -324,6 +359,21 @@ SONAR_NOISE_HELP = {
 }
 
 PARAMS = [
+    Param("platform", "Platform", "enum", PLATFORM_SIM, "preset",
+          "What the stack drives. stonefish is the simulator: ground-truth "
+          "pose, simulated sonar and nav sensors, the full SLAM and "
+          "exploration stack. real_life drives a BlueROV2 Heavy through "
+          "ArduSub over MAVLink and maps from a physical Sonar 3D-15 — no "
+          "simulator, no ground truth, and so no ATE/RPE evaluation. "
+          "Everything the simulator was the only source of disappears from "
+          "this list when it is selected.",
+          [PLATFORM_SIM, PLATFORM_REAL],
+          {PLATFORM_SIM: "Simulator: ground truth, simulated sensors, full "
+                         "SLAM and exploration stack.",
+           PLATFORM_REAL: "Real BlueROV2 through ArduSub, real sonar, teleop "
+                          "only. Read IRL_TEST.md before enabling motion."},
+          wip=[PLATFORM_REAL]),
+
     Param("preset", "Preset", "enum", "custom", "preset",
           "Which rung of the evaluation ladder to run. Each one adds a single "
           "piece of the SLAM stack to the one before it, so the difference in "
@@ -347,7 +397,9 @@ PARAMS = [
                                    "revisits — the active SLAM condition, "
                                    "where the planner spends travel to go and "
                                    "close a loop on purpose."},
-          cycle_skip=[CUSTOM_PRESET]),
+          # Every rung is defined by a SLAM condition measured against ground
+          # truth; a real run has neither.
+          visible=_sim, cycle_skip=[CUSTOM_PRESET]),
 
     # ---------------------------------------------------------------- localisation
     Param("slam", "Pose source", "enum", "none", "localisation",
@@ -356,8 +408,12 @@ PARAMS = [
           "pressure/IMU/DVL dead reckoning with loop closure, so the estimate "
           "drifts and gets corrected like a real system.",
           ["none", "slam"],
-          {"none": "Ground-truth TF straight from Stonefish.",
-           "slam": "GTSAM iSAM2 pose graph + sonar/nav noise + ATE/RPE eval."}),
+          {"none": "Ground-truth TF straight from Stonefish; on hardware, "
+                   "ArduSub's own estimate through mavlink_odometry.",
+           "slam": "GTSAM iSAM2 pose graph + loop closure. In the simulator "
+                   "it fuses simulated sensors and is scored by ATE/RPE; on "
+                   "hardware it fuses the autopilot's, with no ground truth "
+                   "to score against."}),
 
     Param("noise_profile_dvl", "DVL noise", "enum", "realistic",
           "localisation.sensors",
@@ -365,27 +421,27 @@ PARAMS = [
           "Dead reckoning integrates the DVL, so this is what decides how fast "
           "the estimate walks away from truth, and therefore how often a "
           "revisit has to be spent pulling it back.",
-          NAV_NOISE, NAV_NOISE_HELP, visible=_slam),
+          NAV_NOISE, NAV_NOISE_HELP, visible=_sim_slam),
     Param("noise_profile_imu", "IMU noise", "enum", "realistic",
           "localisation.sensors",
           "Error injected into the simulated IMU — the angular rate knob "
           "(roll, pitch and yaw rate, integrated into attitude). Yaw rate "
           "integrates without bound, so this and the compass between them set "
           "the heading half of the pose uncertainty.",
-          NAV_NOISE, NAV_NOISE_HELP, visible=_slam),
+          NAV_NOISE, NAV_NOISE_HELP, visible=_sim_slam),
     Param("noise_profile_compass", "Compass noise", "enum", "realistic",
           "localisation.sensors",
           "Error injected into the simulated compass — the absolute heading "
           "knob, and the only thing that stops integrated yaw drifting "
           "without bound.",
-          NAV_NOISE, NAV_NOISE_HELP, visible=_slam),
+          NAV_NOISE, NAV_NOISE_HELP, visible=_sim_slam),
     Param("noise_profile_pressure", "Pressure noise", "enum", "realistic",
           "localisation.sensors",
           "Error injected into the simulated pressure sensor — the depth knob. "
           "Depth is directly observed rather than integrated, so this is the "
           "best-constrained axis of the pose and the reason planning happens "
           "in a horizontal band.",
-          NAV_NOISE, NAV_NOISE_HELP, visible=_slam),
+          NAV_NOISE, NAV_NOISE_HELP, visible=_sim_slam),
 
     Param("loop_closure", "Loop closure", "bool", True, "localisation.graph",
           "Detect revisited places and add graph constraints that correct "
@@ -597,16 +653,19 @@ PARAMS = [
           step=0.5, lo=1.0, hi=10.0, visible=_revisit),
 
     Param("speed_factor", "Move speed", "float", 1.0, "localisation.motion",
-          "Multiplies forward/strafe/vertical motion, in teleop (W/S/Q/E/Space/X) "
-          "and in frontier mode (whichever motion executor is driving). Commands "
-          "saturate at the safety gate's +-1.0 limit, so above roughly 1.1 this "
-          "stops making the vehicle faster. Live, no restart.",
-          step=0.20, lo=0.1, hi=5.0),
+          "Multiplies forward/strafe/vertical motion for whichever motion "
+          "executor is driving. Commands saturate at the safety gate's +-1.0 "
+          "limit, so above roughly 1.1 this stops making the vehicle faster. "
+          "Live, no restart. Planner modes only: the teleop keyboard node is "
+          "started by hand in its own terminal and takes no launcher "
+          "parameters, so this could never reach it.",
+          step=0.20, lo=0.1, hi=5.0, visible=_planner),
     Param("turn_factor", "Turn speed", "float", 1.0, "localisation.motion",
-          "Multiplies yaw, in teleop (A/D) and in frontier mode (whichever motion "
-          "executor is driving), independent of the move speed. Also saturates "
-          "at the safety gate's +-1.0 limit (roughly 6.7x). Live, no restart.",
-          step=0.10, lo=0.1, hi=5.0),
+          "Multiplies yaw for whichever motion executor is driving, "
+          "independent of the move speed. Also saturates at the safety gate's "
+          "+-1.0 limit (roughly 6.7x). Live, no restart. Planner modes only, "
+          "for the same reason as the move speed.",
+          step=0.10, lo=0.1, hi=5.0, visible=_planner),
     Param("robot_depth_target", "Cruise depth (m)", "float", 8.0,
           "localisation.motion",
           "Fixed NED Z the autonomous path controller holds while exploring "
@@ -648,14 +707,17 @@ PARAMS = [
           "Start the motion safety gate already enabled. Normally left off so "
           "motion is armed deliberately from the RViz panel after checking the "
           "scene. The gate is fail-closed: it blocks commands that are stale, "
-          "oversized, or missing odometry."),
+          "oversized, or missing odometry.",
+          # IRL_TEST.md: a real launch never starts with motion already armed.
+          visible=_sim),
     Param("thrust_boost", "Thrust boost (2.5x ceiling)", "bool", False,
           "localisation.motion",
           "Scale the simulated thruster RPM ceiling 2.5x for fast repositioning "
           "between runs. Body commands still normalize to the safety gate's "
           "+-1.0 range, so this never trips INVALID_COMMAND — it raises what "
           "100% effort means physically, not the command range. Not a "
-          "physically realistic BlueROV2/T200 value; restarts the simulator."),
+          "physically realistic BlueROV2/T200 value; restarts the simulator.",
+          visible=_sim),
 
     Param("wall_orientation_offset_deg", "Wall yaw offset (deg)", "float", 30.0,
           "localisation.executor",
@@ -678,11 +740,32 @@ PARAMS = [
           "look direction. Live-tunable while running.",
           step=0.5, lo=0.5, hi=10.0,
           visible=lambda v: _planner(v) and v["motion"] == "walloriented"),
+    Param("wall_yaw_only", "Wall guides yaw only", "bool", True,
+          "localisation.executor",
+          "Let the wall set the look direction and nothing else: translation "
+          "follows the planner path, with no standoff regulation and no "
+          "wall-tangent travel. Turn it off to restore the wall-orbit "
+          "behaviour, where Wall standoff and Path influence apply — that "
+          "path holds a distance to the infinite plane through the selected "
+          "surface, so it can park the vehicle in open water past the end of "
+          "a wall. Live-tunable while running.",
+          visible=lambda v: _planner(v) and v["motion"] == "walllooking"),
     Param("wall_standoff", "Wall standoff (m)", "float", 1.5,
           "localisation.executor",
           "Target distance to hold from the wall while wall-looking. "
           "Live-tunable while running.",
           step=0.1, lo=0.1,
+          visible=lambda v: (_planner(v) and v["motion"] == "walllooking"
+                             and not v["wall_yaw_only"])),
+    Param("wall_max_surface_dist", "Wall acquisition range (m)", "float", 8.0,
+          "localisation.executor",
+          "Furthest a mapped surface can be and still be steered by. Nothing "
+          "within this radius means no wall is selected, and the no-wall "
+          "response only rotates — so a start pose further out than this from "
+          "the structure never acquires and the planner blacklists every goal "
+          "as BLOCKED:NO_WALL. Raise it when the vehicle starts far from the "
+          "scene. Live-tunable while running.",
+          step=0.5, lo=1.0, hi=40.0,
           visible=lambda v: _planner(v) and v["motion"] == "walllooking"),
     Param("wall_switch_goal_distance", "Wall-switch goal dist (m)", "float", 6.0,
           "localisation.executor",
@@ -705,7 +788,8 @@ PARAMS = [
           "Travel-direction blend: 0 follows the wall tangent, 1 follows the "
           "planned path. Live-tunable.",
           step=0.05, lo=0.0, hi=1.0,
-          visible=lambda v: _planner(v) and v["motion"] == "walllooking"),
+          visible=lambda v: (_planner(v) and v["motion"] == "walllooking"
+                             and not v["wall_yaw_only"])),
     Param("wall_path_look_offset_deg", "Path look offset (deg)", "float", 30.0,
           "localisation.executor",
           "Degrees to turn the path-derived look heading toward the wall. "
@@ -756,7 +840,7 @@ PARAMS = [
           "near field; the no_reverb profiles remove it at the source, which "
           "keeps close geometry the near-field filter below would also throw "
           "away.",
-          SONAR_NOISE, SONAR_NOISE_HELP, visible=_slam),
+          SONAR_NOISE, SONAR_NOISE_HELP, visible=_sim_slam),
     Param("noise_attenuation", "Near-field filter", "enum", "none",
           "mapping.sensors",
           "Post-filter applied over any noise profile, clearing the near-field "
@@ -768,7 +852,7 @@ PARAMS = [
           {"none": "Keep every return the profile produces.",
            "cut_close": "Gate out the near-field reverberation spray.",
            "fade_close": "Thin the near field, keeping close geometry visible."},
-          visible=_slam),
+          visible=_sim_slam),
     Param("near_cutoff_m", "Near-field distance (m)", "float", 1.6,
           "mapping.sensors",
           "Extent of the near field the filter acts on: the range cut_close "
@@ -776,7 +860,7 @@ PARAMS = [
           "larger spray (e.g. the degraded profile reaches ~2.5 m); lower it to "
           "leave more close geometry alone.",
           step=0.1, lo=0.2, hi=15.0,
-          visible=lambda v: _slam(v) and v["noise_attenuation"] != "none"),
+          visible=lambda v: _sim_slam(v) and v["noise_attenuation"] != "none"),
     Param("near_fade_p", "Fade strength", "float", 0.8, "mapping.sensors",
           "fade_close only: probability of dropping a return at the sensor "
           "itself, falling to zero at the near-field distance. 0.8 discards "
@@ -784,7 +868,7 @@ PARAMS = [
           "surface filling every beam still comes through at a fifth of its "
           "density and refills over successive pings.",
           step=0.05, lo=0.0, hi=1.0,
-          visible=lambda v: _slam(v) and v["noise_attenuation"] == "fade_close"),
+          visible=lambda v: _sim_slam(v) and v["noise_attenuation"] == "fade_close"),
 
     Param("voxel_size", "Voxel size (m)", "float", 0.2, "mapping.grid",
           "Edge length of one map cell, for whichever backend is selected — "
@@ -884,7 +968,11 @@ PARAMS = [
           ["teleop", "goto", "frontier"],
           {"teleop": "Manual keyboard control, driven from this launcher.",
            "goto": "Drive a target point; the planner swims the vehicle to it.",
-           "frontier": "Autonomous frontier-based exploration."}),
+           "frontier": "Autonomous frontier-based exploration."},
+          # A real run is teleop and only teleop until IRL_TEST.md Phase 5 has
+          # been passed on the vehicle; the launcher does not offer autonomy it
+          # has no accepted hardware path for.
+          visible=_sim),
 
     Param("frontier_space", "Frontier space", "enum", "2d", "planning.goals",
           "Where frontiers — the boundary between known-free and unknown — are "
@@ -981,13 +1069,120 @@ PARAMS = [
           step=0.05, lo=0.0,
           visible=_planner),
 
+    # ------------------------------------------------------------------ hardware
+    Param("real_sonar", "Sonar 3D-15 mapping", "bool", True, "hardware",
+          "Start the WaterLinked Sonar 3D-15 driver and map from its returns. "
+          "Off runs the motion path alone — safety gate, ArduSub adapter and "
+          "teleop — which is IRL_TEST.md Phase 3/4 and the part that has to "
+          "pass before mapping is worth switching on.",
+          visible=_real),
+    Param("ardusub_backend", "ArduSub interface", "enum", "manual_control",
+          "hardware",
+          "Which MAVLink message carries the gated body demand. "
+          "manual_control sends pilot-axis fractions and needs ALT_HOLD; "
+          "local_ned_velocity sends metric velocity setpoints and needs "
+          "GUIDED, which ArduSub only supports with a position and depth "
+          "solution in its EKF.",
+          ["manual_control", "local_ned_velocity"],
+          {"manual_control": "MANUAL_CONTROL axes in ALT_HOLD. The first wet "
+                             "test uses this.",
+           "local_ned_velocity": "SET_POSITION_TARGET_LOCAL_NED in GUIDED. "
+                                 "Needs a healthy EKF position solution."},
+          visible=_real),
+    Param("manual_authority", "Manual authority", "float", 0.15, "hardware",
+          "Fraction of the MAVLink pilot axis range ROS is allowed to ask "
+          "for. A full-scale normalized demand of 1.0 reaches the vehicle as "
+          "this much stick. Raise it only between runs, after reviewing the "
+          "log of the one before.",
+          step=0.05, lo=0.0, hi=1.0,
+          visible=lambda v: _real(v) and v["ardusub_backend"] == "manual_control"),
+    Param("enable_vertical", "ROS vertical authority", "bool", False,
+          "hardware",
+          "Whether ROS may command the vertical axis. Off leaves depth to "
+          "ArduSub's own hold loop, which is what the first wet tests use — "
+          "the up/down drive keys then do nothing, by design rather than by "
+          "fault. Do not run this against a ROS depth controller until both "
+          "loops' signs and responsibilities are documented.",
+          visible=_real),
+    Param("require_odom", "Gate requires odometry", "bool", True, "hardware",
+          "Whether the safety gate refuses to pass any command without fresh "
+          "pose input. Off is for a motion-only acceptance run with no pose "
+          "source at all; it removes one of the gate's fail-closed conditions, "
+          "so never leave it off once anything is mapping or planning.",
+          visible=_real),
+
+    Param("mavlink_command_url", "Command endpoint", "text",
+          "udpin:0.0.0.0:14560", "hardware.link",
+          "pymavlink URL the ArduSub adapter listens on. Create a dedicated "
+          "external endpoint in BlueOS pointing at this machine and port, and "
+          "leave the normal Cockpit/QGroundControl endpoint running — the "
+          "pilot's takeover path must not depend on this one.",
+          visible=_real),
+    Param("mavlink_odom_url", "Navigation endpoint", "text",
+          "udpin:0.0.0.0:14561", "hardware.link",
+          "Second BlueOS endpoint, read-only, for the navigation estimate. "
+          "pymavlink binds the UDP port, so this must differ from the command "
+          "endpoint or whichever node starts second fails to open its link.",
+          visible=_real),
+    Param("require_position", "ArduSub has XY position", "bool", True,
+          "hardware.link",
+          "Whether ArduSub's EKF has a horizontal position source — a DVL or "
+          "GPS. Without one, LOCAL_POSITION_NED X/Y sit at the origin while "
+          "depth and attitude stay good, and a map built against that pose is "
+          "wrong the moment the vehicle translates. Off publishes depth and "
+          "attitude only and marks X/Y unestimated rather than reporting a "
+          "confident zero.",
+          visible=_real),
+
+    Param("sonar_ip", "Sonar IP", "text", "192.168.2.199", "hardware.sonar",
+          "Address the Sonar 3D-15 multicasts from. The driver drops packets "
+          "from any other source, so a wrong value here shows up as a driver "
+          "that starts cleanly and publishes nothing.",
+          visible=_real_sonar),
+    # The six below are the lever arm and orientation of a base_link -> sonar3d
+    # static transform. The two frames disagree on handedness: base_link is NED,
+    # while the driver builds its cloud x-forward / z-up, so the neutral roll is
+    # 180 deg, not 0. Translations are read in the NED parent frame.
+    Param("sonar_mount_x", "Sonar X (m)", "float", 0.0, "hardware.sonar",
+          "Sonar position forward of base_link, in metres.",
+          step=0.01, lo=-2.0, hi=2.0, visible=_real_sonar),
+    Param("sonar_mount_y", "Sonar Y (m)", "float", 0.0, "hardware.sonar",
+          "Sonar position to starboard of base_link, in metres.",
+          step=0.01, lo=-2.0, hi=2.0, visible=_real_sonar),
+    Param("sonar_mount_z", "Sonar Z (m)", "float", 0.0, "hardware.sonar",
+          "Sonar position below base_link, in metres — base_link is NED, so "
+          "a sonar mounted above the origin is negative.",
+          step=0.01, lo=-2.0, hi=2.0, visible=_real_sonar),
+    Param("sonar_mount_roll", "Sonar roll (deg)", "float", 180.0,
+          "hardware.sonar",
+          "Sonar roll relative to base_link. 180 is the neutral value, not 0: "
+          "the driver publishes an ENU-handed cloud (x forward, y to port, z "
+          "up) into an NED body frame, and a half turn about x is what "
+          "reconciles them. Roll the mount away from flat by adding to it. "
+          "Check it before trusting a map: hold a known flat wall in view and "
+          "confirm it comes out vertical and on the correct side — a map that "
+          "mirrors top for bottom, or port for starboard, is this value.",
+          step=5.0, lo=-180.0, hi=180.0, visible=_real_sonar),
+    Param("sonar_mount_pitch", "Sonar pitch (deg)", "float", 0.0,
+          "hardware.sonar",
+          "Sonar pitch relative to base_link. A tilt-down mount is positive. "
+          "Applied about the NED parent axes, so the roll above does not "
+          "invert it.",
+          step=5.0, lo=-180.0, hi=180.0, visible=_real_sonar),
+    Param("sonar_mount_yaw", "Sonar yaw (deg)", "float", 0.0,
+          "hardware.sonar",
+          "Sonar yaw relative to base_link, positive to starboard. Applied "
+          "about the NED parent axes, so the roll above does not invert it.",
+          step=5.0, lo=-180.0, hi=180.0, visible=_real_sonar),
+
     # ---------------------------------------------------------------------- scene
     Param("scene", "Scene", "enum", "waterlinked", "scene",
           "Stonefish world to launch. waterlinked is the unchanged baseline; "
           "target contains one selectable static object that can be moved live.",
           ["waterlinked", "target"],
           {"waterlinked": "Baseline offshore-station scene.",
-           "target": "One static mesh or built-in pipe for sonar demonstrations."}),
+           "target": "One static mesh or built-in pipe for sonar demonstrations."},
+          visible=_sim),
 
     Param("obj_mesh", "Object mesh", "enum", "pipe", "scene.object",
           "Object to place in the target scene. The launcher scans data/obj "
@@ -1027,27 +1222,27 @@ PARAMS = [
           "only where the next start puts it and a running vehicle is left "
           "alone. Either way the flow is one-way: these say where the vehicle "
           "is put, never where it has got to. Where it actually is shows in the "
-          "pose table on the right."),
+          "pose table on the right.", visible=_sim),
     Param("robot_x", "Robot X (m)", "float", 0.0, "scene.robot",
           "Spawn north/X position in world_ned, used at start and at r reset. "
           "Driving does not change it; with Move robot in real time on, editing "
           "it teleports the vehicle here.",
-          step=0.5, lo=-1000.0, hi=1000.0),
+          step=0.5, lo=-1000.0, hi=1000.0, visible=_sim),
     Param("robot_y", "Robot Y (m)", "float", 0.0, "scene.robot",
           "Spawn east/Y position in world_ned. Placed, not read back, as above.",
-          step=0.5, lo=-1000.0, hi=1000.0),
+          step=0.5, lo=-1000.0, hi=1000.0, visible=_sim),
     Param("robot_z", "Robot Z (m)", "float", 8.0, "scene.robot",
           "Spawn down/Z position in world_ned. Placed, not read back, as above.",
-          step=0.5, lo=-1000.0, hi=1000.0),
+          step=0.5, lo=-1000.0, hi=1000.0, visible=_sim),
     Param("robot_roll", "Robot roll (deg)", "float", 0.0, "scene.robot",
           "Spawn roll. Placed, not read back, as above.",
-          step=5.0, lo=-180.0, hi=180.0),
+          step=5.0, lo=-180.0, hi=180.0, visible=_sim),
     Param("robot_pitch", "Robot pitch (deg)", "float", 0.0, "scene.robot",
           "Spawn pitch. Placed, not read back, as above.",
-          step=5.0, lo=-180.0, hi=180.0),
+          step=5.0, lo=-180.0, hi=180.0, visible=_sim),
     Param("robot_yaw", "Robot yaw (deg)", "float", 0.0, "scene.robot",
           "Spawn yaw. Placed, not read back, as above.",
-          step=5.0, lo=-180.0, hi=180.0),
+          step=5.0, lo=-180.0, hi=180.0, visible=_sim),
 
     # ---------------------------------------------------------------------- tools
     Param("rviz", "RViz", "bool", True, "tools",
@@ -1093,21 +1288,31 @@ PARAMS = [
           "drift_return: outbound leg Y offset from the captured start pose.",
           step=1.0,
           visible=lambda v: _frontier(v) and v["scenario"] == "drift_return"),
+    Param("rosbag", "Record rosbag", "bool", False, "tools.eval",
+          "Record the run to eval/bags/<platform>_<timestamp>/: commands "
+          "either side of the safety gate, safety status, odometry, TF, raw "
+          "sonar, map and goals. Named topics rather than everything — the "
+          "RViz marker arrays are most of the bandwidth and none of the "
+          "evidence. The bag is closed when the stack is stopped or the "
+          "launcher quits, both of which send SIGINT; a bag whose recorder was "
+          "killed outright has no metadata and will not open. On hardware this "
+          "is the run record IRL_TEST.md asks for, so leave it on."),
+
     Param("noise_seed", "Noise seed", "int", -1, "tools.eval",
           "Seed for the noise draws. -1 uses the profile's own seed; set an "
           "explicit value for reproducible or decorrelated repeat runs.",
-          visible=_slam),
+          visible=_sim_slam),
     Param("rpe_delta", "RPE window (s)", "float", 1.0, "tools.eval",
           "Time window relative pose error is measured over. RPE reports the "
           "drift accumulated within one window, so this picks what the number "
           "on the right actually means — a short window scores local "
           "odometry, a long one scores whether loop closure is holding the "
           "trajectory together.",
-          step=0.5, lo=0.1, hi=60.0, visible=_slam),
+          step=0.5, lo=0.1, hi=60.0, visible=_sim_slam),
     Param("output_dir", "Output dir", "text", "", "tools.eval",
           "Where the eval stack writes TUM trajectories and CSV metrics. "
           "Empty means a timestamped directory under eval/runs/.",
-          visible=_slam),
+          visible=_sim_slam),
 ]
 
 PARAM_MAP = {p.id: p for p in PARAMS}
@@ -1160,7 +1365,15 @@ LAUNCH_ARG_SKIP = {"keyboard", "robot_pose_live", "preset", "rqt", "rqt_depthmap
                    "thrust_boost", "noise_attenuation", "near_cutoff_m",
                    "near_fade_p",
                    "frontier_space", "exploration", "goal_order",
-                   "revisit_scoring", "revisit_trigger"}
+                   "revisit_scoring", "revisit_trigger",
+                   # The real-vehicle surface: demo.launch.py is the simulator
+                   # demo and declares no argument for any of it.
+                   "platform", "real_sonar", "ardusub_backend",
+                   "manual_authority", "enable_vertical", "require_odom",
+                   "mavlink_command_url", "mavlink_odom_url",
+                   "require_position", "sonar_ip",
+                   "sonar_mount_x", "sonar_mount_y", "sonar_mount_z",
+                   "sonar_mount_roll", "sonar_mount_pitch", "sonar_mount_yaw"}
 
 
 def unimplemented(values):

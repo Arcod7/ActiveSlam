@@ -34,6 +34,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import launcher_core as core
+import launcher_eval as evaluation
 import launcher_model as model
 
 MIN_TERM_HEIGHT = 24
@@ -47,6 +48,12 @@ CONFIG_VERSION = 2
 # Kept only as a one-time migration source for users of the previous launcher.
 LEGACY_SELECTION_FILE = os.path.expanduser("~/.activeslam_launcher.json")
 LOG_DIR = os.path.join(REPO_ROOT, "logs", "launcher")
+EVAL_CONFIG_DIR = os.path.join(REPO_ROOT, "eval", "eval_tools", "config")
+KEYBOARD_ROW = "Keyboard layout"
+WELCOME_OPTIONS = (
+    "Launch", "Evaluation", "---",
+    "Update", "Rebuild", "---", "Infos", "Exit", "---", KEYBOARD_ROW,
+)
 
 C_HEAD, C_ERR, C_INFO, C_OK, C_WARN = 1, 2, 3, 4, 5
 # Set but not running: purple for a value the stack has yet to be applied with.
@@ -1084,10 +1091,8 @@ def nav_step(stdscr, nav, key, buffered, idx, delta, count, skip=None):
 # --------------------------------------------------------------------------
 # screens
 
-def welcome_screen(stdscr, built, values):
-    KEYBOARD_ROW = "Keyboard layout"
-    options = ["Launch", "---",
-               "Update", "Rebuild", "---", "Infos", "Exit", "---", KEYBOARD_ROW]
+def welcome_screen(stdscr, built, values, eval_runner):
+    options = WELCOME_OPTIONS
     idx = 0
     nav = NavRepeat()
     while True:
@@ -1098,6 +1103,7 @@ def welcome_screen(stdscr, built, values):
                 continue
             continue
         stdscr.timeout(-1)
+        eval_runner.poll()
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         title = "ActiveSlam Workspace Manager"
@@ -1114,16 +1120,30 @@ def welcome_screen(stdscr, built, values):
             if opt == "---":
                 put(stdscr, row + i, 6, "-" * 22, curses.A_DIM)
                 continue
-            label = (f"{KEYBOARD_ROW}: {values['keyboard'].upper()}"
-                     if opt == KEYBOARD_ROW else opt)
+            if opt == KEYBOARD_ROW:
+                label = f"{KEYBOARD_ROW}: {values['keyboard'].upper()}"
+            elif opt == "Evaluation" and eval_runner.state != "idle":
+                progress = eval_runner.progress()
+                done = progress.get("completed", 0)
+                total = progress.get("total") or (
+                    eval_runner.matrix.total_runs if eval_runner.matrix else 0)
+                suffix = (f"{done}/{total}" if total
+                          else eval_runner.state)
+                label = f"Evaluation  [{suffix}]"
+            else:
+                label = opt
             prefix = "> " if idx == i else "  "
             attr = curses.A_REVERSE if idx == i else curses.A_NORMAL
-            if opt == "Launch":
+            if opt in ("Launch", "Evaluation"):
                 attr |= curses.A_BOLD
+            if opt == "Evaluation" and eval_runner.running:
+                attr |= curses.color_pair(C_OK)
             put(stdscr, row + i, 4, f"{prefix}{label}", attr)
 
         hints = {
             "Launch": "Configure options and bring the stack up.",
+            "Evaluation": ("Run a repeatable matrix and watch data collection "
+                           "progress."),
             KEYBOARD_ROW: "Enter to switch between QWERTY and AZERTY.",
             "Update": "git pull, then reinstall dependencies (./bootstrap.sh).",
             "Rebuild": "colcon build --symlink-install.",
@@ -1135,7 +1155,10 @@ def welcome_screen(stdscr, built, values):
         put(stdscr, h - 1, 2, "Up/Down navigate   Enter select   q quit", curses.A_DIM)
         stdscr.refresh()
 
-        key, buffered = read_key(stdscr, -1)
+        # Keep the badge moving while a background evaluation is active.
+        key, buffered = read_key(stdscr, 500 if eval_runner.running else -1)
+        if key == -1:
+            continue
         if key == curses.KEY_RESIZE:
             continue
         if key in (curses.KEY_UP, curses.KEY_DOWN):
@@ -1195,6 +1218,269 @@ def infos_screen(stdscr):
         elif key == curses.KEY_PPAGE:
             scroll -= view
         elif key in (ord("q"), ord("Q"), 27, ord("\n")):
+            return
+
+
+def _eval_float(row, *names):
+    for name in names:
+        raw = row.get(name)
+        if raw not in (None, ""):
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _eval_metric(value, unit="", percent=False):
+    if value is None or not math.isfinite(value):
+        return "—"
+    if percent:
+        return f"{100.0 * value:.1f}%"
+    return f"{value:.3f}{unit}"
+
+
+def _eval_progress_bar(width, fraction):
+    width = max(8, width)
+    fraction = max(0.0, min(1.0, fraction))
+    filled = int(round(width * fraction))
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
+
+
+def confirm_evaluation_stop(stdscr):
+    """The active run is kept as partial data, but stopping it is deliberate."""
+    while True:
+        h, w = stdscr.getmaxyx()
+        lines = [
+            "Stop this evaluation?",
+            "The active run will be terminated; completed and partial data",
+            "will remain in the batch directory.",
+            "",
+            "y stop     n continue",
+        ]
+        box_w = min(w - 8, max(len(line) for line in lines) + 6)
+        top = max(2, (h - len(lines) - 2) // 2)
+        left = max(2, (w - box_w) // 2)
+        for row in range(top, top + len(lines) + 2):
+            put(stdscr, row, left, " " * box_w, curses.A_REVERSE)
+        for i, line in enumerate(lines):
+            attr = curses.A_REVERSE | (curses.A_BOLD if i == 0 else 0)
+            put(stdscr, top + 1 + i, left + 3, line, attr,
+                maxx=left + box_w)
+        stdscr.refresh()
+        key = stdscr.getch()
+        if key in (ord("y"), ord("Y")):
+            return True
+        if key in (ord("n"), ord("N"), 27):
+            return False
+
+
+def evaluation_screen(stdscr, runner, built, ws_root):
+    """Choose, run, and monitor a repeatable evaluation matrix."""
+    matrices = evaluation.discover_matrices(EVAL_CONFIG_DIR)
+    selected = 0
+    if runner.matrix is not None:
+        selected = next(
+            (i for i, info in enumerate(matrices)
+             if info.path == runner.matrix.path), selected)
+    nav = NavRepeat()
+    note = ""
+    note_kind = C_INFO
+
+    while True:
+        runner.poll()
+        if not fits(stdscr):
+            too_small(stdscr)
+            stdscr.timeout(120)
+            stdscr.getch()
+            continue
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        title = "Evaluation"
+        put(stdscr, 0, max(0, (w - len(title)) // 2), title,
+            curses.A_BOLD | curses.color_pair(C_HEAD))
+        put(stdscr, 1, 2,
+            "Run a configuration × seed matrix and collect comparable metrics.",
+            curses.A_DIM)
+
+        list_w = min(32, max(25, w // 3))
+        put(stdscr, 3, 2, "Matrices", curses.A_BOLD)
+        put(stdscr, 3, list_w + 1, "│", curses.A_DIM)
+        visible = h - 7
+        if matrices:
+            selected = max(0, min(selected, len(matrices) - 1))
+            first = max(0, min(selected - visible // 2,
+                               len(matrices) - visible))
+            for screen_row, i in enumerate(
+                    range(first, min(len(matrices), first + visible)), 4):
+                info = matrices[i]
+                marker = "▶" if runner.matrix and info.path == runner.matrix.path \
+                    and runner.running else " "
+                label = f"{marker} {info.name}"
+                attr = curses.A_REVERSE if i == selected else curses.A_NORMAL
+                if info.error:
+                    attr |= curses.color_pair(C_ERR)
+                put(stdscr, screen_row, 2, label, attr, maxx=list_w)
+            if first:
+                put(stdscr, 3, list_w - 3, "↑", curses.A_DIM)
+            if first + visible < len(matrices):
+                put(stdscr, h - 3, list_w - 3, "↓", curses.A_DIM)
+        else:
+            put(stdscr, 5, 4, "No matrix_*.yaml files found",
+                curses.color_pair(C_WARN), maxx=list_w)
+
+        for row in range(4, h - 2):
+            put(stdscr, row, list_w + 1, "│", curses.A_DIM)
+
+        x = list_w + 4
+        right_w = max(20, w - x - 2)
+        info = matrices[selected] if matrices else None
+        if info:
+            put(stdscr, 3, x, info.name, curses.A_BOLD)
+            put(stdscr, 4, x, info.filename, curses.A_DIM)
+            plan = (f"{info.configs} configs × {info.seeds} seeds = "
+                    f"{info.total_runs} runs")
+            put(stdscr, 6, x, plan, curses.color_pair(C_INFO))
+            put(stdscr, 7, x,
+                f"{evaluation.format_duration(info.duration_s)} per run  ·  "
+                f"{evaluation.format_duration(info.settle_s)} settle  ·  "
+                f"~{evaluation.format_duration(info.estimated_s)} total")
+            bag_text = "recording rosbag" if info.record_bag else "metrics only"
+            common = info.common_args
+            setup = "  ".join(
+                f"{key}={common[key]}" for key in
+                ("mode", "motion", "mapper", "slam", "noise_profile")
+                if key in common)
+            put(stdscr, 8, x, bag_text + (f"  ·  {setup}" if setup else ""),
+                curses.A_DIM)
+            description = info.error or info.description
+            desc_attr = curses.color_pair(C_ERR) if info.error else curses.A_NORMAL
+            for i, line in enumerate(textwrap.wrap(description, right_w)[:2]):
+                put(stdscr, 10 + i, x, line, desc_attr)
+
+        progress = runner.progress()
+        if runner.state != "idle":
+            active = runner.matrix or info
+            total = int(progress.get("total") or (
+                active.total_runs if active else 0))
+            completed = int(progress.get("completed", 0))
+            phase = str(progress.get("phase") or runner.state)
+            elapsed = time.time() - (runner.started_at or time.time())
+            run_elapsed = time.time() - float(
+                progress.get("run_started_at") or time.time())
+            partial = 0.0
+            if phase == "running" and active and active.duration_s > 0:
+                partial = min(0.99, run_elapsed / active.duration_s)
+            fraction = (completed + partial) / total if total else 0.0
+            row = 13
+            state_attr = {
+                "running": C_OK, "stopping": C_WARN, "complete": C_OK,
+                "stopped": C_WARN, "failed": C_ERR,
+            }.get(runner.state, C_INFO)
+            put(stdscr, row, x,
+                f"{runner.state.upper()}  ·  {phase.replace('_', ' ')}",
+                curses.A_BOLD | curses.color_pair(state_attr))
+            row += 1
+            bar_w = max(8, min(34, right_w - 15))
+            put(stdscr, row, x,
+                f"{_eval_progress_bar(bar_w, fraction)} "
+                f"{completed}/{total}  {100 * fraction:4.1f}%")
+            row += 1
+            current_name = progress.get("name")
+            current_seed = progress.get("seed")
+            if current_name is not None:
+                put(stdscr, row, x,
+                    f"Run {progress.get('current', completed + 1)}/{total}: "
+                    f"{current_name}  seed {current_seed}")
+                row += 1
+            run_time = (f"  ·  run {evaluation.format_duration(run_elapsed)}"
+                        if phase == "running" else "")
+            put(stdscr, row, x,
+                f"Elapsed {evaluation.format_duration(elapsed)}{run_time}",
+                curses.A_DIM)
+            row += 1
+
+            data = runner.data_snapshot()
+            metrics = data["metrics"]
+            map_metrics = data["map"]
+            ate = _eval_float(metrics, "ate")
+            abs_error = _eval_float(metrics, "abs_error")
+            coverage = _eval_float(map_metrics, "coverage")
+            put(stdscr, row, x,
+                f"Collected  {data['metrics_rows']} pose rows  ·  "
+                f"{data['map_rows']} map rows",
+                curses.color_pair(C_INFO))
+            row += 1
+            put(stdscr, row, x,
+                f"Latest     ATE {_eval_metric(ate, ' m')}  ·  "
+                f"error {_eval_metric(abs_error, ' m')}  ·  "
+                f"coverage {_eval_metric(coverage, percent=True)}")
+            row += 1
+            failed = int(progress.get("failed", 0))
+            put(stdscr, row, x,
+                f"Validated  {max(0, completed - failed)} ok  ·  {failed} flagged",
+                curses.color_pair(C_WARN if failed else C_OK))
+            row += 1
+            if runner.batch_dir:
+                put(stdscr, row, x,
+                    "Output: " + os.path.relpath(runner.batch_dir, REPO_ROOT),
+                    curses.A_DIM)
+                row += 2
+            log_room = h - 3 - row
+            if log_room > 1 and runner.output:
+                put(stdscr, row, x, "Recent", curses.A_BOLD)
+                for i, line in enumerate(list(runner.output)[-(log_room - 1):]):
+                    put(stdscr, row + 1 + i, x, line, curses.A_DIM)
+
+        if note:
+            put(stdscr, h - 2, 2, note, curses.color_pair(note_kind) | curses.A_BOLD)
+        if runner.running:
+            keys = "Esc menu (keeps running)   s stop evaluation"
+        else:
+            keys = "Up/Down choose   Enter run evaluation   r reload   Esc back"
+        put(stdscr, h - 1, 2, keys, curses.A_DIM)
+        stdscr.refresh()
+
+        key, buffered = read_key(stdscr, 250 if runner.running else -1)
+        if key == -1 or key == curses.KEY_RESIZE:
+            continue
+        note = ""
+        if key in (curses.KEY_UP, curses.KEY_DOWN) and matrices:
+            if runner.running:
+                note, note_kind = "Stop the active evaluation before choosing another.", C_WARN
+                continue
+            selected = nav_step(
+                stdscr, nav, key, buffered, selected,
+                -1 if key == curses.KEY_UP else 1, len(matrices))
+        elif key in (ord("r"), ord("R")) and not runner.running:
+            selected_path = info.path if info else None
+            matrices = evaluation.discover_matrices(EVAL_CONFIG_DIR)
+            selected = next(
+                (i for i, item in enumerate(matrices)
+                 if item.path == selected_path), 0)
+            note, note_kind = "Evaluation matrices reloaded.", C_OK
+        elif key in (ord("s"), ord("S")) and runner.running:
+            if confirm_evaluation_stop(stdscr):
+                runner.request_stop()
+                note, note_kind = "Stopping safely; finalising partial data…", C_WARN
+        elif key in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            if runner.running:
+                note, note_kind = "An evaluation is already running.", C_WARN
+            elif info is None:
+                note, note_kind = "No evaluation matrix is available.", C_ERR
+            elif info.error:
+                note, note_kind = f"Invalid matrix: {info.error}", C_ERR
+            elif not ros_ready():
+                note, note_kind = "ROS 2 is not available in this environment.", C_ERR
+            elif not built:
+                note, note_kind = "Build the workspace before evaluating.", C_WARN
+            else:
+                try:
+                    runner.start(info, env=ros_env(ws_root))
+                    note, note_kind = f"Started {info.name}.", C_OK
+                except (OSError, RuntimeError, ValueError) as exc:
+                    note, note_kind = f"Could not start: {exc}", C_ERR
+        elif key in (27, ord("q"), ord("Q")):
             return
 
 
@@ -2528,6 +2814,18 @@ def main():
     # migrate old home-directory selections to it transparently.
     save_selection(values)
 
+    # Refuse to start rather than present controls that do not reach the run.
+    # A knob that reads as configured while the node uses its own default is a
+    # silent wrong answer, and this stack has produced two: sigma_allow_xy_m
+    # ran at 0.045 against a configured 0.3, and wall_z_band_m pinned the
+    # vehicle to a 1.4 m depth slice. Both were live-tunable and neither was
+    # applied at startup. Set ACTIVESLAM_SKIP_WIRING_CHECK=1 to bypass.
+    if not os.environ.get("ACTIVESLAM_SKIP_WIRING_CHECK"):
+        report = core.wiring_report(values, model.PARAMS, bringup_share())
+        if report:
+            print(report, file=sys.stderr)
+            sys.exit(1)
+
     session = core.SessionLog(LOG_DIR)
     session.start()
     session.event(f"launcher started (ws_root={ws_root}, built={built})")
@@ -2547,10 +2845,12 @@ def main():
                           core.build_groups(bringup_share()),
                           env=ros_env(ws_root), session=session)
     link = RosLink()
+    eval_runner = evaluation.EvaluationRunner(REPO_ROOT)
 
     def emergency(*_):
         link.close()
         sup.shutdown_all(on_event=session.event)
+        eval_runner.close()
         session.close()
 
     atexit.register(emergency)
@@ -2562,12 +2862,26 @@ def main():
 
     while True:
         choice = curses.wrapper(lambda scr: (init_colors(),
-                                             welcome_screen(scr, built, values))[1])
+                                             welcome_screen(
+                                                 scr, built, values,
+                                                 eval_runner))[1])
 
         if choice == "Exit":
             break
+        if choice == "Evaluation":
+            curses.wrapper(lambda scr: (
+                init_colors(),
+                evaluation_screen(scr, eval_runner, built, ws_root or REPO_ROOT)
+            )[1])
+            continue
         if choice == "Infos":
             curses.wrapper(lambda scr: (init_colors(), infos_screen(scr))[1])
+            continue
+        if eval_runner.running:
+            print("An evaluation is running. Stop it from the Evaluation panel "
+                  f"before using {choice}; concurrent ROS stacks would corrupt "
+                  "the collected data.", file=sys.stderr)
+            input("Press Enter to return to the menu.")
             continue
         if choice == "Update":
             run_foreground(["./bootstrap.sh"], cwd=REPO_ROOT)

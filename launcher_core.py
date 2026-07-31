@@ -25,8 +25,13 @@ import threading
 import time
 
 # Order matters: groups are started top-down and stopped bottom-up.
-GROUP_ORDER = ["core", "tf", "cloud", "mapper", "gt_map", "slam", "eval",
-               "planner", "teleop_support", "rviz", "rqt", "rqt_depthmap"]
+# real_pose/real_sonar are the hardware counterparts of tf/cloud and sit in the
+# same slots: pose before the mapper that integrates clouds against it.
+# rosbag is last so it stops first: groups are stopped bottom-up, and the
+# recorder must be closed while its publishers are still alive.
+GROUP_ORDER = ["core", "real_pose", "tf", "real_sonar", "cloud", "mapper",
+               "gt_map", "slam", "eval", "planner", "teleop_support", "rviz",
+               "rqt", "rqt_depthmap", "rosbag"]
 
 # Groups that accumulate state across a run (maps, pose graph, eval output,
 # planner blacklists). A reset restarts exactly these; the simulator, TF, point
@@ -36,6 +41,38 @@ GROUP_ORDER = ["core", "tf", "cloud", "mapper", "gt_map", "slam", "eval",
 STATEFUL_GROUPS = ["mapper", "gt_map", "slam", "eval", "planner"]
 
 DEFAULT_SPAWN = ("bluerov2", (0.0, 0.0, 8.0), (0.0, 0.0, 0.0))
+
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# What a run has to be able to answer questions from afterwards — IRL_TEST.md's
+# "Data to record for every run". Named explicitly rather than `ros2 bag record
+# -a`: the RViz marker arrays and voxel grids are most of the bandwidth and none
+# of the evidence, and a bag nobody can copy off the laptop is not a record.
+# A topic with no publisher is not an error; the recorder picks it up if it
+# appears, so one list covers every mode.
+BAG_TOPICS = [
+    "/tf", "/tf_static",
+    "/cloud_in",
+    "/motion/body_command", "/motion/body_command_safe",
+    "/motion/safety_status", "/motion/enable",
+    "/slam/odometry", "/slam/pose", "/slam/path_slam", "/slam/path_dr",
+    "/slam/sensors/dead_reckoned_odom", "/slam/sensors/pressure_depth",
+    "/slam/sensors/imu_orientation", "/slam/sensors/compass_heading",
+    "/slam/sensors/dvl_velocity",
+    "/slam/keyframe_count", "/slam/loop_closure_count", "/slam/dopt",
+    "/slam/sigma_xy", "/slam/sigma_yaw", "/slam/covariance",
+    "/frontier_slam/goal", "/frontier_slam/path", "/frontier_slam/activity",
+    "/frontier_slam/revisit_state", "/frontier_slam/revisit_cause",
+    "/octomap_binary", "/tsdf/octomap_binary", "/projected_map",
+]
+# The simulator's ground truth and the metrics scored against it; on hardware
+# neither exists, and the autopilot's own state takes their place.
+BAG_TOPICS_SIM = [
+    "/StoneFish/Odometry",
+    "/eval/ate", "/eval/rpe_trans", "/eval/rpe_rot", "/eval/abs_error",
+    "/eval/anees", "/eval/map_coverage", "/eval/map_accuracy",
+]
+BAG_TOPICS_REAL = ["/mavlink/odometry", "/motion/ardusub_status"]
 
 STOP_SIGINT_TIMEOUT = 12.0   # ros2 launch handles SIGINT gracefully
 STOP_SIGTERM_TIMEOUT = 5.0
@@ -85,8 +122,42 @@ POSE_GRAPH_ARGS = (
 )
 
 
+# launcher_model owns the parameter surface, so it owns what the values mean.
+PLATFORM_SIM = "stonefish"
+PLATFORM_REAL = "real_life"
+
+
+def is_real(v):
+    """Whether this configuration drives a real vehicle instead of Stonefish."""
+    return v.get("platform", PLATFORM_SIM) == PLATFORM_REAL
+
+
+def is_sim(v):
+    """Whether this configuration drives Stonefish."""
+    return not is_real(v)
+
+
+def _bool(value):
+    """Launch/parameter spelling of a Python bool."""
+    return "true" if value else "false"
+
+
 def _odom_topic(v):
+    if is_real(v):
+        return "/mavlink/odometry"
     return "/slam/odometry" if v["slam"] == "slam" else "/StoneFish/Odometry"
+
+
+def _marker_frame(v):
+    """Where the vehicle arrow is anchored.
+
+    On hardware the gate watches the autopilot's own navigation estimate, which
+    under pose source slam is not the frame the map and the TF tree are built
+    in — so the arrow is pinned to the body frame and TF places it. In the
+    simulator the watched pose and the map share world_ned, and anchoring there
+    keeps the arrow readable even with no TF publisher up.
+    """
+    return "bluerov2/base_link" if is_real(v) else "world_ned"
 
 
 def _octomap_band_depth(v):
@@ -203,6 +274,12 @@ class Group:
 
 def build_groups(bringup_share=""):
     """The group table. `bringup_share` is only needed for the RViz config path."""
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        frontier_share = get_package_share_directory("frontier_slam")
+    except Exception:
+        # Importable before the workspace is built, as the module docstring says.
+        frontier_share = ""
 
     def core(v):
         return [["ros2", "launch", "stonefish_groundtruth_mapping", "core.launch.py",
@@ -300,6 +377,7 @@ def build_groups(bringup_share=""):
 
     def slam(v):
         return [["ros2", "launch", "slam_backend", "slam.launch.py",
+                 f"sensors:={'external' if is_real(v) else 'sim'}",
                  f"noise_profile:={v['noise_profile']}",
                  *_sensor_profiles(v, ("pressure", "imu", "compass", "dvl")),
                  f"loop_closure:={'true' if v['loop_closure'] else 'false'}",
@@ -332,7 +410,24 @@ def build_groups(bringup_share=""):
                  f"inflation_m:={v['inflation_m']}",
                  f"plan_inflation_m:={v['plan_inflation_m']}",
                  f"odom_topic:={_odom_topic(v)}",
+                 f"marker_frame:={_marker_frame(v)}",
                  f"revisit:={revisit}",
+                 # The revisit thresholds are in launcher_model.LIVE, which
+                 # pushes a value with `ros2 param set` when it CHANGES. Nothing
+                 # pushed them at startup and they were absent here, so the node
+                 # booted on frontier_slam.launch.py's defaults and every value
+                 # in config.yaml was silently ignored unless the operator
+                 # happened to nudge that slider. A live session was found
+                 # running sigma_allow_xy_m 0.045 against a configured 0.3,
+                 # which put U_r at 1.85 permanently and kept the vehicle in a
+                 # near-continuous revisit.
+                 f"sigma_allow_xy_m:={v['sigma_allow_xy_m']}",
+                 f"sigma_allow_yaw_rad:={v['sigma_allow_yaw_rad']}",
+                 f"ratio_trigger:={v['ratio_trigger']}",
+                 f"ratio_resume:={v['ratio_resume']}",
+                 f"revisit_min_closures:={v['revisit_min_closures']}",
+                 f"arrival_dwell_s:={v['arrival_dwell_s']}",
+                 f"stall_exit_s:={v['stall_exit_s']}",
                  f"scenario:={v['scenario']}",
                  f"scenario_out_dx:={v['scenario_out_dx']}",
                  f"scenario_out_dy:={v['scenario_out_dy']}",
@@ -345,6 +440,9 @@ def build_groups(bringup_share=""):
                  f"projected_map_band_m:={v['projected_map_band_m']}",
                  f"safety_start_enabled:={'true' if v['safety_start_enabled'] else 'false'}",
                  f"motion:={_motion_arg(v['motion'])}",
+                 f"speed_factor:={v['speed_factor']}",
+                 f"turn_factor:={v['turn_factor']}",
+                 f"wall_z_band_m:={v['wall_z_band_m']}",
                  f"wall_orientation_offset_deg:={v['wall_orientation_offset_deg']}",
                  f"wall_orientation_lookahead_m:={v['wall_orientation_lookahead_m']}",
                  f"tsdf_frontier_standoff_m:={v['tsdf_frontier_standoff_m']}",
@@ -352,22 +450,89 @@ def build_groups(bringup_share=""):
                                           if _mapper_backend(v) == "tsdf"
                                           else "/octomap_point_cloud_centers"),
                  f"wall_standoff:={v['wall_standoff']}",
+                 f"wall_max_surface_dist:={v['wall_max_surface_dist']}",
                  f"wall_switch_goal_distance:={v['wall_switch_goal_distance']}",
                  f"wall_switch_scan_angle:={v['wall_switch_scan_angle']}",
                  f"wall_switch_scan_yaw:={v['wall_switch_scan_yaw']}",
                  f"wall_path_influence:={v['wall_path_influence']}",
                  f"wall_path_look_offset_deg:={v['wall_path_look_offset_deg']}",
                  f"wall_normal_offset_deg:={v['wall_normal_offset_deg']}",
-                 f"wall_path_heading_weight:={v['wall_path_heading_weight']}"]]
+                 f"wall_path_heading_weight:={v['wall_path_heading_weight']}",
+                 f"wall_yaw_only:={'true' if v['wall_yaw_only'] else 'false'}"]]
 
     def teleop_support(v):
-        # demo.launch.py starts these two only for mode:=teleop.
+        # demo.launch.py starts these two only for mode:=teleop. On hardware the
+        # gate feeds the MAVLink adapter instead of the simulator's mixer, and
+        # never starts already enabled — IRL_TEST.md Phase 3.
+        gate = ["ros2", "run", "frontier_slam", "motion_safety_gate", "--ros-args",
+                "-p", f"odom_topic:={_odom_topic(v)}"]
+        if is_real(v):
+            return [
+                # Body-fixed marker: the arrow rides the TF tree the map is
+                # built in, rather than the autopilot pose the gate watches.
+                gate + ["-p", f"truth_odom_topic:={_odom_topic(v)}",
+                        "-p", f"marker_frame:={_marker_frame(v)}",
+                        "-p", f"require_odom:={_bool(v['require_odom'])}",
+                        "-p", "start_enabled:=false"],
+                ["ros2", "run", "frontier_slam", "ardusub_adapter", "--ros-args",
+                 "--params-file", os.path.join(
+                     frontier_share, "config", "ardusub.yaml"),
+                 "-p", f"backend:={v['ardusub_backend']}",
+                 "-p", f"connection_url:={v['mavlink_command_url']}",
+                 "-p", f"manual_authority:={v['manual_authority']}",
+                 "-p", f"enable_vertical:={_bool(v['enable_vertical'])}"],
+            ]
         return [
-            ["ros2", "run", "frontier_slam", "motion_safety_gate", "--ros-args",
-             "-p", f"odom_topic:={_odom_topic(v)}",
-             "-p", f"start_enabled:={'true' if v['safety_start_enabled'] else 'false'}"],
+            gate + ["-p",
+                    f"start_enabled:={_bool(v['safety_start_enabled'])}"],
             ["ros2", "run", "frontier_slam", "heavy_sim_mixer"],
         ]
+
+    def real_pose(v):
+        """ArduSub's navigation estimate as odometry, TF and SLAM sensor feed."""
+        return [["ros2", "run", "frontier_slam", "mavlink_odometry", "--ros-args",
+                 "-p", f"connection_url:={v['mavlink_odom_url']}",
+                 "-p", f"require_position:={_bool(v['require_position'])}",
+                 # Under slam:=slam the pose graph owns world_ned -> base_link,
+                 # exactly as odom_tf_sync steps aside for it in the simulator.
+                 "-p", f"publish_tf:={_bool(v['slam'] != 'slam')}",
+                 "-p", f"publish_slam_sensors:={_bool(v['slam'] == 'slam')}"]]
+
+    def real_sonar(v):
+        """The physical Sonar 3D-15 on /cloud_in, plus where it sits on the hull."""
+        return [
+            # Only the cloud is remapped. Adding a second rule for the range
+            # image made the two topics starve each other — measured rates for
+            # both swung between 0 and 10 Hz against a ~4 Hz device. The RViz
+            # depth-map view reads /sonar3d/range directly instead.
+            ["ros2", "run", "sonar3d_driver", "sonar3d_driver", "--ros-args",
+             "-p", f"sonar.ip:={v['sonar_ip']}",
+             "-r", "sonar3d/pointcloud:=/cloud_in"],
+            # Carries the ENU-to-NED handedness flip as well as the mount pose;
+            # sonar_mount_roll is 180 at rest, not 0.
+            ["ros2", "run", "tf2_ros", "static_transform_publisher",
+             "--frame-id", "bluerov2/base_link", "--child-frame-id", "sonar3d",
+             "--x", str(v["sonar_mount_x"]), "--y", str(v["sonar_mount_y"]),
+             "--z", str(v["sonar_mount_z"]),
+             "--roll", str(math.radians(v["sonar_mount_roll"])),
+             "--pitch", str(math.radians(v["sonar_mount_pitch"])),
+             "--yaw", str(math.radians(v["sonar_mount_yaw"]))],
+        ]
+
+    def rosbag(v):
+        """Record the run. Stopped with SIGINT, which is what closes the bag.
+
+        A fresh directory per start: ros2 bag refuses to write into an existing
+        one, and a restart of this group is a new recording, not a continuation.
+        """
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        platform = "real" if is_real(v) else "sim"
+        out = os.path.join(REPO_ROOT, "eval", "bags", f"{platform}_{stamp}")
+        extra = BAG_TOPICS_REAL if is_real(v) else BAG_TOPICS_SIM
+        # Through the wrapper, not ros2 bag directly: a recorder signalled
+        # mid-write leaves no metadata.yaml, and the wrapper reindexes it back.
+        return [["zsh", os.path.join(REPO_ROOT, "tools", "record_bag.zsh"),
+                 out, *BAG_TOPICS, *extra]]
 
     def rviz(v):
         return [["rviz2", "-d", _rviz_config(v, bringup_share)]]
@@ -379,25 +544,27 @@ def build_groups(bringup_share=""):
         return [["rqt"] + _rqt_perspective_args(bringup_share, "sonar_depthmap")]
 
     is_slam = lambda v: v["slam"] == "slam"
+    sim_slam = lambda v: is_sim(v) and is_slam(v)
 
     return [
         Group("core", "Simulator (Stonefish)",
               "Stonefish underwater simulator: BlueROV2 + scene meshes, and the "
               "depth camera standing in for a wide-FoV 3D sonar. Expensive to "
               "start, so only scene/object selection and object scale restart it.",
-              core, depends=["scene", "obj_mesh", "obj_scale", "thrust_boost"]),
+              core, depends=["scene", "obj_mesh", "obj_scale", "thrust_boost"],
+              visible=is_sim),
         Group("tf", "TF chain",
               "world_ned -> bluerov2/base_link -> bluerov2/Dcam. Under "
               "slam:=none this is broadcast from ground truth (odom_tf_sync); "
               "under slam:=slam the pose graph owns it instead.",
-              tf, depends=["slam"]),
+              tf, depends=["slam"], visible=is_sim),
         Group("cloud", "Point cloud + sonar noise",
               "depth_image_proc turns the depth image into /cloud_in. Under "
               "slam:=slam a datasheet-grounded WaterLinked Sonar 3D-15 noise "
               "model is spliced in ahead of every consumer.",
               cloud, depends=["slam", "noise_profile", "noise_profile_sonar",
                               "noise_seed", "noise_attenuation",
-                              "near_cutoff_m", "near_fade_p"]),
+                              "near_cutoff_m", "near_fade_p"], visible=is_sim),
         Group("mapper", "Map backend",
               "OctoMap occupancy grid or VDBFusion TSDF. Consumes /cloud_in "
               "only, so the backend can be swapped without touching the sim.",
@@ -420,7 +587,7 @@ def build_groups(bringup_share=""):
               "against the belief map so map drift is visible directly.",
               gt_map, depends=["mapper", "voxel_size", "trunc_distance",
                                "space_carving", "carve_no_return"],
-              visible=is_slam),
+              visible=sim_slam),
         Group("slam", "SLAM backend (GTSAM)",
               "Simulated pressure/IMU/DVL sensors, dead-reckoning fusion and a "
               "GTSAM iSAM2 pose graph with loop closure.",
@@ -434,7 +601,7 @@ def build_groups(bringup_share=""):
               # Not voxel_size, though evaluation passes it: restarting eval
               # mid-run opens a second run directory and restarts ATE from zero.
               # map_metrics re-reads it per cycle, so a `ros2 param set` lands.
-              evaluation, depends=["output_dir", "mapper"], visible=is_slam),
+              evaluation, depends=["output_dir", "mapper"], visible=sim_slam),
         Group("planner", "Planner",
               "Frontier detection, A* planning and the path executor. Runs "
               "under frontier (it picks its own goals) and under goto (the "
@@ -449,19 +616,44 @@ def build_groups(bringup_share=""):
                                 "wall_orientation_offset_deg",
                                 "wall_orientation_lookahead_m",
                                 "tsdf_frontier_standoff_m", "wall_standoff",
+                                "wall_max_surface_dist",
                                 "wall_switch_goal_distance",
                                 "wall_switch_scan_angle", "wall_switch_scan_yaw",
                                 "wall_path_influence", "wall_path_look_offset_deg",
                                 "wall_normal_offset_deg", "wall_path_heading_weight",
+                                "wall_yaw_only",
                                 "hard_inflation_m", "inflation_m", "plan_inflation_m",
                                 "projected_map_band_m", "survey_radius_m",
                                 "min_goal_separation_m", "revisit_scan_slowdown"],
-              visible=lambda v: v["mode"] in ("frontier", "goto")),
+              visible=lambda v: is_sim(v) and v["mode"] in ("frontier", "goto")),
         Group("teleop_support", "Safety gate + thruster mixer",
               "Fail-closed motion safety gate and the thruster mixer that "
               "teleop drives through.",
-              teleop_support, depends=["slam", "safety_start_enabled"],
-              visible=lambda v: v["mode"] == "teleop"),
+              teleop_support,
+              depends=["slam", "safety_start_enabled", "platform",
+                       "ardusub_backend", "manual_authority", "enable_vertical",
+                       "require_odom", "mavlink_command_url"],
+              visible=lambda v: is_real(v) or v["mode"] == "teleop"),
+
+        Group("real_pose", "Vehicle pose (ArduSub)",
+              "mavlink_odometry: the autopilot's navigation estimate as "
+              "odometry for the safety gate, TF for the mapper, and — under "
+              "slam:=slam — the four /slam/sensors topics the pose graph's "
+              "dead reckoning fuses. Read-only MAVLink; it never arms or "
+              "changes mode.",
+              real_pose,
+              depends=["platform", "mavlink_odom_url", "require_position",
+                       "slam"],
+              visible=is_real),
+        Group("real_sonar", "Sonar 3D-15 + mount",
+              "The physical sonar driver publishing /cloud_in, and the static "
+              "transform placing it on the hull. Everything downstream of "
+              "/cloud_in is the same code the simulator feeds.",
+              real_sonar,
+              depends=["platform", "sonar_ip", "sonar_mount_x", "sonar_mount_y",
+                       "sonar_mount_z", "sonar_mount_roll", "sonar_mount_pitch",
+                       "sonar_mount_yaw"],
+              visible=lambda v: is_real(v) and v["real_sonar"]),
         Group("rviz", "RViz",
               "Visualisation. The view is picked automatically from the "
               "mapper/slam combination.",
@@ -486,6 +678,14 @@ def build_groups(bringup_share=""):
               rqt_depthmap, visible=lambda v: bool(v["rqt_depthmap"]),
               env_extra=_rqt_settings_env("sonar_depthmap"),
               graceful=False),
+        Group("rosbag", "Rosbag recording",
+              "Records commands either side of the safety gate, safety status, "
+              "odometry, TF, raw sonar, map and goals to eval/bags/. Closed on "
+              "SIGINT, so stopping the stack or quitting the launcher writes "
+              "the bag out; killing the terminal does not.",
+              # Not depends=[]: a mid-run restart would split the recording in
+              # two and lose whatever happened during the bounce.
+              rosbag, visible=lambda v: bool(v["rosbag"])),
     ]
 
 
@@ -1274,3 +1474,112 @@ def find_workspace_root(start=None):
             return None
         d = parent
     return None
+
+
+# --- parameter wiring guard -------------------------------------------------
+#
+# A control that can be set but does not reach the run is worse than no control
+# at all: it reads as configured while the node quietly uses its own default.
+# That is not hypothetical. sigma_allow_xy_m sat in launcher_model.LIVE, which
+# pushes a value with `ros2 param set` when it CHANGES, and was absent from the
+# planner group's arguments, so a session ran for months with a configured 0.3
+# while revisit_planner used the launch default of 0.045 -- a 6.7x tighter
+# threshold that, through the 4/3 exponent in U_r, kept the vehicle in a
+# near-permanent revisit. wall_z_band_m had the same defect and pinned the
+# vehicle to a 1.4 m depth slice of a 21 m-tall wreck.
+#
+# unwired_params() perturbs one parameter at a time and checks that some group's
+# command line changes. Anything visible, perturbable and inert is either a
+# wiring bug or belongs in WIRING_EXEMPT with a reason.
+
+WIRING_EXEMPT = {
+    "preset": "meta-control; it writes other parameters rather than an argument",
+    "rviz": "toggles whether the RViz group runs at all, not an argument value",
+    "robot_pose_live": "TUI-side toggle for whether edits are pushed live",
+    "revisit_scoring": "only keyframe_density is implemented; it is the default",
+    "revisit_trigger": "only live_dopt is implemented; propagated is marked soon",
+    "frontier_space": "only 2d is implemented; 3d is marked soon",
+    "exploration": "only frontier is implemented; infogain/nbv are marked soon",
+    "goal_order": "only greedy is implemented; route is marked soon",
+}
+
+
+def _perturb(param, value):
+    """A different, type-valid value, or None when the parameter cannot vary."""
+    kind = getattr(param, "kind", None)
+    if kind == "bool":
+        return not value
+    if kind == "enum":
+        others = [c for c in (param.choices or []) if c != value]
+        return others[0] if others else None
+    if kind == "int":
+        return int(value) + 7
+    if kind == "float":
+        return float(value) + 13.5
+    if kind == "str":
+        return str(value) + "_probe"
+    return None
+
+
+def _command_set(values, bringup_share=""):
+    out = []
+    for group in build_groups(bringup_share):
+        try:
+            if not group.visible(values):
+                continue
+            for argv in group.build(values) or []:
+                out.append((group.id, tuple(argv)))
+        except Exception:
+            # A group that cannot build under these values contributes nothing;
+            # a parameter that only that group reads shows up as unwired, which
+            # is the safe direction for a guard to fail in.
+            continue
+    return out
+
+
+def unwired_params(values, params, bringup_share=""):
+    """Visible parameters that change no group's command line.
+
+    Returns [(id, section)]. WIRING_EXEMPT entries are excluded.
+    """
+    reference = _command_set(values, bringup_share)
+    unwired = []
+    for param in params:
+        if param.id in WIRING_EXEMPT:
+            continue
+        try:
+            if not param.visible(values):
+                continue
+        except Exception:
+            continue
+        current = values.get(param.id, param.default)
+        probe = _perturb(param, current)
+        if probe is None or probe == current:
+            continue
+        trial = dict(values)
+        trial[param.id] = probe
+        if _command_set(trial, bringup_share) == reference:
+            unwired.append((param.id, getattr(param, "section", "")))
+    return unwired
+
+
+def wiring_report(values, params, bringup_share=""):
+    """Human-readable failure text, or None when every control is wired."""
+    bad = unwired_params(values, params, bringup_share)
+    if not bad:
+        return None
+    lines = [
+        "Launcher parameter wiring check FAILED.",
+        "",
+        "These controls can be set but reach no node, so the run would silently",
+        "use launch-file defaults instead of what is configured:",
+        "",
+    ]
+    lines += [f"  {pid:32} ({section})" for pid, section in bad]
+    lines += [
+        "",
+        "Pass each one as a launch argument from its group in build_groups(),",
+        "or add it to launcher_core.WIRING_EXEMPT with the reason it cannot",
+        "reach a node.",
+    ]
+    return "\n".join(lines)
