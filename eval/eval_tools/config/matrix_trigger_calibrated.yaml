@@ -42,8 +42,6 @@ duration_s: 300
 settle_s: 15
 seeds:
 - 601
-- 602
-- 603
 record_bag: false
 common_args:
   rviz: 'false'
