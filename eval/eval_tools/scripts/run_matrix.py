@@ -81,7 +81,7 @@ VALID_KEYS = {
     'survey_radius_m', 'survey_center_x', 'survey_center_y',
     'min_goal_separation_m', 'wall_z_band_m', 'revisit_scan_slowdown',
     'revisit_min_closures', 'arrival_dwell_s', 'stall_exit_s',
-    'dopt_median_window',
+    'dopt_median_window', 'cooldown_s',
     'revisit_schedule_every_m',
     'cache_max_scans',
     # Pose-graph construction and its noise model: a batch that cannot set

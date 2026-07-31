@@ -292,6 +292,10 @@ def generate_launch_description():
         'wall_standoff', default_value='1.5',
         description='Wall-follow target standoff in metres.',
     )
+    wall_max_surface_dist_arg = DeclareLaunchArgument(
+        'wall_max_surface_dist', default_value='8.0',
+        description='Furthest a mapped surface can be and still be steered by, in metres.',
+    )
     wall_switch_goal_distance_arg = DeclareLaunchArgument(
         'wall_switch_goal_distance', default_value='6.0',
         description='Try a turn-and-select-another-wall search when the goal is within this many metres.',
@@ -371,6 +375,14 @@ def generate_launch_description():
                     "pose_graph's per-cell keyframe cap, after which no covariance "
                     'change is possible. 0 disables, leaving arrival_dwell_s.',
     )
+    cooldown_arg = DeclareLaunchArgument(
+        'cooldown_s', default_value='60.0',
+        description='Quiet period after a revisit before the trigger may fire '
+                    'again. Sized against mission length, not in the abstract: '
+                    'at 60 s a 300 s run with three revisits spends ~60% of '
+                    'itself with the trigger suppressed, which compresses any '
+                    'difference between trigger policies.',
+    )
     dopt_median_window_arg = DeclareLaunchArgument(
         'dopt_median_window', default_value='1',
         description='Median window over /slam/dopt before the trigger reads it. '
@@ -418,6 +430,7 @@ def generate_launch_description():
         arrival_dwell_arg,
         stall_exit_arg,
         dopt_median_window_arg,
+        cooldown_arg,
         odom_topic_arg,
         marker_frame_arg,
         safety_start_enabled_arg,
@@ -446,6 +459,7 @@ def generate_launch_description():
         voxel_size_arg,
         wall_points_topic_arg,
         wall_standoff_arg,
+        wall_max_surface_dist_arg,
         wall_switch_goal_distance_arg,
         wall_switch_scan_angle_arg,
         wall_switch_scan_yaw_arg,
@@ -568,6 +582,7 @@ def generate_launch_description():
                 'depth_setpoint': _float_parameter('depth'),
                 'odom_topic': odom_topic,
                 'standoff_m': _float_parameter('wall_standoff'),
+                'max_surface_dist_m': _float_parameter('wall_max_surface_dist'),
                 'switch_goal_distance_m': _float_parameter('wall_switch_goal_distance'),
                 'switch_scan_angle_rad': _float_parameter('wall_switch_scan_angle'),
                 'switch_scan_yaw': _float_parameter('wall_switch_scan_yaw'),
@@ -598,6 +613,7 @@ def generate_launch_description():
                     LaunchConfiguration('revisit_min_closures'), value_type=int),
                 'arrival_dwell_s': _float_parameter('arrival_dwell_s'),
                 'stall_exit_s': _float_parameter('stall_exit_s'),
+                'cooldown_s': _float_parameter('cooldown_s'),
                 'dopt_median_window': ParameterValue(
                     LaunchConfiguration('dopt_median_window'), value_type=int),
             }],

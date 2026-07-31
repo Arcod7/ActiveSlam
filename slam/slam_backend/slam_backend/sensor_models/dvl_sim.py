@@ -56,8 +56,20 @@ class DVLSimNode(Node):
         # Constant per-run scale factor error (e.g. imperfect sound-velocity
         # calibration) — sampled once, not re-drawn every callback.
         self.scale = 1.0 + np.random.normal(0, self.profile.scale_error_pct)
+        # Velocity bias, likewise one draw per run rather than a fixed offset.
+        # It used to be added as the literal constant bias_m_s on all three body
+        # axes, identical in every run and every seed: a deterministic error
+        # with no variance, which contributed nothing to seed-to-seed spread
+        # while pose_graph's noise model budgeted for it as a zero-mean
+        # Gaussian of standard deviation bias_m_s. Drawing it makes the sim
+        # match the model, and matches real hardware, where the bias is a
+        # per-unit calibration residual and not a constant of nature.
+        self.bias = np.random.normal(0, self.profile.bias_m_s, 3)
 
-        self.get_logger().info(f"DVLSim started. Rate: {self.profile.publish_rate_hz}Hz, Scale err: {(self.scale-1.0)*100:.3f}%")
+        self.get_logger().info(
+            f"DVLSim started. Rate: {self.profile.publish_rate_hz}Hz, "
+            f"Scale err: {(self.scale-1.0)*100:.3f}%, "
+            f"bias: [{', '.join(f'{b:+.4f}' for b in self.bias)}] m/s")
 
     def odom_cb(self, msg: Odometry):
         current_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -88,7 +100,7 @@ class DVLSimNode(Node):
 
         speed = np.linalg.norm(v_true)
         sigma = max(speed * self.profile.sigma_pct, self.profile.sigma_floor_m_s)
-        v_noisy = v_true * self.scale + np.random.normal(0, sigma, 3) + self.profile.bias_m_s
+        v_noisy = v_true * self.scale + np.random.normal(0, sigma, 3) + self.bias
 
         out = TwistStamped()
         out.header = msg.header

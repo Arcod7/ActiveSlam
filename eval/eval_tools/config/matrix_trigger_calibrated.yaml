@@ -31,17 +31,43 @@
 # calibration batch (odom_calibration_20260731_0935): 51.4, 34.2 and 26.7 m of
 # arc on three seeds, median 34.
 #
+# cooldown_s is 30, not the 60 s default. Measured on the first four paired
+# seeds, a 300 s run with ~3 revisits spent 41-60% of itself in cooldown with
+# the trigger suppressed, and exploring fell as low as 17%. That compresses any
+# difference between the two trigger policies and is a large part of why the
+# n=4 comparison had no power. Not comparable with those four seeds.
+#
+# Revisits end on revisit_min_closures=1, i.e. on achieving the relocalisation
+# they were launched for, not on U_r falling back under ratio_resume. Measured:
+# 9 of 10 revisit exits were CLOSED and one was RESUMED_DOPT, with U_r at exit
+# between 0.34 and 0.76. U_r < 0.5 needs sigma_xy < 0.175 m once the yaw factor
+# of 0.60 is applied, which a single closure does not deliver, so ratio_resume
+# is close to inactive by construction. The honest description of this policy is
+# that U_r decides when to GO and a closure decides when to STOP.
+#
 # Note this is NOT where sigma_xy crosses sigma_allow_xy (11.7-14.3 m). U_r
 # factorises as r_xy^(4/3) * r_yaw^(2/3), and sigma_yaw sits at ~0.023 rad
 # against an allowance of 0.05, so the yaw factor is 0.60 and the effective
 # position trigger is sigma_xy = 0.295 m rather than 0.2 m. A comfortably low
 # yaw ratio dilutes the position trigger -- worth stating, because it means
 # sigma_allow_yaw_rad silently rescales the position threshold.
-batch_name: trigger_calibrated
+batch_name: trigger_powered
 duration_s: 300
 settle_s: 15
 seeds:
-- 601
+- 611
+- 612
+- 613
+- 614
+- 615
+- 616
+- 617
+- 618
+- 619
+- 620
+- 621
+- 622
+- 623
 record_bag: false
 common_args:
   rviz: 'false'
@@ -60,6 +86,7 @@ common_args:
   ratio_trigger: 1.0
   ratio_resume: 0.5
   revisit_min_closures: 1
+  cooldown_s: 30.0
   arrival_dwell_s: 6.0
   keyframe_dist_m: 0.5
   keyframe_angle_rad: 0.2
