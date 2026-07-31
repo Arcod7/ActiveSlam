@@ -388,30 +388,55 @@ independence assumption, and its reported yaw variance is not meaningful on
 hardware. The simulation path is unaffected -- `imu_sim` and `compass_sim` draw
 independently -- but no real-world heading-error claim can rest on that log.
 
-## Does a calibrated trigger beat a clock? (n = 4 paired seeds)
+## Does a calibrated trigger beat a clock?
+
+### First attempt, n = 4 paired seeds: underpowered
 
 `trigger_calibrated_20260731_0958` and `..._more_20260731_1040`, seeds 601-604,
-both arms identical apart from what starts a revisit.
+`cooldown_s` 60, schedule 34 m. Paired ATE difference +0.006 m (p=0.97, 2/4
+wins), absolute error -0.109 (p=0.76), coverage -0.033 (p=0.65); revisits 2.75
+in both arms, so the cadence matched. A single seed had suggested a 34%
+advantage for the uncertainty trigger and it was noise.
 
-| metric | uncertainty (U_r) | scheduled (34 m) | paired diff | unc wins | p |
+The paired difference had sd 0.256 and a 95% CI of [-0.401, +0.412] -- as wide
+as the ATE itself -- so the experiment could not exclude any effect below
+~0.41 m. From that sd: 13 paired seeds give 80% power at a 0.20 m effect
+(~2.6 h of sim), 52 at 0.10 m, 206 at 0.05 m. That power calculation, not the
+non-result, is what those four seeds were worth.
+
+### Second attempt, n = 13 paired seeds: powered, but the cadence broke
+
+`trigger_powered_20260731_1147`, seeds 611-623, `cooldown_s` cut to 30, all 26
+runs valid.
+
+| metric | uncertainty | scheduled (34 m) | paired diff | unc wins | p |
 |---|---|---|---|---|---|
-| final ATE | 0.397 +- 0.171 | 0.392 +- 0.215 | +0.006 | 2/4 | 0.97 |
-| final absolute error | 0.446 +- 0.294 | 0.555 +- 0.513 | -0.109 | 2/4 | 0.76 |
-| coverage | 0.854 +- 0.110 | 0.887 +- 0.075 | -0.033 | 2/4 | 0.65 |
-| loop closures | 74.5 +- 22.8 | 91.0 +- 27.3 | -16.5 | 1/4 | 0.53 |
-| revisits | 2.75 +- 0.50 | 2.75 +- 0.50 | 0.00 | -- | -- |
+| final ATE | 0.248 +- 0.099 | 0.277 +- 0.133 | -0.030 | 8/13 | 0.49 |
+| final absolute error | 0.253 +- 0.141 | 0.368 +- 0.235 | -0.115 | 10/13 | 0.09 |
+| coverage | 0.923 +- 0.026 | 0.897 +- 0.067 | +0.026 | 8/13 | 0.21 |
+| loop closures | 107.5 +- 29.9 | 81.8 +- 42.4 | +25.8 | 10/13 | 0.05 |
+| **revisits** | **3.62** | **2.31** | **+1.31** | -- | -- |
 
-**The two arms are indistinguishable.** Per-seed ATE (uncertainty / scheduled)
-is 0.468/0.710, 0.494/0.283, 0.142/0.329, 0.485/0.244 -- the sign flips twice.
-A single seed had suggested a 34% advantage for the uncertainty trigger; with
-four it is +0.006 m. That apparent advantage was noise, which is exactly why it
-was not claimed when it appeared.
+**The control is no longer matched, so nothing here can be attributed to the
+trigger.** Shortening the cooldown let U_r re-trigger sooner, while the
+schedule kept its 34 m interval and kept counting only exploring-state travel
+-- realised spacing 52.4 m. The uncertainty arm therefore revisited 57% more
+often, and its better absolute error and higher closure count are exactly what
+more revisits would produce on their own. This is a self-inflicted confound
+from changing `cooldown_s` without re-deriving the control.
 
-Two things did work. The matched cadence held exactly -- 2.75 revisits per run
-in both arms -- so this is a valid test of *what* triggers a revisit rather
-than of how often one happens. And the trigger fires organically on a
-mission-derived threshold, where before the calibration it needed
-`sigma_allow_xy_m` raised to 0.45 to fire at all.
+ATE remains not significant (p=0.49) even with the extra revisits, which is
+itself worth noting: whatever the uncertainty arm buys in absolute error and
+closures does not show up in trajectory accuracy.
+
+### Third attempt: the schedule re-matched
+
+`trigger_rematched_*` re-runs the scheduled arm alone at
+`34 * 2.31/3.62 = 22 m`, paired against the same uncertainty runs, so realised
+revisit counts should agree. Calibrating the control's interval to equalise
+revisit count is the definition of this control rather than a tuning of the
+outcome -- but it is a second attempt at the same comparison, and the writeup
+should say so and report all three.
 
 ### How the revisit policy actually spends the mission
 

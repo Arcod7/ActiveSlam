@@ -1,0 +1,169 @@
+# Does triggering revisits on uncertainty beat triggering on a clock, once the
+# uncertainty is actually calibrated?
+#
+# This repeats the trigger comparison with the corrected odometry model. The
+# earlier version of this experiment could not answer the question: sigma_xy
+# was 6-10x under the true drift, so U_r was not a measurement of anything, and
+# the threshold had been raised to 0.45 to make the trigger fire at all -- its
+# own config comment says so.
+#
+# sigma_allow is now derived from a mission requirement, fixed before any
+# outcome was inspected, and NOT from the observed sigma_xy curves:
+#
+#   sigma_allow_xy_m = voxel_size = 0.2
+#     The deliverable is a 0.2 m TSDF reconstruction. Once the pose uncertainty
+#     exceeds one voxel, a measurement can be integrated into the wrong voxel
+#     and the resolution the map claims is no longer supported.
+#
+#   sigma_allow_yaw_rad = voxel_size / mapping_range = 0.2 / 4.0 = 0.05
+#     Heading uncertainty smears a surface laterally by psi * range. At the
+#     typical mapping range for this survey (wall_standoff 1.5 m plus the
+#     frontier standoff 2.0 m, so ~4 m to the far side of what a sweep sees),
+#     one voxel of smear is 0.05 rad.
+#
+# Both arms are given the same revisit machinery and differ only in what starts
+# a revisit, so the comparison isolates the trigger and nothing else.
+#
+# RE-MATCH PASS. The 34 m schedule in trigger_powered_20260731_1147 realised
+# 2.31 revisits per run against the uncertainty arm's 3.62, because cutting
+# cooldown to 30 s let U_r re-trigger sooner while the schedule kept counting
+# only exploring-state travel -- realised spacing 52.4 m against a 34 m
+# setting. An unmatched cadence makes the comparison measure revisit frequency,
+# which is exactly what the control exists to remove, so the scheduled arm is
+# re-run at 34 * 2.31/3.62 = 22 m and paired against the SAME uncertainty runs.
+# The interval is calibrated to equalise revisit count, which is the definition
+# of this control, not a tuning of the outcome.
+#
+# The schedule interval is a MATCHED CADENCE, not a free parameter: if the two
+# arms revisit a different number of times the comparison measures revisit
+# frequency rather than what triggered them. It is the travel at which U_r
+# itself reaches 1 under dead reckoning alone, measured on the closure-free
+# calibration batch (odom_calibration_20260731_0935): 51.4, 34.2 and 26.7 m of
+# arc on three seeds, median 34.
+#
+# cooldown_s is 30, not the 60 s default. Measured on the first four paired
+# seeds, a 300 s run with ~3 revisits spent 41-60% of itself in cooldown with
+# the trigger suppressed, and exploring fell as low as 17%. That compresses any
+# difference between the two trigger policies and is a large part of why the
+# n=4 comparison had no power. Not comparable with those four seeds.
+#
+# Revisits end on revisit_min_closures=1, i.e. on achieving the relocalisation
+# they were launched for, not on U_r falling back under ratio_resume. Measured:
+# 9 of 10 revisit exits were CLOSED and one was RESUMED_DOPT, with U_r at exit
+# between 0.34 and 0.76. U_r < 0.5 needs sigma_xy < 0.175 m once the yaw factor
+# of 0.60 is applied, which a single closure does not deliver, so ratio_resume
+# is close to inactive by construction. The honest description of this policy is
+# that U_r decides when to GO and a closure decides when to STOP.
+#
+# Note this is NOT where sigma_xy crosses sigma_allow_xy (11.7-14.3 m). U_r
+# factorises as r_xy^(4/3) * r_yaw^(2/3), and sigma_yaw sits at ~0.023 rad
+# against an allowance of 0.05, so the yaw factor is 0.60 and the effective
+# position trigger is sigma_xy = 0.295 m rather than 0.2 m. A comfortably low
+# yaw ratio dilutes the position trigger -- worth stating, because it means
+# sigma_allow_yaw_rad silently rescales the position threshold.
+batch_name: trigger_rematched
+duration_s: 300
+settle_s: 15
+seeds:
+- 611
+- 612
+- 613
+- 614
+- 615
+- 616
+- 617
+- 618
+- 619
+- 620
+- 621
+- 622
+- 623
+record_bag: false
+common_args:
+  rviz: 'false'
+  slam: slam
+  loop_closure: 'true'
+  revisit: 'true'
+  map_rebuild: 'true'
+  odom_coherent_noise: 'true'
+  noise_profile_dvl: degraded
+  noise_profile: realistic
+  noise_profile_imu: realistic
+  noise_profile_compass: realistic
+  noise_profile_pressure: realistic
+  sigma_allow_xy_m: 0.2
+  sigma_allow_yaw_rad: 0.05
+  ratio_trigger: 1.0
+  ratio_resume: 0.5
+  revisit_min_closures: 1
+  cooldown_s: 30.0
+  arrival_dwell_s: 6.0
+  keyframe_dist_m: 0.5
+  keyframe_angle_rad: 0.2
+  keyframe_max_per_cell: 3
+  loop_closure_radius_m: 5.0
+  loop_closure_min_gap: 20
+  min_inlier_ratio: 0.3
+  scan_sigma_trans: 0.12
+  scan_sigma_rot: 0.08
+  odom_sigma_trans: 0.002
+  odom_sigma_rot: 0.02
+  speed_factor: 1.0
+  turn_factor: 0.5
+  depth: 8.0
+  motion: walloriented
+  scan_style: sweep
+  scan_sweep_deg: 180.0
+  safety_start_enabled: 'true'
+  thrust_boost: 'false'
+  wall_orientation_offset_deg: 45.0
+  wall_orientation_lookahead_m: 2.0
+  wall_z_band_m: 1.5
+  wall_standoff: 1.5
+  wall_switch_goal_distance: 6.0
+  wall_switch_scan_angle: 3.14159
+  wall_switch_scan_yaw: 0.08
+  wall_path_influence: 0.7
+  wall_path_look_offset_deg: 30.0
+  wall_normal_offset_deg: 0.0
+  wall_path_heading_weight: 0.35
+  mapper: tsdf
+  directional_tsdf: 'true'
+  noise_profile_sonar: realistic_no_reverb
+  near_cutoff: 1.6
+  near_fade: 0.8
+  voxel_size: 0.2
+  trunc_distance: 0.0
+  space_carving: 'true'
+  carve_no_return: 'false'
+  voxel_min_solid_confidence: 0.7
+  voxel_min_weight: 6.0
+  tsdf_octomap: 'true'
+  cache_max_scans: 6000
+  mode: frontier
+  tsdf_frontier_standoff_m: 2.0
+  survey_radius_m: 0.0
+  min_goal_separation_m: 0.0
+  projected_map_band_m: 1.0
+  hard_inflation_m: 0.5
+  inflation_m: 1.5
+  plan_inflation_m: 5.0
+  scene: target
+  obj_mesh: shipwreck.obj
+  obj_x: 4.55
+  obj_y: -20.62
+  obj_z: 18.38
+  obj_scale: 0.85
+  obj_roll: 0.0
+  obj_pitch: -180.0
+  obj_yaw: 15.0
+  robot_x: -2.9977
+  robot_y: -1.5461
+  robot_z: 6.9393
+  robot_roll: -0.1439
+  robot_pitch: 0.0955
+  robot_yaw: 150.1176
+runs:
+- name: scheduled22
+  args:
+    revisit_schedule_every_m: 22.0
