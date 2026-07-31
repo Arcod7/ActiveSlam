@@ -44,10 +44,14 @@ def test_own_namespace_so_it_never_clobbers_the_cube_list():
     assert _cap_banner(40, 100, PTS, HEADER).ns != 'tsdf_voxels'
 
 
-def test_sits_above_the_map_centroid_in_ned():
-    """world_ned is +Z down, so the banner goes below min Z to render on top."""
+def test_sits_past_the_map_right_edge_in_ned():
+    """world_ned is +Z down, so the banner goes below min Z to render on top.
+
+    Anchored past +X max (not the centroid) so it reads as a legend beside
+    the map instead of a label in the middle of the voxels.
+    """
     m = _cap_banner(40, 100, PTS, HEADER)
-    assert m.pose.position.x == np.float32(PTS[:, 0].mean())
+    assert m.pose.position.x > float(PTS[:, 0].max())
     assert m.pose.position.y == np.float32(PTS[:, 1].mean())
     assert m.pose.position.z < float(PTS[:, 2].min())
 

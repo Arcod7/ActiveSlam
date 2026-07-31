@@ -124,12 +124,15 @@ class TSDFMapper(Node):
         # integration. The depth-camera proxy may produce farther off-axis
         # points, but the physical Water Linked sensor has a 15 m radial range.
         self.declare_parameter('max_range_m', 15.0)
-        # Free-space carving for no-return pixels: synthesize a pseudo-point
-        # past the sensor max so space_carving frees the traversed voxels.
-        # vdbfusion has no carve-only ray API, so the endpoint itself writes a
-        # surface — carve_range_m keeps it outside the mapped envelope.
+        # Free-space carving for no-return pixels: mark every voxel the ray
+        # crossed free, with no surface at the far end (_carve_no_return_rays).
         self.declare_parameter('carve_no_return', False)
-        self.declare_parameter('carve_range_m', 16.0)
+        # <= 0 resolves to max_range_m: a no-return ray carries no information
+        # past the range the sensor could have detected a return at.
+        self.declare_parameter('carve_range_m', 0.0)
+        # Pixel decimation for carve rays. At 15 m two adjacent Sonar 3D-15
+        # pixels are ~0.09 m apart, so stride 2 still samples below voxel_size.
+        self.declare_parameter('carve_pixel_stride', 2)
         # 2-D planning map derived from this TSDF grid, published on
         # /projected_map for the frontier planner + A* (see module docstring).
         # Off by default so only the belief instance under mode:=frontier
@@ -180,6 +183,9 @@ class TSDFMapper(Node):
         self._max_range    = float(self.get_parameter('max_range_m').value)
         self._carve_no_return = bool(self.get_parameter('carve_no_return').value)
         self._carve_range  = float(self.get_parameter('carve_range_m').value)
+        if self._carve_range <= 0.0:
+            self._carve_range = self._max_range
+        self._carve_stride = max(1, int(self.get_parameter('carve_pixel_stride').value))
         self._projected_map_enabled = bool(
             self.get_parameter('publish_projected_map').value)
         self._free_voxels_enabled = bool(
@@ -512,6 +518,30 @@ class TSDFMapper(Node):
             if len(sel):
                 volume.integrate(sel, origin)
 
+    def _carve_no_return_rays(self, dirs_world: np.ndarray,
+                              origin: np.ndarray) -> int:
+        """Write d=+trunc (fully free) into every voxel a no-return ray crossed.
+
+        integrate() cannot express this: its rays end at a point, and that
+        endpoint always writes a zero crossing — a surface. A no-return ray has
+        no endpoint, so the voxels are written directly instead, saturated free
+        out to carve_range_m and nothing beyond it.
+        """
+        bins = (_direction_bins(dirs_world) if self._directional
+                else np.zeros(len(dirs_world), dtype=int))
+        # Ray marching is the expensive half and touches no grid, so it stays
+        # outside the lock; only the writes are serialised against viz.
+        parts = [(volume, free_ray_voxels(dirs_world[bins == b], origin,
+                                          self._voxel_size, self._carve_range))
+                 for b, volume in enumerate(self._volumes)]
+        total = 0
+        with self._volume_lock:
+            for volume, voxels in parts:
+                for ijk in voxels.tolist():
+                    volume.update_tsdf(self._trunc, ijk)
+                total += len(voxels)
+        return total
+
     def _integrate_cloud(self, msg: PointCloud2, tf_msg) -> bool:
         """Filter and integrate one cloud using its exact capture-time TF."""
         pts_cam = _parse_pointcloud2(msg)   # (N,3) float64, sensor frame
@@ -522,15 +552,13 @@ class TSDFMapper(Node):
         # and the real Sonar 3D-15's 15 m acoustic range.
         pts_cam = pts_cam[np.linalg.norm(pts_cam, axis=1) < self._max_range]
 
-        # Appended after the range filter — these sit past max_range by design.
+        carve_dirs = None
         if self._carve_no_return:
             raw = _parse_pointcloud2_raw(msg)
             if raw is not None:
-                pseudo = synth_no_return_points(raw, msg.width, self._carve_range)
-                if len(pseudo):
-                    pts_cam = np.vstack([pts_cam, pseudo])
+                carve_dirs = no_return_ray_dirs(raw, msg.width, self._carve_stride)
 
-        if len(pts_cam) == 0:
+        if len(pts_cam) == 0 and (carve_dirs is None or not len(carve_dirs)):
             return False
 
         T = _tf_to_matrix(tf_msg.transform)   # T_world_cam (4×4, float64)
@@ -543,15 +571,20 @@ class TSDFMapper(Node):
         pts_world = pts_cam @ R.T + t      # (N,3) world frame, float64
         origin    = t                       # camera origin in world frame, float64
 
-        with self._volume_lock:
-            self._integrate_into(pts_world, origin)
+        carved = 0
+        if len(pts_world):
+            with self._volume_lock:
+                self._integrate_into(pts_world, origin)
+        if carve_dirs is not None and len(carve_dirs):
+            carved = self._carve_no_return_rays(carve_dirs @ R.T, origin)
         self._map_revision += 1
 
         if self._enable_rebuild:
             self._cache_scan(msg.header.stamp, pts_cam, T)
 
         self.get_logger().info(
-            f'Integrated {len(pts_world)} pts  cam=({t[0]:.2f},{t[1]:.2f},{t[2]:.2f})',
+            f'Integrated {len(pts_world)} pts  carved {carved} voxels  '
+            f'cam=({t[0]:.2f},{t[1]:.2f},{t[2]:.2f})',
             throttle_duration_sec=2.0)
         return True
 
@@ -1072,13 +1105,13 @@ def fit_pinhole_intrinsics(xyz: np.ndarray, width: int) -> 'tuple | None':
     return x_fit[0], x_fit[1], y_fit[0], y_fit[1]
 
 
-def synth_no_return_points(xyz: np.ndarray, width: int,
-                           carve_range_m: float) -> np.ndarray:
-    """Pseudo-points at carve_range_m along each no-return pixel's ray.
+def no_return_ray_dirs(xyz: np.ndarray, width: int,
+                       stride: int = 1) -> np.ndarray:
+    """Unit rays (sensor frame) for the pixels that returned nothing.
 
-    Feeding these to VDBVolume.integrate(space_carving=True) frees the voxels
-    the ray traverses. Returns an empty (0,3) array when the geometry can't be
-    recovered (no valid pixels to fit against) or nothing is missing."""
+    Directions come from intrinsics fitted to the cloud itself rather than a
+    restatement of the sensor's FoV. Returns an empty (0,3) array when the
+    geometry can't be recovered or nothing is missing."""
     empty = np.empty((0, 3), dtype=np.float64)
     if xyz is None or len(xyz) == 0:
         return empty
@@ -1093,9 +1126,33 @@ def synth_no_return_points(xyz: np.ndarray, width: int,
     idx = np.nonzero(invalid)[0]
     u = (idx % width).astype(np.float64)
     v = (idx // width).astype(np.float64)
-    dirs = np.column_stack([(u - cx) / fx, (v - cy) / fy, np.ones(len(idx))])
-    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
-    return dirs * carve_range_m
+    if stride > 1:
+        keep = (u % stride == 0) & (v % stride == 0)
+        u, v = u[keep], v[keep]
+    dirs = np.column_stack([(u - cx) / fx, (v - cy) / fy, np.ones(len(u))])
+    return dirs / np.linalg.norm(dirs, axis=1, keepdims=True)
+
+
+def free_ray_voxels(dirs_world: np.ndarray, origin: np.ndarray,
+                    voxel_size: float, max_range: float) -> np.ndarray:
+    """Unique VDB index coords the rays cross, out to max_range.
+
+    Sampled at half a voxel so no cell along a ray is stepped over; the origin
+    cell is included, nothing past max_range is."""
+    if not len(dirs_world) or max_range <= 0.0:
+        return np.empty((0, 3), dtype=np.int64)
+    step = voxel_size * 0.5
+    t = np.arange(0.0, max_range, step, dtype=np.float64)
+    pts = origin + dirs_world[:, None, :] * t[None, :, None]
+    ijk = np.floor(pts.reshape(-1, 3) / voxel_size).astype(np.int64)
+
+    # Row-unique via a single packed key — np.unique(axis=0) lexsorts and is
+    # several times slower on the ~10^6 samples a full no-return frame makes.
+    lo, hi = ijk.min(axis=0), ijk.max(axis=0)
+    span = hi - lo + 1
+    key = (((ijk[:, 0] - lo[0]) * span[1]) + (ijk[:, 1] - lo[1])) * span[2] \
+        + (ijk[:, 2] - lo[2])
+    return ijk[np.unique(key, return_index=True)[1]]
 
 
 def _tf_to_matrix(tf_transform) -> np.ndarray:
@@ -1454,13 +1511,15 @@ def _make_normals_cloud(header: Header, points: np.ndarray,
 
 def _cap_banner(shown: int, total: int, pts: 'np.ndarray | None',
                 header: Header) -> Marker:
-    """Text banner above the map when max_voxels_viz thins the CUBE_LIST.
+    """Text banner beside the map when max_voxels_viz thins the CUBE_LIST.
 
-    The cap is a render budget on the marker only -- /tsdf/occupied_voxels
-    still carries every solid voxel -- so the wording has to say the map is
-    complete, or a thinned view reads as a mapping failure. DELETEs itself
-    when nothing was dropped, so the banner cannot linger once the map
-    shrinks back under the cap.
+    Anchored past the map's +X edge, not the centroid, so it reads like a
+    legend off to the side instead of a label sitting in the middle of the
+    voxels it describes. The cap is a render budget on the marker only --
+    /tsdf/occupied_voxels still carries every solid voxel -- so the wording
+    has to say the map is complete, or a thinned view reads as a mapping
+    failure. DELETEs itself when nothing was dropped, so the banner cannot
+    linger once the map shrinks back under the cap.
     """
     m = Marker()
     m.header.stamp    = header.stamp
@@ -1477,15 +1536,13 @@ def _cap_banner(shown: int, total: int, pts: 'np.ndarray | None',
     m.scale.z = 0.8                                  # text height in metres
     m.color   = ColorRGBA(r=1.0, g=0.75, b=0.1, a=1.0)
     # world_ned is +Z down, so min Z is the top of the map.
-    m.pose.position.x = float(pts[:, 0].mean())
+    m.pose.position.x = float(pts[:, 0].max()) + 2.0
     m.pose.position.y = float(pts[:, 1].mean())
     m.pose.position.z = float(pts[:, 2].min()) - 1.5
     m.pose.orientation.w = 1.0
-    m.text = (f'VOXEL VIEW CAPPED FOR PERFORMANCE\n'
-              f'showing {shown} of {total} voxels ({100.0 * shown / total:.0f}%), '
-              f'resampled each redraw\n'
-              f'display limit only - the map itself is complete '
-              f'(see /tsdf/occupied_voxels)')
+    pct = 100.0 * shown / total
+    m.text = (f'VOXEL VIEW CAPPED - {shown} of {total} ({pct:.0f}%)\n'
+              f'display limit only, map is complete')
     return m
 
 
