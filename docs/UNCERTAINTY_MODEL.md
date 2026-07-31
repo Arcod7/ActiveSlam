@@ -388,37 +388,54 @@ independence assumption, and its reported yaw variance is not meaningful on
 hardware. The simulation path is unaffected -- `imu_sim` and `compass_sim` draw
 independently -- but no real-world heading-error claim can rest on that log.
 
-## Does a calibrated trigger beat a clock? (n = 1, indicative only)
+## Does a calibrated trigger beat a clock? (n = 4 paired seeds)
 
-`trigger_calibrated_20260731_0958`, one paired seed, both arms identical apart
-from what starts a revisit.
+`trigger_calibrated_20260731_0958` and `..._more_20260731_1040`, seeds 601-604,
+both arms identical apart from what starts a revisit.
 
-| | uncertainty (U_r) | scheduled (every 34 m) |
+| metric | uncertainty (U_r) | scheduled (34 m) | paired diff | unc wins | p |
+|---|---|---|---|---|---|
+| final ATE | 0.397 +- 0.171 | 0.392 +- 0.215 | +0.006 | 2/4 | 0.97 |
+| final absolute error | 0.446 +- 0.294 | 0.555 +- 0.513 | -0.109 | 2/4 | 0.76 |
+| coverage | 0.854 +- 0.110 | 0.887 +- 0.075 | -0.033 | 2/4 | 0.65 |
+| loop closures | 74.5 +- 22.8 | 91.0 +- 27.3 | -16.5 | 1/4 | 0.53 |
+| revisits | 2.75 +- 0.50 | 2.75 +- 0.50 | 0.00 | -- | -- |
+
+**The two arms are indistinguishable.** Per-seed ATE (uncertainty / scheduled)
+is 0.468/0.710, 0.494/0.283, 0.142/0.329, 0.485/0.244 -- the sign flips twice.
+A single seed had suggested a 34% advantage for the uncertainty trigger; with
+four it is +0.006 m. That apparent advantage was noise, which is exactly why it
+was not claimed when it appeared.
+
+Two things did work. The matched cadence held exactly -- 2.75 revisits per run
+in both arms -- so this is a valid test of *what* triggers a revisit rather
+than of how often one happens. And the trigger fires organically on a
+mission-derived threshold, where before the calibration it needed
+`sigma_allow_xy_m` raised to 0.45 to fire at all.
+
+### The experiment is underpowered, which is not the same as a null result
+
+The paired ATE difference is +0.006 m with a standard deviation of 0.256 and a
+95% confidence interval of **[-0.401, +0.412]**. The interval is as wide as the
+ATE itself (mean 0.4 m), so this experiment cannot exclude any effect smaller
+than roughly 0.41 m. It has essentially no power, and "no significant
+difference" here carries almost no information.
+
+What it would take, from the observed paired standard deviation:
+
+| effect to detect | paired seeds for 80% power | sim time at ~6 min/run |
 |---|---|---|
-| revisits | 3 | 3 |
-| final ATE | **0.468 m** | 0.710 m |
-| final absolute error | **0.411 m** | 1.306 m |
-| coverage | **0.903** | 0.794 |
-| chamfer | **0.741** | 0.782 |
-| loop closures | 93 | 57 |
+| 0.20 m ATE (~50%) | 13 | ~2.6 h |
+| 0.10 m ATE (~25%) | 52 | ~10.4 h |
+| 0.05 m ATE (~13%) | 206 | ~41 h |
 
-Two things worth taking from this and one thing not to.
+Thirteen paired seeds is the minimum defensible version of this experiment and
+costs under three hours. Anything finer than a 50% effect needs an overnight
+campaign. Reporting the n=4 result as evidence either way would be a mistake;
+reporting it as a power calculation is the honest use of it.
 
-The trigger now fires **organically on a mission-derived threshold** -- U_r
-peaked at 1.20 and the state machine cycled exploring -> revisiting -> cooldown
-three times. Before the model was corrected, the trigger either never fired or
-needed `sigma_allow_xy_m` raised to 0.45 to fire at all. That much is a
-property of the calibration, not of this seed.
-
-The matched cadence held: both arms revisited exactly three times, so the
-comparison isolates what triggered the revisit rather than how often one
-happened. That is the design working.
-
-What must **not** be taken from this is the performance gap. This is a single
-seed. Seed-to-seed variance in this system is large by construction -- the
-run-long DVL scale and bias draws dominate a whole trace, and per-run ANEES on
-one fixed configuration has been observed at 2.99, 36.62 and 21.97. A 34% ATE
-difference on n=1 is inside that noise. Five or more paired seeds are needed
-before any of these numbers is quotable, and `matrix_trigger_calibrated.yaml`
-is set up to do exactly that -- it was trimmed to one seed only to fit a time
-budget.
+The variance driving this is structural, not a nuisance to be averaged away
+carelessly: the DVL scale and bias are one draw per run, so each seed's whole
+trajectory is dominated by a single realisation. That is the same property that
+makes per-run ANEES scatter over an order of magnitude, and it is why paired
+seeds -- same seed, both arms -- are the right design here.
