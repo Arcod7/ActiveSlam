@@ -224,7 +224,7 @@ property of this trajectory and not a licence. And per-run summaries are
 dominated by the single coherent draw, so read the pooled milestone table, not
 one seed's final number.
 
-## Open problem: the reported marginal is not monotone
+## Why the reported marginal is not monotone (solved)
 
 In a closure-free run the marginal of the newest keyframe should only grow --
 every edge adds variance and nothing removes it. It does not. Across the three
@@ -283,7 +283,7 @@ the marginal -- ~30% of steps -- but usually small relative to the distance
 between D-opt and the threshold, and it corrupts the trigger less often than
 the raw dip statistics suggest. Worth having, not worth overstating.
 
-### Still unresolved: the level, as opposed to the shape
+### The level, as opposed to the shape (partly bounded)
 
 The offline chain above reaches `sigma_xy` 0.823 m at 113 m, while the real run
 over the same trajectory reports 0.476 m and ends with a true error of 0.974 m.
