@@ -63,8 +63,11 @@ class IMUSimNode(Node):
         # Skip the draw on a non-positive dt (e.g. a sim-time/clock reset or
         # out-of-order delivery) rather than pass a negative scale into
         # np.random.normal — mirrors the dt > 0 guard in dead_reckoning.py.
+        # sqrt(dt): gyro_bias_drift_rad_s is a random-walk intensity (rad/√s),
+        # matching compass_sim and the yaw filter's process model.
         if dt > 0:
-            self.yaw_bias += np.random.normal(0, self.profile.gyro_bias_drift_rad_s * dt)
+            self.yaw_bias += np.random.normal(
+                0, self.profile.gyro_bias_drift_rad_s * np.sqrt(dt))
         
         if current_time - self.last_pub_time < self.publish_interval:
             return

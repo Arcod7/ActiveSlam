@@ -25,7 +25,7 @@ from scipy.spatial.transform import Rotation
 
 from slam_backend.attitude_filter import YawKalmanFilter
 from slam_backend.geometry_utils import matrix_to_odom
-from slam_backend.sensor_models.noise_profiles import load_noise_profile, NoiseProfile
+from slam_backend.sensor_models.noise_profiles import load_composite_profile
 
 
 class DeadReckoningNode(Node):
@@ -36,6 +36,10 @@ class DeadReckoningNode(Node):
         self.declare_parameter('initial_y', 0.0)
         self.declare_parameter('world_frame', 'world_ned')
         self.declare_parameter('noise_profile_path', '')
+        # Per-sensor overrides matching the sim's: the yaw filter's sigmas must
+        # describe the IMU/compass streams actually being fused.
+        self.declare_parameter('noise_profile_path_imu', '')
+        self.declare_parameter('noise_profile_path_compass', '')
 
         self.world_frame = self.get_parameter('world_frame').value
 
@@ -45,13 +49,12 @@ class DeadReckoningNode(Node):
         self.last_vel_time = None
 
         yaml_path = self.get_parameter('noise_profile_path').value
-        if yaml_path and os.path.exists(yaml_path):
-            profile = load_noise_profile(yaml_path)
-        else:
-            if yaml_path:
-                self.get_logger().warn(
-                    f"Invalid noise profile path: '{yaml_path}', using defaults.")
-            profile = NoiseProfile()
+        if yaml_path and not os.path.exists(yaml_path):
+            self.get_logger().warn(
+                f"Invalid noise profile path: '{yaml_path}', using defaults.")
+        profile = load_composite_profile(yaml_path, {
+            'imu': self.get_parameter('noise_profile_path_imu').value,
+            'compass': self.get_parameter('noise_profile_path_compass').value})
         self._imu_yaw_sigma = profile.imu.sigma_yaw_rad
         self._compass_yaw_sigma = profile.compass.sigma_yaw_rad
         self._yaw_filter = YawKalmanFilter(profile.imu.gyro_bias_drift_rad_s)
