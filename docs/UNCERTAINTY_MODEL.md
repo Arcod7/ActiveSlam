@@ -294,3 +294,38 @@ value and corrects with the same value, violating the Kalman filter's
 independence assumption, and its reported yaw variance is not meaningful on
 hardware. The simulation path is unaffected -- `imu_sim` and `compass_sim` draw
 independently -- but no real-world heading-error claim can rest on that log.
+
+## Does a calibrated trigger beat a clock? (n = 1, indicative only)
+
+`trigger_calibrated_20260731_0958`, one paired seed, both arms identical apart
+from what starts a revisit.
+
+| | uncertainty (U_r) | scheduled (every 34 m) |
+|---|---|---|
+| revisits | 3 | 3 |
+| final ATE | **0.468 m** | 0.710 m |
+| final absolute error | **0.411 m** | 1.306 m |
+| coverage | **0.903** | 0.794 |
+| chamfer | **0.741** | 0.782 |
+| loop closures | 93 | 57 |
+
+Two things worth taking from this and one thing not to.
+
+The trigger now fires **organically on a mission-derived threshold** -- U_r
+peaked at 1.20 and the state machine cycled exploring -> revisiting -> cooldown
+three times. Before the model was corrected, the trigger either never fired or
+needed `sigma_allow_xy_m` raised to 0.45 to fire at all. That much is a
+property of the calibration, not of this seed.
+
+The matched cadence held: both arms revisited exactly three times, so the
+comparison isolates what triggered the revisit rather than how often one
+happened. That is the design working.
+
+What must **not** be taken from this is the performance gap. This is a single
+seed. Seed-to-seed variance in this system is large by construction -- the
+run-long DVL scale and bias draws dominate a whole trace, and per-run ANEES on
+one fixed configuration has been observed at 2.99, 36.62 and 21.97. A 34% ATE
+difference on n=1 is inside that noise. Five or more paired seeds are needed
+before any of these numbers is quotable, and `matrix_trigger_calibrated.yaml`
+is set up to do exactly that -- it was trimmed to one seed only to fit a time
+budget.
