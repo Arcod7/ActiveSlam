@@ -50,7 +50,8 @@ VALID_KEYS = {
     'slam', 'mode', 'motion', 'mapper', 'noise_profile', 'loop_closure',
     'noise_profile_pressure', 'noise_profile_imu', 'noise_profile_compass',
     'noise_profile_dvl', 'noise_profile_sonar',
-    'map_rebuild', 'rviz', 'revisit', 'scenario', 'scenario_out_dx', 'scenario_out_dy',
+    'map_rebuild', 'odom_coherent_noise',
+    'rviz', 'revisit', 'scenario', 'scenario_out_dx', 'scenario_out_dy',
     'mission_waypoints', 'mission_loop',
     # The motion gate is fail-closed (safety_gate.py start_enabled=False) and
     # zeroes every command until armed — sim batches must opt in explicitly.
@@ -80,6 +81,7 @@ VALID_KEYS = {
     'survey_radius_m', 'survey_center_x', 'survey_center_y',
     'min_goal_separation_m', 'wall_z_band_m', 'revisit_scan_slowdown',
     'revisit_min_closures', 'arrival_dwell_s', 'stall_exit_s',
+    'dopt_median_window',
     'revisit_schedule_every_m',
     'cache_max_scans',
     # Pose-graph construction and its noise model: a batch that cannot set

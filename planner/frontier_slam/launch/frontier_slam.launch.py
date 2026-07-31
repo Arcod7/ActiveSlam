@@ -371,6 +371,15 @@ def generate_launch_description():
                     "pose_graph's per-cell keyframe cap, after which no covariance "
                     'change is possible. 0 disables, leaving arrival_dwell_s.',
     )
+    dopt_median_window_arg = DeclareLaunchArgument(
+        'dopt_median_window', default_value='1',
+        description='Median window over /slam/dopt before the trigger reads it. '
+                    "iSAM2 recovers each keyframe's marginal from a freshly "
+                    'relinearised tree, so the published series dips on ~30% of '
+                    'keyframes even with no closures while the underlying '
+                    'quantity is monotone between them. 1 disables the filter '
+                    'and keeps earlier recorded comparisons comparable.',
+    )
     revisit_scan_slowdown_arg = DeclareLaunchArgument(
         'revisit_scan_slowdown', default_value='1.0',
         description='Divide the scan yaw rate by this while a revisit is in progress, '
@@ -408,6 +417,7 @@ def generate_launch_description():
         revisit_schedule_every_m_arg,
         arrival_dwell_arg,
         stall_exit_arg,
+        dopt_median_window_arg,
         odom_topic_arg,
         marker_frame_arg,
         safety_start_enabled_arg,
@@ -588,6 +598,8 @@ def generate_launch_description():
                     LaunchConfiguration('revisit_min_closures'), value_type=int),
                 'arrival_dwell_s': _float_parameter('arrival_dwell_s'),
                 'stall_exit_s': _float_parameter('stall_exit_s'),
+                'dopt_median_window': ParameterValue(
+                    LaunchConfiguration('dopt_median_window'), value_type=int),
             }],
             condition=IfCondition(LaunchConfiguration('revisit')),
         ),

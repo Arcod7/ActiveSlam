@@ -34,6 +34,7 @@ FPFH/saliency-based candidate scoring, and mirror-graph virtual-factor
 covariance propagation along candidate paths — this node consumes the
 already-published scalar D-optimality instead of propagating anything itself.
 """
+import collections
 import os
 from dataclasses import dataclass
 from enum import Enum
@@ -71,6 +72,18 @@ def dopt_allowable(sigma_xy_m: float, sigma_yaw_rad: float) -> float:
     built from per-axis sigmas so the threshold can be stated in metres and
     radians rather than as a bare determinant."""
     return float(np.power((sigma_xy_m ** 2) ** 2 * sigma_yaw_rad ** 2, 1.0 / 3.0))
+
+
+def median_of(samples) -> "float | None":
+    """Median of the buffered D-opt samples, or None before the first arrives.
+
+    A median rather than a mean: the artefact being suppressed is a transient
+    dip in a single relinearised recovery, which a median rejects outright and
+    a mean only dilutes. A window of 1 returns the live sample unchanged.
+    """
+    if not samples:
+        return None
+    return float(np.median(np.asarray(samples, dtype=float)))
 
 
 def uncertainty_ratio(dopt, dopt_allow: float) -> "float | None":
@@ -406,6 +419,16 @@ class RevisitPlanner(Node):
         self.declare_parameter('arrival_dwell_s', 30.0)
         self.declare_parameter('stall_exit_s', 5.0)
         self.declare_parameter('cooldown_s', 60.0)
+        # Median window over /slam/dopt before it is compared to the threshold.
+        # iSAM2 recovers each keyframe's marginal from a freshly relinearised
+        # Bayes tree, so the published series is not monotone even with no loop
+        # closures -- it falls on ~30% of keyframes, by up to 2x, while the
+        # underlying quantity provably is monotone between closures (a batch
+        # Marginals() over the same chain never decreases; see
+        # eval_tools/scripts/marginal_monotonicity.py). Thresholding a single
+        # live sample therefore fires on recovery noise. 1 disables the filter
+        # and is the default, so recorded comparisons stay comparable.
+        self.declare_parameter('dopt_median_window', 1)
 
         odom_topic = str(self.get_parameter('odom_topic').value)
 
@@ -431,6 +454,8 @@ class RevisitPlanner(Node):
         )
         self._sm = RevisitStateMachine(cfg)
 
+        window = max(1, int(self.get_parameter('dopt_median_window').value))
+        self._dopt_window = collections.deque(maxlen=window)
         self._dopt = None
         self._sigma_xy = None
         self._sigma_yaw = None
@@ -475,7 +500,8 @@ class RevisitPlanner(Node):
     # ------------------------------------------------------------------
     # ROS callbacks
     def _dopt_cb(self, msg: Float64) -> None:
-        self._dopt = msg.data
+        self._dopt_window.append(msg.data)
+        self._dopt = median_of(self._dopt_window)
 
     def _sigma_xy_cb(self, msg: Float64) -> None:
         self._sigma_xy = msg.data

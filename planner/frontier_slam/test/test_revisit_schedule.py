@@ -126,3 +126,45 @@ def test_scheduled_and_uncertainty_modes_are_mutually_exclusive():
     for i in range(10):
         ev = sm.tick(float(i + 1), hot, 0, _kf(), np.array([i * 0.5, 0.0]))
         assert ev is None, 'U_r must not fire while a schedule is in charge'
+
+
+# --- D-opt median filter (default off, see dopt_median_window) ---
+
+def test_median_window_of_one_is_a_no_op():
+    """The default must return the live sample untouched, or every recorded
+    comparison made before the filter existed becomes incomparable."""
+    from frontier_slam.revisit_planner import median_of
+    import collections
+    w = collections.deque(maxlen=1)
+    for v in (0.1, 0.9, 0.2):
+        w.append(v)
+        assert median_of(w) == v
+
+
+def test_median_window_rejects_a_single_dip():
+    """The artefact is one relinearised recovery dipping ~2x. A median of three
+    must ignore it; a mean would still be dragged down."""
+    from frontier_slam.revisit_planner import median_of
+    import collections
+    w = collections.deque(maxlen=3)
+    for v in (0.50, 0.52, 0.24):
+        w.append(v)
+    assert median_of(w) == 0.50
+
+
+def test_median_of_empty_is_none():
+    from frontier_slam.revisit_planner import median_of
+    assert median_of([]) is None
+
+
+def test_median_window_still_follows_a_real_rise():
+    """Suppressing dips must not blind the trigger to genuine growth."""
+    from frontier_slam.revisit_planner import median_of
+    import collections
+    w = collections.deque(maxlen=3)
+    out = []
+    for v in (0.10, 0.20, 0.30, 0.40, 0.50):
+        w.append(v)
+        out.append(median_of(w))
+    assert out[-1] > out[0]
+    assert out == sorted(out)
