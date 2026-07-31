@@ -121,6 +121,31 @@ Median 1.07, range 0.69-1.18. The previous per-edge model sat 6-10x under the
 truth on the same five cases. The 0.69 case is left in rather than corrected
 away: the model is spec-derived and the residual is reported, not absorbed.
 
+**Rejected change, recorded so it is not retried.** The 0.69 case is systematic
+rather than sampling noise -- three independent Monte Carlo seeds at 500 trials
+give 0.302, 0.308 and 0.312 against a model value of 0.213 every time -- and it
+appears only at the final milestone, the model tracking at 0.92 through the
+first three quarters. Per-term attribution shows the last-quarter growth is
+entirely heading-driven (attitude 0.174 -> 0.278, compass bias 0.135 -> 0.248)
+while every DVL term is flat.
+
+That suggested moving the heading-bias term from the displacement arm to the
+arc arm, on the argument that `compass_sim` injects an unbounded random walk
+rather than a fixed offset, so psi changes between outbound and return legs and
+the contributions stop cancelling the way displacement does. Implemented and
+measured, it is **worse**: model/truth moves from 0.69-1.18 to 1.07-3.13,
+because on the degraded profile the displacement arm is already almost exactly
+right (predicted 0.452 m against a measured 0.446 m for the bias term alone)
+and the arc arm overshoots it by the tortuosity. Reverted.
+
+The lesson for anyone revisiting this: the correct lever for a walking heading
+bias is neither arm but a path-geometry double integral,
+`Var = drift^2 * integral integral min(t,s) * (v_perp(t) . v_perp(s)) dt ds`,
+whose value depends on how correlated the direction of travel is between two
+times. Displacement is the right limit for a bias that holds still over the
+mission and arc for one that decorrelates within it; this simulator sits
+between the two and closer to displacement.
+
 ### Estimator consistency in the full pipeline
 
 `eval_tools/scripts/consistency_report.py` scores recorded runs, reading the
