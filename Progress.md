@@ -2667,3 +2667,89 @@ Full derivation, validation and the alignment with Suresh et al. (2020) —
 including that they apply **no absolute yaw prior**, which is why their D-opt
 grows in all three DoF and ours is carried by XY alone — are in
 `docs/UNCERTAINTY_MODEL.md`.
+
+## Phase 61 — No-return carving stops writing a wall at the end of the ray
+
+A no-return pixel says the ray reached maximum range without hitting anything:
+free out to 15 m, and no surface anywhere along it. The implementation said
+something else. It synthesized a pseudo-point at `carve_range_m` (16 m) and
+handed it to `VDBVolume.integrate()`, which carves the traversed voxels but
+also — necessarily — writes a zero crossing at the endpoint, because that is
+what an endpoint *is* to a TSDF. Probed directly on a single ray with
+`voxel_size=0.2`, `trunc=0.6`: `+0.600` out to 15.4 m, then `+0.173` at 16.0 m,
+`-0.173` at 16.2 m, `-0.520` at 16.6 m. A sign flip is a surface. Every
+no-return ray was painting a 16 m shell of phantom wall, which is what the
+Phase 29 A/B measured when coverage fell 0.952 → 0.446 and chamfer rose
+0.349 → 8.33 m. Parking the artefact "outside the mapped envelope" was never
+possible; the fault was the mechanism, not the range.
+
+vdbfusion has no carve-only ray API, but it does expose per-voxel writes:
+`update_tsdf(sdf, ijk)` sets one cell at `min(trunc, sdf)` with weight 1, and
+costs 0.69 us per call. So the carve no longer goes through `integrate()` at
+all. `no_return_ray_dirs()` recovers the unit ray per missing pixel (intrinsics
+still fitted to the cloud, not restated from the sensor's FoV),
+`free_ray_voxels()` marches them at half a voxel and returns the unique index
+coords, and each is written at `+trunc` — saturated free. Nothing is written
+past `carve_range_m`, which now defaults to `max_range_m` rather than
+overshooting it: past the range a return could have been detected at, a
+no-return ray carries no information. Verified on the same probe: 75 cells
+carved, all `+0.600`, zero sign flips, weight 0 beyond 15 m.
+
+Cost is bounded by `carve_pixel_stride` (default 2 — at 15 m two adjacent
+Sonar 3D-15 pixels are ~0.09 m apart, so every second pixel still samples below
+voxel_size). A frame with a third of its pixels returning nothing costs 75 ms
+(17 ms ray marching, 57 ms writes) against a 200 ms budget at 5 Hz; an
+all-no-return frame at full 15 m range is 123 ms. Ray marching runs outside
+`_volume_lock` since it touches no grid.
+
+The parameter **stays off by default and the A/B has not been re-run** —
+`eval/eval_tools/config/matrix_carve.yaml` measures the old mechanism, so its
+numbers say nothing about this one. Known gap: carve rays are not written to
+the scan cache, so `map_rebuild:=true` rebuilds a map without them.
+
+## Phase 61 — Uncertainty-triggered revisits, isolated from how often they fire
+
+Three attempts at the same comparison, all three kept in
+`docs/UNCERTAINTY_MODEL.md` because the first two are what made the third
+interpretable.
+
+**n=4 (`cooldown_s` 60, schedule 34 m)**: paired ATE difference +0.006 m,
+p=0.97. Its value was the power calculation, not the non-result — paired sd
+0.256 gives a 95% CI of [-0.401, +0.412], as wide as the ATE itself, so the
+experiment could not exclude any effect below ~0.41 m.
+
+**n=13 (`cooldown_s` 30, schedule 34 m)**: powered, but the control broke.
+Measuring where the mission actually goes showed cooldown taking 41–60% of each
+300 s run against 7–32% revisiting, with exploring as low as 17%, so the
+cooldown was halved. That let U_r re-trigger sooner while the schedule kept
+counting exploring-state travel only — realised spacing 52.4 m against a 34 m
+setting — and the uncertainty arm revisited 3.62 times against 2.31. Its
+apparent wins on absolute error and closure count were confounded with
+frequency. Self-inflicted, and recorded as such.
+
+**n=13 at matched cadence (schedule re-derived to 22 m)**: revisits 3.62 in
+both arms, closures indistinguishable (107.5 vs 113.4, p=0.72), path length
+within 1.6 m of 117. Final absolute error **0.253 vs 0.391 m**, a 35%
+reduction, 11/13 seeds, t p=0.019, Wilcoxon p=0.027, 95% CI [-0.249, -0.027].
+Coverage and chamfer move the same way (p=0.093, 0.080); ATE does not reach
+significance (p=0.227).
+
+Because both arms did the same number of revisits, the same number of closures
+and the same distance, the effect cannot be attributed to doing more of
+anything — it is attributable to where the revisits went, which is the claim
+the method makes.
+
+**Not verified**: five metrics were reported with no primary endpoint declared
+in advance, and nothing survives correction — Bonferroni threshold 0.010,
+Holm-adjusted p-values 0.095/0.279/0.320/0.454/0.717. Suggestive, not
+confirmatory. The clean version is to pre-declare final absolute error and run
+a fresh 14+ pairs (~2.6 h), which needs no correction.
+
+Two sim/policy findings landed alongside. `dvl_sim` had been adding `bias_m_s`
+as a deterministic constant on all three body axes in every run — no variance
+at all, while the graph budgeted for it as a zero-mean Gaussian — and now draws
+it once per run. And revisits do not end on uncertainty: 9 of 10 exits were
+`CLOSED` against one `RESUMED_DOPT`, because `U_r < 0.5` needs sigma_xy <
+0.175 m after the 0.60 yaw factor and one closure never delivers that. The
+implemented policy is "U_r decides when to go, a closure decides when to stop",
+and `ratio_resume` is inactive by construction.

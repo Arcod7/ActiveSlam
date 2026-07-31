@@ -429,14 +429,46 @@ ATE remains not significant (p=0.49) even with the extra revisits, which is
 itself worth noting: whatever the uncertainty arm buys in absolute error and
 closures does not show up in trajectory accuracy.
 
-### Third attempt: the schedule re-matched
+### Third attempt, n = 13 at matched cadence: a real but uncorrected effect
 
-`trigger_rematched_*` re-runs the scheduled arm alone at
-`34 * 2.31/3.62 = 22 m`, paired against the same uncertainty runs, so realised
-revisit counts should agree. Calibrating the control's interval to equalise
-revisit count is the definition of this control rather than a tuning of the
-outcome -- but it is a second attempt at the same comparison, and the writeup
-should say so and report all three.
+`trigger_rematched_20260731_1407` re-runs the scheduled arm alone at 22 m
+(`34 * 2.31/3.62`), paired against the same uncertainty runs. Realised revisit
+count came out at **3.62 in both arms**, so the control is matched this time.
+
+| metric | uncertainty | scheduled 22 m | paired diff | wins | t p | Wilcoxon | 95% CI |
+|---|---|---|---|---|---|---|---|
+| final absolute error | 0.253 +- 0.141 | 0.391 +- 0.208 | **-0.138** | 11/13 | **0.019** | 0.027 | [-0.249, -0.027] |
+| coverage | 0.923 +- 0.026 | 0.893 +- 0.050 | +0.030 | 8/13 | 0.093 | 0.168 | [-0.006, +0.065] |
+| chamfer | 0.679 +- 0.055 | 0.709 +- 0.056 | -0.030 | 9/13 | 0.080 | 0.110 | [-0.064, +0.004] |
+| final ATE | 0.248 +- 0.099 | 0.287 +- 0.128 | -0.039 | 8/13 | 0.227 | 0.305 | [-0.106, +0.028] |
+| loop closures | 107.5 +- 29.9 | 113.4 +- 31.3 | -5.8 | 4/13 | 0.717 | 0.497 | -- |
+
+**What is controlled matters as much as the p-value.** Revisit count is
+identical (3.62 vs 3.62), loop-closure count is statistically indistinguishable
+(p=0.72), and distance travelled differs by 1.6 m out of ~117. The two arms did
+the same amount of everything. A 35% reduction in final absolute position error
+therefore cannot be attributed to the uncertainty arm doing *more* of anything;
+the difference is in *where* its revisits went. That is the mechanism the
+thesis claims, and it is the first evidence in this project that isolates it.
+
+**It does not survive multiple-comparison correction, and that must be said.**
+Five metrics were reported and no primary endpoint was declared in advance. The
+Bonferroni threshold is 0.010 and the Holm-adjusted p-values are 0.095, 0.279,
+0.320, 0.454 and 0.717 -- so nothing is significant after correction. The
+honest reading is: a 35% effect on final absolute error, consistent in
+direction across four of five metrics, on 11 of 13 paired seeds, significant
+uncorrected and not significant corrected. Suggestive, not confirmatory.
+
+The power arithmetic says this is not a fishing expedition -- the paired sd of
+0.184 against a 0.138 effect needs 14 seeds for 80% power and 13 were run, so
+the experiment was sized about right for what it found. ATE is a different
+story: its CI of [-0.106, +0.028] still cannot exclude a 0.1 m improvement, and
+resolving that needs ~52 pairs.
+
+**The confirmatory experiment, if there is time:** declare final absolute error
+as the primary endpoint in advance, run a fresh 14+ paired seeds (~2.6 h), and
+report that single number. A pre-declared endpoint on fresh seeds needs no
+correction and would convert this from suggestive to a result.
 
 ### How the revisit policy actually spends the mission
 
