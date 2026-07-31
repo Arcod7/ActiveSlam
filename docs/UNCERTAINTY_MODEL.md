@@ -293,14 +293,29 @@ with the sequential scan-matching BetweenFactor -- a hard-coded
 `scan_sigma_trans` of 0.12 m on every consecutive pair, regardless of overlap
 or inlier count -- the obvious candidate.
 
-That is **not** established. The comparison is confounded: the real run made 277
-keyframes where the offline reconstruction makes 225, so edge count and spacing
-differ, and the offline chain builds its arms from ground truth rather than
-from drifted odometry. A per-edge parallel-combination estimate does not
-reconcile the numbers either, which is itself a reason to distrust the simple
-story. Settling it needs a dedicated A/B with sequential scan matching
-disabled, holding keyframing fixed. Recorded here as an open question rather
-than a finding.
+**Measured, and it is mostly not the scan factor.** `marginal_monotonicity.py
+--scan` adds the sequential BetweenFactor at pose_graph's constant sigmas to an
+otherwise identical chain, which holds keyframe count and spacing fixed and
+isolates what the extra factor does to the marginal:
+
+| seed | DR only | DR + sequential scan factor | ratio |
+|---|---|---|---|
+| s701 | 0.8231 | 0.6252 | 0.76 |
+| s702 | 0.6187 | 0.5441 | 0.88 |
+
+So the scan factor deflates the reported marginal by 12-24%, not the ~50%
+needed to close the gap to the live run's 0.476 m. The remainder is the
+confound: the real run made 277 keyframes where the offline reconstruction
+makes 225, and the offline arms come from ground truth rather than drifted
+odometry.
+
+The conclusion is therefore weaker than it first looked, and the earlier
+suspicion that sequential matching "claims information it does not deliver"
+is only weakly supported. A constant 0.12 m sigma that ignores overlap and
+inlier count is still the wrong shape for a registration noise model, and
+tying it to the error-per-inlier the matcher already computes remains worth
+doing -- but it is a 12-24% effect on the marginal, not the explanation for
+the level.
 
 ## Choosing the allowable uncertainty
 

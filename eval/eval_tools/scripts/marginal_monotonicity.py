@@ -26,6 +26,10 @@ from slam_backend.odom_noise import odom_trans_sigma, fused_yaw_stats  # noqa: E
 from slam_backend.sensor_models.noise_profiles import load_noise_profile  # noqa: E402
 
 XYH = [3, 4, 2]
+# --scan adds the sequential scan-match BetweenFactor at pose_graph's constant
+# sigmas, to measure how much it deflates the marginal on an identical chain.
+SCAN = '--scan' in sys.argv
+SCAN_TRANS, SCAN_ROT = 0.12, 0.08
 CFG = os.path.join(_REPO, 'slam', 'slam_backend', 'config')
 gt = load_gt(sys.argv[1], 50.0)
 prof = load_noise_profile(f'{CFG}/noise_realistic.yaml')
@@ -84,6 +88,15 @@ for n, i in enumerate(marks):
         nm = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.02] * 3 + [s] * 3))
         g.add(gtsam.BetweenFactorPose3(gtsam.symbol('x', n - 1), sym, T, nm))
         full.add(gtsam.BetweenFactorPose3(gtsam.symbol('x', n - 1), sym, T, nm))
+        if SCAN:
+            # The sequential scan-match factor pose_graph adds on every
+            # consecutive pair, at its hard-coded constant sigma. Same
+            # measurement as the odometry edge here, so this isolates what the
+            # extra factor does to the MARGINAL, with keyframing held fixed.
+            sm = gtsam.noiseModel.Diagonal.Sigmas(
+                np.array([SCAN_ROT] * 3 + [SCAN_TRANS] * 3))
+            g.add(gtsam.BetweenFactorPose3(gtsam.symbol('x', n - 1), sym, T, sm))
+            full.add(gtsam.BetweenFactorPose3(gtsam.symbol('x', n - 1), sym, T, sm))
     g.addPriorPose3(sym, P, zpr)
     full.addPriorPose3(sym, P, zpr)
     v.insert(sym, P)
