@@ -2593,3 +2593,77 @@ this change.
 per-keyframe cost (`/slam/timing/keyframe_ms`, which should be watched against
 the 5 Hz cloud interval), and whether closure count and ATE move at all are
 all unmeasured. Nothing here is a result yet.
+
+## Phase 60 — The odometry uncertainty model described the wrong three terms
+
+`odom_trans_sigma()` carried the DVL's white noise, scale error and velocity
+bias and nothing else. `dead_reckoning.py` rotates DVL velocity into the world
+with the **estimated** attitude before integrating, so heading error converts
+straight into cross-track position error, and that term was absent. A 300-trial
+Monte Carlo of the chain over a recorded 155 m path on the degraded profile
+attributes **0.790 m RMS of a 0.798 m total to attitude**, against 0.324, 0.276
+and 0.131 m for the three DVL terms the model did carry. The model was
+budgeting for the small ones.
+
+The systematic terms were also charged against the wrong quantities. All three
+are fixed in the body frame, so turning decorrelates them: scale error costs
+`eps * displacement` rather than `eps * arc length`, and a velocity bias costs
+`b * ||integral R dt||` rather than `b * elapsed time`. On the shipwreck survey
+those arms differ by 5.9x and 5.2x — 155 m of arc inside a 26 m displacement,
+56.5 s of rotation-integrated arm inside 295 s elapsed.
+
+`fused_yaw_stats()` solves the `YawKalmanFilter` recursion at its fixed point
+for the heading error's sigma and correlation time. Both are profile-derived,
+neither fitted: it predicts 0.147 rad and 0.130 s where the Monte Carlo
+measures 0.133 rad and 0.140 s. The closed form for the dominant term,
+`sigma_psi * sqrt(2 tau L v)`, gives 0.670 m against a measured 0.668 m.
+
+One approximation is deliberate and documented. Displacement and the
+rotation-integrated arm both shrink when the vehicle turns back toward its
+anchor, and a chain of independent factors can only grow a marginal, so both
+are passed as running maxima. Clamping the negative increment to zero instead
+would ratchet 3.2x and 4.2x in variance; the running maximum leaves 1.17x and
+1.57x in sigma. Removing that needs scale and bias as estimated **states**,
+which would not change the pre-first-closure regime the trigger lives in.
+
+**Verified**: 118/118 `slam_backend` tests, 35/35 `eval_tools`, including nine
+new cases covering the fixed point, per-edge additivity of the cross-track
+walk, each systematic term against its own arm, and the Gauss-Markov ceiling.
+Against the Monte Carlo on three recorded paths and two profiles the model
+tracks true drift within 0.69–1.18x, median 1.07x, where the previous per-edge
+model sat 6–10x under it. In the closure-free pipeline (`odom_calibration_
+20260731_0935`, 3 seeds) pooled ANEES over XY is 0.40, 2.22, 3.37 and 4.60 at
+20, 40, 60 and 80 m, all inside the 95% band [0.41, 4.82].
+
+**Not verified / open**: three seeds make that band wide enough that
+"consistent" is weak evidence, and the sequence climbs monotonically toward its
+upper bound. The true error grows as `s^1.24` against the marginal's `s^0.33`
+in the full pipeline, where the open-loop Monte Carlo has them matching at 0.43
+and 0.44 — the controller runs on the SLAM estimate so error compounds into
+where the vehicle goes, and the displacement arm saturates near 31 m when the
+survey orbits one object. Separately, `sigma_xy` **decreases on ~46% of
+keyframe steps** in a closure-free run, once from 0.553 to 0.288 m, which no
+chain of independent factors should do; restarts, closures and the attitude
+prior are ruled out and the live yaw-prior variance is the leading suspect.
+That one bears on the trigger directly, since `revisit_planner` thresholds a
+single live D-opt sample.
+
+Two prerequisites landed with it. Per-sensor profile overrides reached the
+sensor sims but not `pose_graph` or `dead_reckoning`, so a degraded-DVL run
+scored itself with realistic DVL terms; `load_composite_profile()` gives every
+consumer the same mix. `imu_sim` scaled its gyro bias walk by `dt` instead of
+`sqrt(dt)`, weakening the injected walk by `sqrt(rate)`.
+
+`sigma_allow` is now derived from the mission rather than from the observed
+curves — 0.2 m because the deliverable is a 0.2 m TSDF and uncertainty past one
+voxel puts a measurement in the wrong cell, 0.05 rad because heading smears a
+surface by `psi * range` and one voxel at ~4 m is 0.05 rad. The value it
+replaces had been raised to 0.45 to make the trigger fire, as that config's own
+comment recorded. Note `U_r = r_xy^(4/3) * r_yaw^(2/3)`, so with `sigma_yaw`
+pinned near 0.023 against an allowance of 0.05 the yaw factor is 0.60 and the
+effective position trigger is 0.295 m, not 0.2 m.
+
+Full derivation, validation and the alignment with Suresh et al. (2020) —
+including that they apply **no absolute yaw prior**, which is why their D-opt
+grows in all three DoF and ours is carried by XY alone — are in
+`docs/UNCERTAINTY_MODEL.md`.
