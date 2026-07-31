@@ -16,6 +16,12 @@ Two arrows on two topics, so RViz can show either alone:
 The gap between the two is the live drift the vehicle is being steered on. Under
 pose source none the watched pose already is truth, so only the first is
 published, opaque.
+
+marker_frame selects where the first arrow is anchored. Given a world frame it
+carries the watched pose; given the vehicle's body frame it is drawn at the
+origin and RViz places it from TF, which is what a real vehicle wants — there
+the watched odometry is the autopilot's own estimate, in a frame that is not
+necessarily the one the map and the TF tree are built in.
 """
 
 import time
@@ -24,7 +30,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Pose, Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, ColorRGBA, String
 from visualization_msgs.msg import Marker
@@ -72,6 +78,11 @@ ACTIVITY_LABELS = {
 }
 
 
+def _frame(name: str) -> str:
+    """A frame id comparable with another — TF treats '/x' and 'x' as one."""
+    return (name or '').lstrip('/')
+
+
 class MotionSafetyGate(Node):
     """Pass body demand only when explicitly enabled with fresh inputs."""
 
@@ -96,6 +107,10 @@ class MotionSafetyGate(Node):
         self.declare_parameter('require_odom', True)
         self.declare_parameter('start_enabled', False)
         self.declare_parameter('marker_topic', '/motion/robot_marker')
+        # Either the world frame the watched odometry is expressed in, or the
+        # vehicle's own body frame — set it to the latter and the arrow rides
+        # the TF tree instead of a pose in a frame that may not be the one the
+        # map is built in. Which of the two it is, is read off the odometry.
         self.declare_parameter('marker_frame', 'world_ned')
         self.declare_parameter('revisit_state_topic',
                                '/frontier_slam/revisit_state')
@@ -132,6 +147,7 @@ class MotionSafetyGate(Node):
             self.get_parameter('marker_state_timeout_s').value)
         self._last_pose = None
         self._last_truth_pose = None
+        self._body_fixed_marker = False
         self._revisit_state: str | None = None
         self._revisit_state_time = 0.0
         self._revisit_cause: str | None = None
@@ -213,6 +229,10 @@ class MotionSafetyGate(Node):
     def _odom_cb(self, msg: Odometry) -> None:
         self._state.update_odometry(self._now())
         self._last_pose = msg.pose.pose
+        # The odometry's own child frame is the body frame by definition, so
+        # this needs no second parameter to stay in step with it.
+        self._body_fixed_marker = (_frame(msg.child_frame_id)
+                                   == _frame(self._marker_frame))
 
     def _truth_odom_cb(self, msg: Odometry) -> None:
         """Draw ground truth as it arrives, not on the safety tick.
@@ -225,9 +245,13 @@ class MotionSafetyGate(Node):
         if self._truth_marker_pub is None:
             return
         _label, color = self._marker_state()
+        # Drawn in the frame this pose is actually expressed in, not the belief
+        # arrow's: the two are the same frame in the simulator, but a body-fixed
+        # belief arrow would otherwise transform truth a second time.
         self._truth_marker_pub.publish(self._arrow_marker(
             'motion_state_gt', msg.pose.pose, color,
-            self.get_clock().now().to_msg()))
+            self.get_clock().now().to_msg(),
+            _frame(msg.header.frame_id) or self._marker_frame))
 
     def _revisit_state_cb(self, msg: String) -> None:
         self._revisit_state = msg.data
@@ -287,6 +311,9 @@ class MotionSafetyGate(Node):
             return
         label, color = self._marker_state()
         stamp = self.get_clock().now().to_msg()
+        # In the body frame the vehicle is at the origin by definition; RViz
+        # places it from TF. Anywhere else, the arrow carries the pose itself.
+        pose = Pose() if self._body_fixed_marker else self._last_pose
 
         # Faded only once truth is actually being drawn: on a real vehicle no
         # ground-truth arrow ever appears, and a permanently faint robot with
@@ -296,7 +323,7 @@ class MotionSafetyGate(Node):
             arrow_color = ColorRGBA(r=color.r, g=color.g, b=color.b,
                                     a=BELIEF_ALPHA)
         self._marker_pub.publish(self._arrow_marker(
-            'motion_state', self._last_pose, arrow_color, stamp))
+            'motion_state', pose, arrow_color, stamp, self._marker_frame))
 
         text = Marker()
         text.header.frame_id = self._marker_frame
@@ -305,18 +332,19 @@ class MotionSafetyGate(Node):
         text.id = 0
         text.type = Marker.TEXT_VIEW_FACING
         text.action = Marker.ADD
-        text.pose.position.x = self._last_pose.position.x
-        text.pose.position.y = self._last_pose.position.y
-        text.pose.position.z = self._last_pose.position.z - 1.2  # NED: -z is up
+        text.pose.position.x = pose.position.x
+        text.pose.position.y = pose.position.y
+        text.pose.position.z = pose.position.z - 1.2  # NED: -z is up
         text.pose.orientation.w = 1.0
         text.scale.z = 0.4      # character height
         text.color = color      # full opacity: the label is not the faded arrow
         text.text = label
         self._marker_pub.publish(text)
 
-    def _arrow_marker(self, ns: str, pose, color: ColorRGBA, stamp) -> Marker:
+    def _arrow_marker(self, ns: str, pose, color: ColorRGBA, stamp,
+                      frame: str) -> Marker:
         marker = Marker()
-        marker.header.frame_id = self._marker_frame
+        marker.header.frame_id = frame
         marker.header.stamp = stamp
         marker.ns = ns
         marker.id = 0

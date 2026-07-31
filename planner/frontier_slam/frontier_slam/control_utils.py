@@ -48,6 +48,33 @@ def wrap_angle(a: float) -> float:
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 
+def quat_from_rpy(roll: float, pitch: float,
+                  yaw: float) -> tuple[float, float, float, float]:
+    """ZYX intrinsic roll/pitch/yaw to a quaternion (x, y, z, w)."""
+    cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
+    cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
+    cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
+    return (sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+            cr * cp * cy + sr * sp * sy)
+
+
+def world_to_body(vx: float, vy: float, vz: float, roll: float, pitch: float,
+                  yaw: float) -> tuple[float, float, float]:
+    """Rotate a world NED vector into the body frame (R transpose, ZYX)."""
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    return (
+        cp * cy * vx + cp * sy * vy - sp * vz,
+        (sr * sp * cy - cr * sy) * vx + (sr * sp * sy + cr * cy) * vy
+        + sr * cp * vz,
+        (cr * sp * cy + sr * sy) * vx + (cr * sp * sy - sr * cy) * vy
+        + cr * cp * vz,
+    )
+
+
 def attitude_hold_effort(roll: float, pitch: float,
                          roll_rate: float, pitch_rate: float,
                          kp: float, kd: float,

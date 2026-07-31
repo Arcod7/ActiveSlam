@@ -1,7 +1,11 @@
-"""Label and colour rules for the vehicle marker the motion safety gate
-publishes — the arrow in RViz and the state row of the eval HUD panel."""
+"""Label, colour and anchoring rules for the vehicle marker the motion safety
+gate publishes — the arrow in RViz and the state row of the eval HUD panel."""
 
 from types import SimpleNamespace
+
+from geometry_msgs.msg import Pose
+from nav_msgs.msg import Odometry
+from visualization_msgs.msg import Marker
 
 from frontier_slam.safety_gate import (
     DISABLED_COLOR, ENABLED_COLOR, INIT_SCAN_COLOR, MotionSafetyGate,
@@ -89,3 +93,102 @@ def test_disabled_gate_stays_purple_whatever_the_planner_says():
         'MOTION DISABLED', DISABLED_COLOR)
     assert _state(enabled=False, activity='INIT_SCAN') == (
         'MOTION DISABLED', DISABLED_COLOR)
+
+
+# ---------------------------------------------------------------- anchoring
+
+def _odom(x=0.0, y=0.0, z=0.0, frame='world_ned', child='odom'):
+    msg = Odometry()
+    msg.header.frame_id = frame
+    msg.child_frame_id = child
+    msg.pose.pose.position.x = x
+    msg.pose.pose.position.y = y
+    msg.pose.pose.position.z = z
+    return msg
+
+
+class _Pub:
+    def __init__(self):
+        self.sent = []
+
+    def publish(self, msg):
+        self.sent.append(msg)
+
+
+def _marker_gate(marker_frame='world_ned'):
+    """A stand-in with the fields the marker publishers read."""
+    gate = _gate()
+    gate._marker_frame = marker_frame
+    gate._body_fixed_marker = False
+    gate._last_pose = None
+    gate._last_truth_pose = None
+    gate._marker_pub = _Pub()
+    gate._truth_marker_pub = _Pub()
+    gate._state.update_odometry = lambda _t: None
+    gate.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(to_msg=lambda: None))
+    for name in ('_odom_cb', '_truth_odom_cb', '_publish_robot_marker',
+                 '_arrow_marker', '_marker_state'):
+        setattr(gate, name, getattr(MotionSafetyGate, name).__get__(gate))
+    return gate
+
+
+def test_matching_child_frame_makes_the_marker_body_fixed():
+    gate = _marker_gate('bluerov2/base_link')
+    gate._odom_cb(_odom(child='bluerov2/base_link'))
+    assert gate._body_fixed_marker
+    # TF treats a leading slash as the same frame, so the comparison must too.
+    gate._odom_cb(_odom(child='/bluerov2/base_link'))
+    assert gate._body_fixed_marker
+
+
+def test_world_anchored_marker_is_not_body_fixed():
+    gate = _marker_gate('world_ned')
+    gate._odom_cb(_odom(child='bluerov2/base_link'))
+    assert not gate._body_fixed_marker
+
+
+def test_body_fixed_arrow_sits_at_the_origin_and_lets_tf_place_it():
+    gate = _marker_gate('bluerov2/base_link')
+    gate._odom_cb(_odom(x=7.0, y=-3.0, z=2.0, child='bluerov2/base_link'))
+    gate._publish_robot_marker()
+    arrow, text = gate._marker_pub.sent
+    assert arrow.header.frame_id == 'bluerov2/base_link'
+    assert (arrow.pose.position.x, arrow.pose.position.y,
+            arrow.pose.position.z) == (0.0, 0.0, 0.0)
+    # The label still floats above the vehicle, not above the world origin.
+    assert (text.pose.position.x, text.pose.position.y,
+            text.pose.position.z) == (0.0, 0.0, -1.2)
+
+
+def test_world_anchored_arrow_still_carries_the_watched_pose():
+    gate = _marker_gate('world_ned')
+    gate._odom_cb(_odom(x=7.0, y=-3.0, z=2.0))
+    gate._publish_robot_marker()
+    arrow, text = gate._marker_pub.sent
+    assert arrow.header.frame_id == 'world_ned'
+    assert (arrow.pose.position.x, arrow.pose.position.y,
+            arrow.pose.position.z) == (7.0, -3.0, 2.0)
+    assert text.pose.position.z == 2.0 - 1.2
+
+
+def test_truth_arrow_is_drawn_in_the_frame_its_pose_is_expressed_in():
+    # A body-fixed belief arrow must not drag truth into the body frame, or the
+    # world pose would be transformed a second time and the drift gap would lie.
+    gate = _marker_gate('bluerov2/base_link')
+    gate._truth_odom_cb(_odom(x=7.0, frame='world_ned'))
+    truth, = gate._truth_marker_pub.sent
+    assert truth.header.frame_id == 'world_ned'
+    assert truth.pose.position.x == 7.0
+
+
+def test_truth_arrow_falls_back_to_the_marker_frame_when_unstamped():
+    gate = _marker_gate('world_ned')
+    gate._truth_odom_cb(_odom(frame=''))
+    truth, = gate._truth_marker_pub.sent
+    assert truth.header.frame_id == 'world_ned'
+    assert truth.type == Marker.ARROW
+
+
+def test_pose_default_is_the_identity_the_body_fixed_arrow_relies_on():
+    assert Pose().orientation.w == 1.0

@@ -1,6 +1,8 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.conditions import IfCondition
+from launch.substitutions import (
+    LaunchConfiguration, PathJoinSubstitution, PythonExpression)
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
@@ -34,6 +36,16 @@ def generate_launch_description():
         for name in ('pressure', 'imu', 'compass', 'dvl')
     ]
 
+    sensors_arg = DeclareLaunchArgument(
+        'sensors', default_value='sim', choices=['sim', 'external'],
+        description=(
+            'Who publishes /slam/sensors/*. external suppresses the four '
+            'simulator nodes for a real vehicle; dead_reckoning runs either '
+            'way, because fusing those topics is not simulation.'),
+    )
+    simulated = IfCondition(
+        PythonExpression(["'", LaunchConfiguration('sensors'), "' == 'sim'"]))
+
     pkg_share = FindPackageShare('slam_backend')
 
     def profile_file(arg_name):
@@ -48,6 +60,7 @@ def generate_launch_description():
         package='slam_backend',
         executable='pressure_sim',
         name='pressure_sim',
+        condition=simulated,
         parameters=[{
             'noise_profile_path': profile_file('noise_profile_pressure'),
             'noise_seed': LaunchConfiguration('noise_seed'),
@@ -58,6 +71,7 @@ def generate_launch_description():
         package='slam_backend',
         executable='imu_sim',
         name='imu_sim',
+        condition=simulated,
         parameters=[{
             'noise_profile_path': profile_file('noise_profile_imu'),
             'noise_seed': LaunchConfiguration('noise_seed'),
@@ -68,6 +82,7 @@ def generate_launch_description():
         package='slam_backend',
         executable='compass_sim',
         name='compass_sim',
+        condition=simulated,
         parameters=[{
             'noise_profile_path': profile_file('noise_profile_compass'),
             'noise_seed': LaunchConfiguration('noise_seed'),
@@ -78,6 +93,7 @@ def generate_launch_description():
         package='slam_backend',
         executable='dvl_sim',
         name='dvl_sim',
+        condition=simulated,
         parameters=[{
             'noise_profile_path': profile_file('noise_profile_dvl'),
             'noise_seed': LaunchConfiguration('noise_seed'),
@@ -90,6 +106,10 @@ def generate_launch_description():
         name='dead_reckoning',
         parameters=[{
             'noise_profile_path': noise_file,
+            # Same per-sensor mix the sims run with, so the yaw filter's sigmas
+            # match the IMU/compass streams it is fusing.
+            'noise_profile_path_imu': profile_file('noise_profile_imu'),
+            'noise_profile_path_compass': profile_file('noise_profile_compass'),
             'initial_x': LaunchConfiguration('initial_x'),
             'initial_y': LaunchConfiguration('initial_y'),
         }],
@@ -97,6 +117,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         noise_profile_arg, noise_seed_arg, initial_x_arg, initial_y_arg,
+        sensors_arg,
         *per_sensor_args,
         pressure_node,
         imu_node, compass_node,

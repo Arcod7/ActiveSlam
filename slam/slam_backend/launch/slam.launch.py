@@ -38,6 +38,12 @@ def generate_launch_description():
         'map_rebuild', default_value='false',
         description='Rebuild the belief TSDF map from corrected keyframe poses after a big loop closure',
     )
+    odom_coherent_noise_arg = DeclareLaunchArgument(
+        'odom_coherent_noise', default_value='false',
+        description='Size DVL scale/bias edge sigmas from run-long cumulative distance/time '
+                    'instead of per-edge (see odom_noise.py). Not comparable to a run recorded '
+                    'with this off -- it raises d-opt/sigma_xy for the same noise profile.',
+    )
     initial_x_arg = DeclareLaunchArgument(
         'initial_x', default_value='0.0',
         description='Initial dead-reckoning X position in world_ned (m)',
@@ -85,10 +91,23 @@ def generate_launch_description():
         for name in ('pressure', 'imu', 'compass', 'dvl')
     ]
 
-    noise_file = PathJoinSubstitution([
-        pkg_share, 'config',
-        ['noise_', LaunchConfiguration('noise_profile'), '.yaml']
-    ])
+    def profile_file(arg_name):
+        return PathJoinSubstitution([
+            pkg_share, 'config',
+            ['noise_', LaunchConfiguration(arg_name), '.yaml']
+        ])
+
+    noise_file = profile_file('noise_profile')
+
+    sensors_arg = DeclareLaunchArgument(
+        'sensors', default_value='sim', choices=['sim', 'external'],
+        description=(
+            'Who publishes /slam/sensors/*. sim runs the simulated '
+            'pressure/IMU/compass/DVL nodes off the Stonefish pose; external '
+            'means something else already fills those topics — on hardware, '
+            'mavlink_odometry from the autopilot. Two publishers on one '
+            'sensor topic is the same fault as two command publishers.'),
+    )
 
     slam_backend_share = get_package_share_directory('slam_backend')
     sensors = IncludeLaunchDescription(
@@ -102,6 +121,7 @@ def generate_launch_description():
             'noise_seed': LaunchConfiguration('noise_seed'),
             'initial_x': LaunchConfiguration('initial_x'),
             'initial_y': LaunchConfiguration('initial_y'),
+            'sensors': LaunchConfiguration('sensors'),
         }.items(),
     )
 
@@ -112,8 +132,13 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'noise_profile_path': noise_file,
+            # Same per-sensor mix the sims run with — the graph's noise models
+            # must describe the noise actually injected.
+            **{f'noise_profile_path_{n}': profile_file(f'noise_profile_{n}')
+               for n in ('pressure', 'imu', 'compass', 'dvl')},
             'loop_closure_enabled': LaunchConfiguration('loop_closure'),
             'map_rebuild_enabled': LaunchConfiguration('map_rebuild'),
+            'odom_coherent_noise': LaunchConfiguration('odom_coherent_noise'),
             **{name: ParameterValue(LaunchConfiguration(name), value_type=kind)
                for name, _, kind, _ in graph_args},
         }],
@@ -121,9 +146,10 @@ def generate_launch_description():
 
     return LaunchDescription([
         noise_profile_arg, loop_closure_arg, noise_seed_arg, map_rebuild_arg,
+        odom_coherent_noise_arg,
         *per_sensor_args,
         *graph_arg_actions,
-        initial_x_arg, initial_y_arg,
+        initial_x_arg, initial_y_arg, sensors_arg,
         sensors,
         pose_graph_node,
     ])
