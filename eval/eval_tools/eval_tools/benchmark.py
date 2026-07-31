@@ -146,6 +146,14 @@ class BenchmarkNode(Node):
             'sigma_xy,sigma_yaw,u_ratio,kf_count,revisit_state,revisit_last_exit,'
             'cache_scans,icp_calls\n')
 
+        # One row per keyframe: the raw error vector and the XYH marginal that
+        # scored it. metrics.csv keeps only the collapsed nees/sigma summaries,
+        # which cannot be re-split per axis or re-pooled across seeds offline.
+        self._kf_file = open(os.path.join(out_dir, 'keyframe_consistency.csv'), 'w')
+        self._kf_file.write(
+            't,err_x,err_y,err_yaw,cov_xx,cov_xy,cov_xh,cov_yy,cov_yh,cov_hh,'
+            'nees,lc_count\n')
+
         self._matched_pairs = []   # time-ordered [(gt_sample, est_sample), ...] for RPE
         self._sq_errors = []       # running ATE accumulator
         self._nees_samples = []    # running ANEES accumulator, one per keyframe
@@ -279,6 +287,13 @@ class BenchmarkNode(Node):
                 f'NEES outlier {sample:.3e} at t={t:.3f}: '
                 f'err_xyh={np.array2string(err, precision=5)} '
                 f'cov_xyh={np.array2string(cov_xyh.ravel(), precision=9)}')
+
+        self._kf_file.write(
+            f'{t:.6f},{err[0]:.6f},{err[1]:.6f},{err[2]:.6f},'
+            f'{cov_xyh[0, 0]:.9e},{cov_xyh[0, 1]:.9e},{cov_xyh[0, 2]:.9e},'
+            f'{cov_xyh[1, 1]:.9e},{cov_xyh[1, 2]:.9e},{cov_xyh[2, 2]:.9e},'
+            f'{sample:.6e},{self._latest_lc_count}\n')
+        self._kf_file.flush()
 
         self._nees_samples.append(sample)
         self._latest_nees = sample
@@ -583,6 +598,7 @@ class BenchmarkNode(Node):
         self._slam_tum.close()
         self._odom_tum.close()
         self._metrics_file.close()
+        self._kf_file.close()
         super().destroy_node()
 
 

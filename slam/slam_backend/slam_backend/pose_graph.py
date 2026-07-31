@@ -30,11 +30,12 @@ from sensor_msgs_py import point_cloud2
 from scipy.spatial.transform import Rotation
 import gtsam
 
-from slam_backend.sensor_models.noise_profiles import load_noise_profile, NoiseProfile
+from slam_backend.sensor_models.noise_profiles import (
+    load_composite_profile, NoiseProfile)
 from slam_backend.geometry_utils import (
     odom_to_matrix, matrix_to_odom, matrix_to_transform_stamped,
     matrix_to_pose_stamped, transform_msg_to_matrix, orthonormalize)
-from slam_backend.odom_noise import odom_trans_sigma
+from slam_backend.odom_noise import odom_trans_sigma, fused_yaw_stats
 from slam_backend.scan_matcher import ScanMatcher
 
 
@@ -160,6 +161,10 @@ class PoseGraphNode(Node):
         super().__init__('pose_graph', **kwargs)
 
         self.declare_parameter('noise_profile_path', '')
+        # Per-sensor profile overrides, matching the sim's own: the DVL terms
+        # feeding odom_trans_sigma() must be the ones actually injected.
+        for sensor in ('pressure', 'imu', 'compass', 'dvl'):
+            self.declare_parameter(f'noise_profile_path_{sensor}', '')
         self.declare_parameter('world_frame', 'world_ned')
         self.declare_parameter('base_frame', 'bluerov2/base_link')
         self.declare_parameter('camera_frame', 'bluerov2/Dcam')
@@ -199,6 +204,11 @@ class PoseGraphNode(Node):
         # per-edge value is derived from the DVL profile in odom_noise.py.
         self.declare_parameter('odom_sigma_rot', 0.02)
         self.declare_parameter('odom_sigma_trans', 0.002)
+        # Off by default: see odom_trans_sigma()'s docstring. Changes what the
+        # marginal covariance (and so d-opt/sigma_xy/the revisit trigger)
+        # reports for a run with the same scale_error_pct/bias_m_s -- not
+        # comparable to a run recorded with this off.
+        self.declare_parameter('odom_coherent_noise', False)
         self.declare_parameter('scan_sigma_rot', 0.08)
         self.declare_parameter('scan_sigma_trans', 0.12)
         self.declare_parameter('scan_voxel_size', 0.1)
@@ -233,6 +243,7 @@ class PoseGraphNode(Node):
         self.loop_closure_cluster_radius_m = p('loop_closure_cluster_radius_m').value
         self.loop_closure_retry_move_m = p('loop_closure_retry_move_m').value
         self.loop_closure_dopt_floor = p('loop_closure_dopt_floor').value
+        self.odom_coherent_noise = p('odom_coherent_noise').value
         self.redetect_max_keyframes = p('redetect_max_keyframes').value
         self.redetect_min_interval_s = p('redetect_min_interval_s').value
         self.min_inlier_ratio = p('min_inlier_ratio').value
@@ -251,13 +262,17 @@ class PoseGraphNode(Node):
         yaml_path = p('noise_profile_path').value
         if not yaml_path or not os.path.exists(yaml_path):
             self.get_logger().warn(f"Invalid noise profile path: '{yaml_path}', using ideal defaults.")
-            profile = NoiseProfile()
-        else:
-            profile = load_noise_profile(yaml_path)
+        profile = load_composite_profile(yaml_path, {
+            sensor: p(f'noise_profile_path_{sensor}').value
+            for sensor in ('pressure', 'imu', 'compass', 'dvl')})
         self._profile = profile
 
         odom_sigmas = (p('odom_sigma_rot').value, p('odom_sigma_trans').value)
         scan_sigmas = (p('scan_sigma_rot').value, p('scan_sigma_trans').value)
+        # Heading error drives the largest share of dead-reckoning drift, since
+        # dead_reckoning.py rotates DVL velocity by the ESTIMATED attitude. Both
+        # numbers are solved from the profile, not fitted.
+        self._yaw_sigma, self._yaw_tau = fused_yaw_stats(profile.imu, profile.compass)
 
         self._scanner = ScanMatcher(
             max_correspondence_dist=p('scan_max_correspondence_dist').value,
@@ -266,6 +281,17 @@ class PoseGraphNode(Node):
         self._setup_gtsam(odom_sigmas, scan_sigmas, profile)
 
         self._keyframes: list[Keyframe] = []
+        # Distance/time dead-reckoned since keyframe 0, only advanced when
+        # odom_coherent_noise is on -- the single running "arm" odom_trans_sigma()
+        # needs to size each edge's slice of the run-long scale/bias variance.
+        self._cum_dist_m = 0.0
+        self._cum_time_s = 0.0
+        # Arms for the body-frame systematic terms: displacement from the first
+        # keyframe, and the norm of the integrated rotation. Running maxima.
+        self._cum_disp_m = 0.0
+        self._cum_rot_time_s = 0.0
+        self._rot_integral = np.zeros((3, 3))
+        self._anchor_xyz = None
         # (T_odom, T_world) of the newest keyframe, as one tuple the optimiser
         # replaces in a single assignment. The odometry thread reads the pair
         # without a lock; reading the two fields off a live Keyframe could
@@ -414,16 +440,46 @@ class PoseGraphNode(Node):
         self._sym_a = gtsam.symbol('n', 0)
         self._sym_b = gtsam.symbol('n', 1)
 
-    def _odom_noise_for(self, T_delta: np.ndarray, prev_stamp, stamp):
+    def _odom_noise_for(self, T_delta: np.ndarray, prev_stamp, stamp,
+                        T_odom: np.ndarray = None):
         """Dead-reckoning noise for one edge, scaled by how far and how long
         the vehicle travelled. Rotation keeps its constant: relative attitude
         between two keyframes does not accumulate the way position does."""
+        dist = float(np.linalg.norm(T_delta[:3, 3]))
+        dt = _stamp_seconds(stamp) - _stamp_seconds(prev_stamp)
+        cum_dist = cum_time = cum_disp = cum_rot = None
+        if self.odom_coherent_noise:
+            d0, t0 = self._cum_dist_m, self._cum_time_s
+            self._cum_dist_m += dist
+            self._cum_time_s += max(0.0, dt)
+            cum_dist = (d0, self._cum_dist_m)
+            cum_time = (t0, self._cum_time_s)
+            cum_disp, cum_rot = self._advance_coherent_arms(T_odom, dt)
         sigma = odom_trans_sigma(
-            float(np.linalg.norm(T_delta[:3, 3])),
-            _stamp_seconds(stamp) - _stamp_seconds(prev_stamp),
-            self._profile.dvl, self._odom_trans_floor)
+            dist, dt, self._profile.dvl, self._odom_trans_floor,
+            cum_dist_m=cum_dist, cum_time_s=cum_time,
+            cum_disp_m=cum_disp, cum_rot_time_s=cum_rot,
+            yaw_sigma_rad=self._yaw_sigma, yaw_corr_time_s=self._yaw_tau,
+            yaw_bias_drift_rad_s=self._profile.compass.bias_drift_rad_s)
         return gtsam.noiseModel.Diagonal.Sigmas(
             np.array([self._odom_rot] * 3 + [sigma] * 3))
+
+    def _advance_coherent_arms(self, T_odom, dt):
+        """(before, after) running maxima of displacement and ||integral R dt||.
+
+        Both are the arms the body-frame systematic terms accumulate against,
+        and odom_trans_sigma needs them monotone -- see its docstring for why
+        the running maximum is the tightest bound a factor chain can carry.
+        """
+        if T_odom is None or self._anchor_xyz is None:
+            return None, None
+        disp0, rot0 = self._cum_disp_m, self._cum_rot_time_s
+        disp = float(np.linalg.norm(T_odom[:3, 3] - self._anchor_xyz))
+        self._cum_disp_m = max(self._cum_disp_m, disp)
+        self._rot_integral += T_odom[:3, :3] * max(0.0, dt)
+        self._cum_rot_time_s = max(self._cum_rot_time_s,
+                                   float(np.linalg.norm(self._rot_integral[:2, :])))
+        return (disp0, self._cum_disp_m), (rot0, self._cum_rot_time_s)
 
     def _att_depth_noise_for(self, yaw_var: float):
         """Per-keyframe attitude+depth prior; rebuilt because yaw varies."""
@@ -539,6 +595,7 @@ class PoseGraphNode(Node):
         prepared_new = self._scanner.prepare(cloud_body)
 
         if n == 0:
+            self._anchor_xyz = T_odom[:3, 3].copy()
             pose = gtsam.Pose3(T_odom)
             graph.addPriorPose3(sym, pose, self._odom_noise)
             values.insert(sym, pose)
@@ -550,7 +607,7 @@ class PoseGraphNode(Node):
             T_delta = np.linalg.inv(prev.T_odom) @ T_odom
             graph.add(gtsam.BetweenFactorPose3(
                 prev.symbol, sym, gtsam.Pose3(T_delta),
-                self._odom_noise_for(T_delta, prev.stamp, stamp)))
+                self._odom_noise_for(T_delta, prev.stamp, stamp, T_odom)))
 
             # 2) Sequential scan-matching BetweenFactor (looser, robustified)
             result = self._align(cloud_body, prev, T_delta, prepared_new)
