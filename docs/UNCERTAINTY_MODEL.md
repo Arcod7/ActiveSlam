@@ -262,9 +262,26 @@ by up to 2x for reasons unrelated to actual drift, the trigger fires on noise,
 and the spread in where U_r first crosses 1 -- 26.7, 34.2 and 51.4 m on three
 seeds of an identical configuration -- is partly this rather than genuine
 seed-to-seed variation. Now that the cause is known the mitigation is clear and
-cheap: feed the trigger a running maximum or a short median of D-opt rather
-than the instantaneous sample, since the oscillation is a recovery artefact and
-the underlying quantity really is monotone between closures.
+cheap: feed the trigger a short median of D-opt rather than the instantaneous
+sample, since the oscillation is a recovery artefact and the underlying
+quantity really is monotone between closures. `dopt_median_window` does this,
+defaulting to 1 (an exact no-op) so earlier comparisons stay comparable.
+
+**How much it actually buys, measured rather than asserted.** Replaying the
+three closure-free runs' recorded marginals through the filter and counting
+threshold crossings:
+
+| run | crossings, window 1 | window 3 | window 5 | flip-flops at window 1 |
+|---|---|---|---|---|
+| s701 | 3 | 3 | 3 | 0 |
+| s702 | 3 | 2 | 2 | 1 |
+| s703 | 2 | 2 | 2 | 0 |
+
+One spurious crossing removed out of eight, and the one flip-flop (a crossing
+that reverts within three keyframes). So the artefact is real and frequent in
+the marginal -- ~30% of steps -- but usually small relative to the distance
+between D-opt and the threshold, and it corrupts the trigger less often than
+the raw dip statistics suggest. Worth having, not worth overstating.
 
 ### Still unresolved: the level, as opposed to the shape
 
