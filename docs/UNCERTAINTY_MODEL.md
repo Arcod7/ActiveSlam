@@ -206,23 +206,59 @@ every edge adds variance and nothing removes it. It does not. Across the three
 calibration seeds `sigma_xy` decreases on roughly 46% of keyframe steps, with
 excursions as large as 0.553 -> 0.288 m inside one run.
 
-Ruled out: no pose-graph restart (`PoseGraph started` appears exactly once per
-run), no loop closures (`lc_count` 0 throughout), and the attitude+depth prior
-leaves x and y at sigma 1e3 so it is not constraining horizontal position. The
-most likely remaining cause is the live yaw-prior variance, which
-`prior_sigmas_with_yaw` refreshes from the attitude filter's fluctuating
-posterior on every keyframe; yaw is correlated with XY through the odometry
-chain, so a momentarily tighter yaw prior tightens the XY marginal too.
-iSAM2 relinearisation is a secondary candidate.
+**Cause identified: iSAM2's incremental marginal recovery.** Rebuilding the
+same chain offline over a recorded trajectory -- one dead-reckoning
+BetweenFactor and one ZPR prior per node, no closures -- and recovering each
+node's marginal two ways settles it:
+
+| recovery | sigma_xy at 113 m | decreasing steps | max drop |
+|---|---|---|---|
+| `isam.marginalCovariance()` after each update | 0.8231 | 28% | -0.0172 |
+| one batch `Marginals()` over the final graph | 0.8231 | **0%** | +0.0000 |
+
+Identical noise model, identical final value, and the batch recovery is exactly
+monotone as theory requires. `pose_graph.py` caches each keyframe's covariance
+at the moment that keyframe is newest, so the published sequence is N marginals
+drawn from N different, progressively relinearised Bayes trees rather than one
+graph's covariance over time. Nothing about the noise model is implicated.
+
+Three earlier suspects were tested and excluded, not merely doubted: no
+pose-graph restart (`PoseGraph started` appears exactly once per run), no
+closures (`lc_count` 0 throughout), and the attitude+depth prior leaves x and y
+at sigma 1e3. The live yaw-prior variance was the leading hypothesis and is
+**wrong** -- the correlation between per-step changes in `sigma_yaw` and in
+`sigma_xy` is +0.02 to +0.11 across the three seeds. Body-frame re-expression
+is also excluded: the trace of the XY block is invariant under a yaw rotation
+and it falls on 39-49% of steps too.
 
 This matters for the trigger, not just for tidiness. `revisit_planner` compares
 a **single live D-opt sample** against its threshold. If that sample oscillates
 by up to 2x for reasons unrelated to actual drift, the trigger fires on noise,
 and the spread in where U_r first crosses 1 -- 26.7, 34.2 and 51.4 m on three
 seeds of an identical configuration -- is partly this rather than genuine
-seed-to-seed variation. A running maximum or a short median filter on the
-trigger input would be the cheap mitigation; finding the actual cause is the
-right one.
+seed-to-seed variation. Now that the cause is known the mitigation is clear and
+cheap: feed the trigger a running maximum or a short median of D-opt rather
+than the instantaneous sample, since the oscillation is a recovery artefact and
+the underlying quantity really is monotone between closures.
+
+### Still unresolved: the level, as opposed to the shape
+
+The offline chain above reaches `sigma_xy` 0.823 m at 113 m, while the real run
+over the same trajectory reports 0.476 m and ends with a true error of 0.974 m.
+Taken at face value the noise model alone would be close to calibrated (0.974 /
+0.823 = 1.18x) and something in the live graph is halving the reported figure,
+with the sequential scan-matching BetweenFactor -- a hard-coded
+`scan_sigma_trans` of 0.12 m on every consecutive pair, regardless of overlap
+or inlier count -- the obvious candidate.
+
+That is **not** established. The comparison is confounded: the real run made 277
+keyframes where the offline reconstruction makes 225, so edge count and spacing
+differ, and the offline chain builds its arms from ground truth rather than
+from drifted odometry. A per-edge parallel-combination estimate does not
+reconcile the numbers either, which is itself a reason to distrust the simple
+story. Settling it needs a dedicated A/B with sequential scan matching
+disabled, holding keyframing fixed. Recorded here as an open question rather
+than a finding.
 
 ## Choosing the allowable uncertainty
 
