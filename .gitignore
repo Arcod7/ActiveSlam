@@ -28,3 +28,6 @@ eval/ground_truth/
 # the scripts in eval/eval_tools/scripts; the batches themselves live in the
 # untracked eval/runs/.
 eval/figures/
+
+# Run recordings — large binary, never in the public repo.
+eval/bags/

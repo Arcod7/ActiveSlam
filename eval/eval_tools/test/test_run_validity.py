@@ -241,3 +241,40 @@ def test_dry_run_does_not_check_for_orphans(tmp_path, monkeypatch):
     monkeypatch.setattr(run_matrix, 'find_orphan_nodes',
                         lambda: ['4242 stonefish_simulator'])
     run_matrix.run_matrix(_minimal_cfg(), str(tmp_path), dry_run=True)
+
+
+def test_interrupt_stops_active_launch_before_propagating(tmp_path, monkeypatch):
+    class InterruptedProcess:
+        def wait(self, timeout):
+            raise KeyboardInterrupt
+
+    proc = InterruptedProcess()
+    terminated = []
+    monkeypatch.setattr(run_matrix.subprocess, 'Popen',
+                        lambda *args, **kwargs: proc)
+    monkeypatch.setattr(run_matrix, '_terminate',
+                        lambda active: terminated.append(active))
+
+    with pytest.raises(KeyboardInterrupt):
+        run_matrix._launch_and_wait(
+            ['ros2', 'launch'], str(tmp_path / 'launch.log'), 10)
+
+    assert terminated == [proc]
+
+
+def test_batch_publishes_complete_progress(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_matrix, 'find_orphan_nodes', lambda: [])
+    monkeypatch.setattr(
+        run_matrix, 'run_one',
+        lambda *args, **kwargs: {'status': 'ok', 'seed': 1})
+    monkeypatch.setattr(run_matrix, 'aggregate',
+                        lambda batch_dir, manifests: None)
+
+    batch = run_matrix.run_matrix(_minimal_cfg(), str(tmp_path))
+
+    with open(os.path.join(batch, 'progress.json')) as stream:
+        progress = run_matrix.json.load(stream)
+    assert progress['state'] == 'complete'
+    assert progress['phase'] == 'complete'
+    assert progress['completed'] == 1
+    assert progress['total'] == 1

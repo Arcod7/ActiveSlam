@@ -1,0 +1,69 @@
+# Args below (except slam/loop_closure/revisit, which vary per run) were
+# extracted from the user's live config.yaml via launcher_model.launch_command()
+# for the no_loop_closure / loop_closure / loop_closure_revisit presets --
+# not hand-copied, so obj_scale (0.85, recently retuned), the shipwreck mesh,
+# and the current robot start pose all match the interactive launcher exactly.
+#
+# motion overridden to walloriented (config.yaml has walllooking): with the
+# current robot spawn ~23m from the object, walllooking has no already-mapped
+# wall to follow and just holds position -- see wall_looking.launch.py's own
+# docstring. Confirmed at 20260730_1852 (gt_path_m ~0.4m over 300s in all 6
+# runs). walloriented can travel to a distant, unmapped object; robot/object
+# pose left exactly as in config.yaml per the user.
+batch_name: lc_revisit_shipwreck_2seed
+duration_s: 300
+settle_s: 15
+seeds:
+- 601
+- 602
+record_bag: false
+common_args:
+  rviz: 'false'
+  noise_profile_dvl: degraded
+  sigma_allow_xy_m: 0.2
+  sigma_allow_yaw_rad: 0.05
+  revisit_min_closures: 1
+  arrival_dwell_s: 6.0
+  turn_factor: 0.5
+  motion: walloriented
+  safety_start_enabled: 'true'
+  wall_orientation_offset_deg: 45.0
+  wall_orientation_lookahead_m: 2.0
+  mapper: tsdf
+  directional_tsdf: 'true'
+  noise_profile_sonar: realistic_no_reverb
+  voxel_min_solid_confidence: 0.7
+  voxel_min_weight: 6.0
+  map_rebuild: 'true'
+  mode: frontier
+  tsdf_frontier_standoff_m: 2.0
+  hard_inflation_m: 0.5
+  plan_inflation_m: 5.0
+  scene: target
+  obj_mesh: shipwreck.obj
+  obj_x: 4.55
+  obj_y: -20.62
+  obj_z: 18.38
+  obj_scale: 0.85
+  obj_pitch: -180.0
+  obj_yaw: 15.0
+  robot_x: -2.9977
+  robot_y: -1.5461
+  robot_z: 6.9393
+  robot_roll: -0.1439
+  robot_pitch: 0.0955
+  robot_yaw: 150.1176
+  slam: slam
+runs:
+- name: no_lc
+  args:
+    loop_closure: 'false'
+    revisit: 'false'
+- name: lc
+  args:
+    loop_closure: 'true'
+    revisit: 'false'
+- name: lc_revisit
+  args:
+    loop_closure: 'true'
+    revisit: 'true'

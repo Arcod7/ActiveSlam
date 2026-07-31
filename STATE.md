@@ -318,7 +318,7 @@ ros2 launch bringup demo.launch.py slam:=slam mode:=frontier revisit:=true      
 ros2 launch bringup demo.launch.py mode:=frontier scan_style:=spin                  # pre-2026-07-21 full-revolution scan (default is sweep)
 ros2 launch bringup demo.launch.py mode:=frontier scan_sweep_deg:=120.0             # narrower cable-safe sweep
 ros2 launch bringup demo.launch.py mode:=frontier rviz:=false safety_start_enabled:=true  # headless: arm the motion gate at startup
-ros2 launch bringup demo.launch.py mapper:=tsdf carve_no_return:=true               # measured negative, see below — stays off
+ros2 launch bringup demo.launch.py mapper:=tsdf carve_no_return:=true               # reimplemented as carve-only rays; A/B not re-run, see below
 
 # Batch evaluation (plain script, not a console_script -- needs
 # `source install/setup.bash` first so eval_tools.plot_results is importable):
@@ -327,11 +327,22 @@ python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_full
 python3 eval/eval_tools/scripts/run_matrix.py --aggregate-only eval/runs/<batch_dir>    # re-aggregate only
 ```
 
-`carve_no_return` frees the voxels along no-return sonar rays. It is **off and
-should stay off**: vdbfusion has no carve-only ray API, so each synthesized
-pseudo-point also writes a surface at `carve_range_m`, and on a moving vehicle
-that artefact lands inside the volume mapped from earlier poses. Measured on
-one seed (Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.33 m.
+`carve_no_return` frees the voxels along no-return sonar rays. The first
+implementation synthesized a pseudo-point at `carve_range_m` and let
+`integrate()` carve up to it; because an integrate ray always writes a zero
+crossing at its endpoint, that put a false surface 16 m out, which on a moving
+vehicle lands inside the volume mapped from earlier poses. Measured on one seed
+(Progress.md Phase 29): coverage 0.952 → 0.446, chamfer 0.349 → 8.33 m.
+
+Reimplemented (Phase 61) as true carve-only rays: the traversed voxels are
+written directly with `VDBVolume.update_tsdf(+trunc)`, so the ray is free out to
+`carve_range_m` (default = `max_range_m`) and nothing is written past it. **Still
+off by default — the A/B has not been re-run**, and the old numbers above measure
+the old mechanism, not this one. Re-run
+`eval/eval_tools/config/matrix_carve.yaml` before drawing any conclusion. Two
+caveats: carve rays are not cached, so `map_rebuild:=true` rebuilds without
+them; and a worst-case all-no-return frame costs ~75 ms at
+`carve_pixel_stride:=2` against a 200 ms budget at 5 Hz.
 
 ## Verification status
 
