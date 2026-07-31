@@ -26,7 +26,9 @@ Behaviour:
            BLOCKED after `no_wall_timeout_s`.
   TRACK — blend planner travel with the wall tangent, blend viewing orientation
           from the wall normal toward that travel heading, and regulate
-          perpendicular distance to `standoff_m`.
+          perpendicular distance to `standoff_m`.  Under `yaw_only` the wall
+          drives the look heading alone: translation is the planner path and
+          neither the standoff nor the wall tangent moves the vehicle.
   SWITCH — after no path progress to a nearby planner goal, turn to observe
            the target side, exclude the trapping wall briefly, and select an
            alternative goal-aligned wall.
@@ -123,6 +125,8 @@ class WallLooking(Node):
         self.declare_parameter('path_look_offset_deg', 30.0)
         self.declare_parameter('wall_normal_offset_deg', 0.0)
         self.declare_parameter('path_heading_weight', 0.35)
+        # Wall guides orientation only; standoff_m and path_influence are inert.
+        self.declare_parameter('yaw_only', True)
         self.declare_parameter('progress_timeout_s', 30.0)
         # +1 = strafe to the robot's right while facing the wall, -1 = left.
         self.declare_parameter('direction',     1)
@@ -196,8 +200,11 @@ class WallLooking(Node):
             MarkerArray, WALL_MARKER_TOPIC, 1)
 
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
+        guidance = ('yaw-only (planner owns translation)'
+                    if bool(self.get_parameter('yaw_only').value)
+                    else f'standoff={self._standoff:.1f}m')
         self.get_logger().info(
-            f'wall_looking ready — standoff={self._standoff:.1f}m '
+            f'wall_looking ready — {guidance} '
             f'tangent_speed={self._tan_speed:.2f} direction={self._direction:+d} '
             f'goal_topic={goal_topic} path_topic={path_topic} '
             f'— logging to {self._log.path}'
@@ -532,21 +539,13 @@ class WallLooking(Node):
         # Perpendicular distance to the wall plane through the nearest sample.
         d = float(np.dot(self._pose[:2] - wp[:2], n))
         standoff = float(self.get_parameter('standoff_m').value)
+        yaw_only = bool(self.get_parameter('yaw_only').value)
 
-        # Start from wall-tangent travel, then blend in the planner direction.
-        # This lets the vehicle round low-resolution tips instead of treating
-        # every smoothed normal as a perfectly flat, infinite wall.
-        tangent = np.array([n[1], -n[0]])
         target_delta = target_xy - self._pose[:2]
-        tangent_dot = float(np.dot(tangent, target_delta))
-        tangent_sign = (1.0 if tangent_dot > 1e-6 else
-                        -1.0 if tangent_dot < -1e-6 else float(self._direction))
-        wall_travel = tangent_sign * tangent
         path_travel = _unit_xy(target_delta)
-        path_influence = float(np.clip(self.get_parameter('path_influence').value, 0.0, 1.0))
-        travel = _unit_xy((1.0 - path_influence) * wall_travel + path_influence * path_travel)
-        if not np.any(travel):
-            travel = wall_travel
+        travel = _travel_direction(
+            n, target_delta, self._direction, yaw_only,
+            float(np.clip(self.get_parameter('path_influence').value, 0.0, 1.0)))
 
         # Orientation has two independently tunable candidates:
         #   path-look: start on the raw planner bearing, turn toward the wall;
@@ -567,10 +566,11 @@ class WallLooking(Node):
         hdg_err = wrap_angle(yaw_des - self._yaw)
         yaw_cmd = float(np.clip(self.KP_YAW * hdg_err, -1.0, 1.0))
 
-        # Standoff correction is perpendicular to the selected wall; route
-        # travel remains planner-influenced instead of a constant wall orbit.
-        v_des = (self.KP_STANDOFF * (d - standoff) * -n
-                 + self._tan_speed * travel)
+        # Standoff correction is perpendicular to the selected wall; under
+        # yaw_only there is none, and the planner bearing is the whole demand.
+        v_des = self._tan_speed * travel
+        if not yaw_only:
+            v_des = v_des + self.KP_STANDOFF * (d - standoff) * -n
 
         fwd  = np.array([math.cos(self._yaw), math.sin(self._yaw)])
         stbd = np.array([-math.sin(self._yaw), math.cos(self._yaw)])
@@ -587,9 +587,10 @@ class WallLooking(Node):
 
         self._send_thrust(surge, yaw_cmd, heave, sway)
 
+        d_label = 'yaw-only' if yaw_only else f'target {standoff:.1f}'
         self.get_logger().info(
             f'pos=({self._pose[0]:.1f},{self._pose[1]:.1f},{self._pose[2]:.1f}) '
-            f'wall=({wp[0]:.1f},{wp[1]:.1f})  d={d:.2f}m (target {standoff:.1f}) '
+            f'wall=({wp[0]:.1f},{wp[1]:.1f})  d={d:.2f}m ({d_label}) '
             f'path_wp=({target_xy[0]:.1f},{target_xy[1]:.1f}) {self._wp_idx}/{len(self._path)} '
             f'hdg_err={math.degrees(hdg_err):+.0f}° path_w={path_heading_weight:.2f}  '
             f'surge={surge:+.2f}  sway={sway:+.2f}  yaw={yaw_cmd:+.3f}  '
@@ -659,6 +660,30 @@ class WallLooking(Node):
 def _unit_xy(v: np.ndarray) -> np.ndarray:
     norm = float(np.hypot(v[0], v[1]))
     return v / norm if norm > 1e-9 else np.zeros(2)
+
+
+def _travel_direction(n: np.ndarray, target_delta: np.ndarray, direction: int,
+                      yaw_only: bool, path_influence: float) -> np.ndarray:
+    """Unit travel direction for one tick, given the wall normal and route.
+
+    Under `yaw_only` the wall contributes nothing to translation and this is
+    the planner bearing. Otherwise it starts from wall-tangent travel and
+    blends the planner direction in, so the vehicle rounds low-resolution tips
+    instead of treating every smoothed normal as a perfectly flat, infinite
+    wall — at the cost of a tangent sign that chatters when the route runs
+    perpendicular to the wall, which stalls the vehicle in place.
+    """
+    path_travel = _unit_xy(target_delta)
+    if yaw_only:
+        return path_travel
+    tangent = np.array([n[1], -n[0]])
+    tangent_dot = float(np.dot(tangent, target_delta))
+    tangent_sign = (1.0 if tangent_dot > 1e-6 else
+                    -1.0 if tangent_dot < -1e-6 else float(direction))
+    wall_travel = tangent_sign * tangent
+    travel = _unit_xy((1.0 - path_influence) * wall_travel
+                      + path_influence * path_travel)
+    return travel if np.any(travel) else wall_travel
 
 
 def _blended_heading(wall_heading: float, path_heading: float,

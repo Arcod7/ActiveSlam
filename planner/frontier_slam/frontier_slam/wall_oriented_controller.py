@@ -307,19 +307,30 @@ class WallOrientedController(Node):
     # proportional control alone cannot stabilise; only drag damps it, so the
     # gain has to stay under what drag can absorb. At 0.60 the loop diverged on
     # a smooth setpoint: heading error grew 8.4 -> 24.2 -> 25.7 deg mean across
-    # a run, peaking at 146, while look_hdg moved only 3 deg/s. 0.15 is twice
-    # the 0.07 that was stable before the cascade, and still 4x under 0.60.
+    # a run, peaking at 146, while look_hdg moved only 3 deg/s. The gain has
+    # since gone 0.07 (pre-cascade) -> 0.15 -> 0.30, all under that 0.60.
     # The real fix is the D term, which needs a rate a gyro can supply and a
     # differentiated heading cannot -- see the note above.
     # Effective loop gain is KP_YAW * turn_factor, so the launcher's turn_factor
     # is the live knob if this still rings.
-    KP_YAW = 0.15
+    # Raised from 0.15 on 2026-07-31: at 0.15 the heading sat a mean 34 deg
+    # behind its setpoint across five runs, so the vehicle almost never reached
+    # the offset it was asked for -- only 5% of ticks landed within 45-60 deg of
+    # the path. Effective gain is KP_YAW * turn_factor = 0.24 at the shipped
+    # 0.8, still 2.5x under the 0.60 that diverged. Peak acceleration is
+    # unchanged: YAW_EFFORT_LIMIT below still caps it at 0.30.
+    KP_YAW = 0.30
     YAW_RATE_TAU = 0.15  # diagnostic only; the CSV logs it, control ignores it
+    # Deliberately unchanged by the gain rise. Effort is torque, so this is the
+    # peak angular acceleration; raising it would make the vehicle snap harder,
+    # which is not what the gain rise is for. The doubled gain simply reaches
+    # this same ceiling at 57 deg of error instead of 115 -- more effort
+    # everywhere below saturation, never more than before above it.
     YAW_EFFORT_LIMIT = 0.30
-    # Effort per second on the published yaw command: a step to full authority
-    # now takes 1 s, not one 0.1 s tick. The effort limit above bounds the rate
-    # eventually reached; this bounds the acceleration used to reach it.
-    YAW_SLEW_PER_S = 0.30
+    # Effort per second on the published yaw command -- how fast torque may be
+    # applied, not how much. Lowered alongside the gain so the stronger
+    # mid-range commands are still eased in: 1.2 s to full authority, was 1.0.
+    YAW_SLEW_PER_S = 0.25
     KP_SPEED = 0.25
     KP_HEAVE = 0.35
     KD_HEAVE = 0.50  # damps the 6.1 s depth limit cycle P alone sustains
@@ -359,6 +370,9 @@ class WallOrientedController(Node):
     # side it holds before it is allowed to abandon it.
     SIDE_SWITCH_SETTLED_RAD = math.radians(25.0)
     MAP_STALE_S = 5.0
+    # The extractor replans at 3 Hz, so this tolerates 6 missed publications
+    # before the path is abandoned for the straight-line bearing to the goal.
+    PATH_STALE_S = 2.0
     CTRL_HZ = 10.0
     LOG_EVERY_N_TICKS = 10
 
@@ -440,6 +454,7 @@ class WallOrientedController(Node):
         self._yaw = 0.0
         self._odom_at: float | None = None
         self._path: list[tuple[float, float]] = []
+        self._path_at: float | None = None
         self._wp_idx = 0
         self._map_points: np.ndarray | None = None
         self._map_received_at: float | None = None
@@ -506,13 +521,20 @@ class WallOrientedController(Node):
         self._goal = new_goal
         if changed:
             self._goal_reached_at = None
-            self._path = []
-            self._wp_idx = 0
             self._stuck_ref_pos = None
             self._stuck_ref_t = None
+            # The path is deliberately kept: clearing it here made the fallback
+            # below steer on the straight-line bearing to the new goal for the
+            # ~0.3 s until the replan landed, and that bearing can sit almost
+            # opposite the route. Measured 2026-07-31 at every goal change --
+            # route heading 57 -> -179 -> 57 deg in consecutive ticks, a 236 deg
+            # setpoint spike that saturated yaw authority the wrong way and left
+            # the vehicle swinging for seconds after the setpoint snapped back.
+            # One stale leg is a far smaller error; PATH_STALE_S bounds it.
 
     def _path_cb(self, msg: Path) -> None:
         self._path = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        self._path_at = self._t_ros()
         if not self._path or self._pose is None:
             self._wp_idx = 0
             return
@@ -656,6 +678,31 @@ class WallOrientedController(Node):
             self._pose, wall_point, self._voxel_size,
             self.get_clock().now().to_msg()))
 
+    def _hold_yaw_cmd(self, now: float) -> tuple:
+        """Yaw effort holding the viewing heading while the vehicle waits.
+
+        Waiting pointed at the wall beats scanning: the sonar already faces the
+        structure, and a spin throws away a heading the loop needs ~8 s to win
+        back at the yaw rate this vehicle achieves.
+        """
+        route_heading = self._last_route_heading
+        if route_heading is None:
+            return 0.0, float("nan"), float("nan"), float("nan")
+        self._select_wall_side(route_heading, now)
+        look_heading = offset_heading(
+            route_heading, self._wall_side, self._look_offset_deg
+        )
+        heading_error = wrap_angle(look_heading - self._yaw)
+        self._last_heading_error = heading_error
+        yaw_cmd = float(
+            np.clip(
+                self.KP_YAW * heading_error,
+                -self.YAW_EFFORT_LIMIT,
+                self.YAW_EFFORT_LIMIT,
+            )
+        )
+        return yaw_cmd, route_heading, look_heading, heading_error
+
     def _drive(self, target_xy: np.ndarray, now: float) -> tuple:
         delta = target_xy - self._pose[:2]
         distance = float(np.hypot(*delta))
@@ -727,9 +774,11 @@ class WallOrientedController(Node):
                 self._write_csv(0.0, 0.0, self._scan_yaw(), heave, "INIT_SCAN")
             return
         if self._goal is None:
-            self._send_thrust(0.0, 0.0, self._scan_yaw(), heave)
+            yaw_cmd, route_hdg, look_hdg, hdg_err = self._hold_yaw_cmd(now)
+            self._send_thrust(0.0, 0.0, yaw_cmd, heave)
             if write_csv:
-                self._write_csv(0.0, 0.0, self._scan_yaw(), heave, "SCAN")
+                self._write_csv(0.0, 0.0, yaw_cmd, heave, "WALL_HOLD",
+                                float("nan"), route_hdg, look_hdg, hdg_err)
             return
 
         goal_dist = float(np.hypot(*(self._goal[:2] - self._pose[:2])))
@@ -747,17 +796,31 @@ class WallOrientedController(Node):
                 elif now - self._goal_reached_at > self.GOAL_REACHED_TIMEOUT:
                     self._goal = None
                     self._goal_reached_at = None
-                self._send_thrust(0.0, 0.0, self._scan_yaw(), heave)
+                yaw_cmd, route_hdg, look_hdg, hdg_err = self._hold_yaw_cmd(now)
+                self._send_thrust(0.0, 0.0, yaw_cmd, heave)
                 if write_csv:
                     self._write_csv(
                         0.0,
                         0.0,
-                        self._scan_yaw(),
+                        yaw_cmd,
                         heave,
                         "GOAL_REACHED",
-                        distance=goal_dist,
+                        goal_dist,
+                        route_hdg,
+                        look_hdg,
+                        hdg_err,
                     )
                 return
+
+        if self._path and self._path_at is not None and (
+            now - self._path_at > self.PATH_STALE_S
+        ):
+            self._path = []
+            self._wp_idx = 0
+            self.get_logger().warn(
+                f"no replan for {self.PATH_STALE_S:.0f}s — steering straight at the goal",
+                throttle_duration_sec=5.0,
+            )
 
         if patrol_target is not None:
             target_xy = patrol_target

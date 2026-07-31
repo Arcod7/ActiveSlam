@@ -110,6 +110,7 @@ ACTIVITY_TEXT = {
     "INIT_SCAN":         "initial scan of the surroundings",
     "SCAN":              "scanning in place for frontiers",
     "GOAL_REACHED":      "at the goal, scanning",
+    "WALL_HOLD":         "waiting, holding heading on the wall",
     "REVISIT_SWEEP":     "at the revisit target, sweeping the wall",
     "FOLLOW_PATH":       "driving to the next waypoint",
     "TRACK":             "following the wall",
@@ -130,7 +131,8 @@ REVISIT_CAUSE_TEXT = {
 }
 # Activities that mean the vehicle is holding station rather than travelling.
 HOLDING_ACTIVITIES = {"INIT_SCAN", "SCAN", "GOAL_REACHED", "WALL_SWITCH_SCAN",
-                      "NO_WALL_SCAN", "NO_PATH_PROGRESS", "REVISIT_SWEEP"}
+                      "NO_WALL_SCAN", "NO_PATH_PROGRESS", "REVISIT_SWEEP",
+                      "WALL_HOLD"}
 
 
 # --------------------------------------------------------------------------

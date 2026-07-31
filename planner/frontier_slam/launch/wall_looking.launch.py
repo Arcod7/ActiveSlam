@@ -10,7 +10,8 @@ status topic when it cannot follow the requested route along a mapped wall.
 This adds:
   - wall_looking: planner path + TSDF surface normals + odometry → normalized
     body demand. Follows the planner path, using the nearest mapped wall as a
-    soft travel and viewing preference while holding `standoff` metres off it.
+    viewing preference — and, with `yaw_only` off, as a travel preference
+    holding `standoff` metres off it.
 
 The executor only knows walls the TSDF has already reconstructed. If no usable
 wall supports an active planner route within its timeout, it holds position and
@@ -33,6 +34,8 @@ Optional arguments:
   path_heading_weight
                  Look-heading blend: 0 = wall-derived; 1 = path-derived
                  (default 0.35).
+  yaw_only       Wall guides yaw only; the planner path drives translation and
+                 standoff/path_influence are ignored (default true).
 
   goal_topic/path_topic/status_topic/command_topic/safe_command_topic/thruster_topic
                  Configurable planner/motion interface topics.
@@ -120,13 +123,18 @@ def generate_launch_description():
         'path_heading_weight', default_value='0.35',
         description='Orientation blend: 0=wall-derived heading, 1=path-derived heading.',
     )
+    yaw_only_arg = DeclareLaunchArgument(
+        'yaw_only', default_value='true', choices=['true', 'false'],
+        description=('Wall guides yaw only; translation follows the planner '
+                     'path and standoff/path_influence are ignored.'),
+    )
 
     return LaunchDescription([
         standoff_arg, tangent_speed_arg, direction_arg, depth_arg, odom_topic_arg,
         goal_topic_arg, path_topic_arg, status_topic_arg, thruster_topic_arg,
         command_topic_arg, safe_command_topic_arg, safety_start_enabled_arg,
         path_influence_arg, path_look_offset_arg, wall_normal_offset_arg,
-        path_heading_weight_arg,
+        path_heading_weight_arg, yaw_only_arg,
         Node(
             package='frontier_slam',
             executable='motion_safety_gate',
@@ -168,6 +176,7 @@ def generate_launch_description():
                 'path_look_offset_deg': _float_parameter('path_look_offset_deg'),
                 'wall_normal_offset_deg': _float_parameter('wall_normal_offset_deg'),
                 'path_heading_weight': _float_parameter('path_heading_weight'),
+                'yaw_only': _bool_parameter('yaw_only'),
             }],
         ),
     ])

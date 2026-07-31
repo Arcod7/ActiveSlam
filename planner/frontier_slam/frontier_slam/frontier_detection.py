@@ -42,6 +42,65 @@ def point_inside_tsdf_solid(point_xyz: np.ndarray, solid_xyz: np.ndarray,
                 <= containment_radius_m * containment_radius_m)
 
 
+# Widest normal disagreement still treated as the same surface (~104 deg).
+_SAME_FACE_COS = -0.25
+
+
+def averaged_surface_normal(anchor_normal_xyz: np.ndarray,
+                            neighbour_points: np.ndarray,
+                            neighbour_normals: np.ndarray,
+                            query_xyz: np.ndarray,
+                            radius_m: float) -> np.ndarray:
+    """Blend nearby TSDF normals into one that follows the local wall shape.
+
+    A published normal is a single finite difference of a noisy TSDF at one
+    decimated marching-cubes vertex, so on its own it swings between updates
+    and describes a point rather than the surface around it.  Averaging the
+    samples within ``radius_m``, weighted linearly by distance, makes the
+    standoff direction the local surface's rather than one voxel's; at a
+    corner it becomes the bisector, which backs the goal out of both walls.
+
+    Samples turned further than ``_SAME_FACE_COS`` from ``anchor_normal_xyz``
+    are dropped, not averaged.  A thin wall carries both of its faces in the
+    cloud and their opposing normals would otherwise cancel to nothing.  The
+    cut sits past 90 degrees so a right-angle corner still blends both of its
+    walls; only a near-opposing face is excluded.  The anchor is returned
+    unchanged when the radius is non-positive or nothing usable falls inside it.
+    """
+    anchor = np.asarray(anchor_normal_xyz, dtype=np.float64)
+    if anchor.shape != (3,) or not np.isfinite(anchor).all():
+        return anchor
+    anchor_length = float(np.linalg.norm(anchor))
+    if anchor_length < 1e-6 or radius_m <= 0.0:
+        return anchor
+    anchor_unit = anchor / anchor_length
+
+    points = np.asarray(neighbour_points, dtype=np.float64).reshape(-1, 3)
+    normals = np.asarray(neighbour_normals, dtype=np.float64).reshape(-1, 3)
+    if len(points) != len(normals) or len(points) == 0:
+        return anchor
+    lengths = np.linalg.norm(normals, axis=1)
+    usable = (np.isfinite(normals).all(axis=1) & np.isfinite(points).all(axis=1)
+              & (lengths > 1e-6))
+    if not usable.any():
+        return anchor
+
+    units = normals[usable] / lengths[usable, None]
+    same_face = units @ anchor_unit > _SAME_FACE_COS
+    if not same_face.any():
+        return anchor
+    units = units[same_face]
+    distance = np.linalg.norm(points[usable][same_face]
+                              - np.asarray(query_xyz, dtype=np.float64), axis=1)
+    weight = np.clip(1.0 - distance / radius_m, 0.0, 1.0)
+    if float(weight.sum()) <= 0.0:
+        return anchor
+
+    blended = (units * weight[:, None]).sum(axis=0)
+    blended_length = float(np.linalg.norm(blended))
+    return anchor if blended_length < 1e-6 else blended / blended_length
+
+
 def standoff_point_from_tsdf_surface(surface_xyz: np.ndarray,
                                      normal_xyz: np.ndarray,
                                      standoff_m: float,

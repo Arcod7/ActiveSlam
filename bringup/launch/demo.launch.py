@@ -146,6 +146,11 @@ def generate_launch_description():
         default_value="1.5",
         description="Wall-follow target standoff in metres",
     )
+    wall_max_surface_dist_arg = DeclareLaunchArgument(
+        "wall_max_surface_dist",
+        default_value="8.0",
+        description="Furthest a mapped surface can be and still be steered by, in metres",
+    )
     wall_switch_goal_distance_arg = DeclareLaunchArgument(
         "wall_switch_goal_distance",
         default_value="6.0",
@@ -180,6 +185,15 @@ def generate_launch_description():
         "wall_path_heading_weight",
         default_value="0.35",
         description="Orientation blend: 0=wall-derived heading, 1=path-derived heading",
+    )
+    wall_yaw_only_arg = DeclareLaunchArgument(
+        "wall_yaw_only",
+        default_value="true",
+        choices=["true", "false"],
+        description=(
+            "Wall guides yaw only; the planner path drives translation and "
+            "wall_standoff/wall_path_influence are ignored"
+        ),
     )
     mapper_arg = DeclareLaunchArgument(
         "mapper",
@@ -401,6 +415,14 @@ def generate_launch_description():
         description="Rebuild the belief map from corrected keyframe poses after a big loop "
         "closure (slam:=slam, TSDF only — see tsdf_mapper.py; unsupported for "
         "mapper:=octomap, see the warning this prints if combined)",
+    )
+    odom_coherent_noise_arg = DeclareLaunchArgument(
+        "odom_coherent_noise",
+        default_value="false",
+        choices=["true", "false"],
+        description="Size DVL scale/bias edge sigmas from run-long cumulative distance/time "
+        "instead of per-edge (slam:=slam — see odom_noise.py). Not comparable to a run "
+        "recorded with this off.",
     )
     output_dir_arg = DeclareLaunchArgument(
         "output_dir",
@@ -817,6 +839,7 @@ def generate_launch_description():
                 ]
             ),
             "wall_standoff": LaunchConfiguration("wall_standoff"),
+            "wall_max_surface_dist": LaunchConfiguration("wall_max_surface_dist"),
             "wall_switch_goal_distance": LaunchConfiguration("wall_switch_goal_distance"),
             "wall_switch_scan_angle": LaunchConfiguration("wall_switch_scan_angle"),
             "wall_switch_scan_yaw": LaunchConfiguration("wall_switch_scan_yaw"),
@@ -824,6 +847,7 @@ def generate_launch_description():
             "wall_path_look_offset_deg": LaunchConfiguration("wall_path_look_offset_deg"),
             "wall_normal_offset_deg": LaunchConfiguration("wall_normal_offset_deg"),
             "wall_path_heading_weight": LaunchConfiguration("wall_path_heading_weight"),
+            "wall_yaw_only": LaunchConfiguration("wall_yaw_only"),
         }.items(),
         condition=LaunchConfigurationEquals("mode", "frontier"),
     )
@@ -839,6 +863,7 @@ def generate_launch_description():
             "loop_closure": LaunchConfiguration("loop_closure"),
             "noise_seed": LaunchConfiguration("noise_seed"),
             "map_rebuild": LaunchConfiguration("map_rebuild"),
+            "odom_coherent_noise": LaunchConfiguration("odom_coherent_noise"),
             "initial_x": LaunchConfiguration("robot_x"),
             "initial_y": LaunchConfiguration("robot_y"),
             **{name: LaunchConfiguration(name) for name, _ in (
@@ -1010,6 +1035,7 @@ def generate_launch_description():
             wall_orientation_lookahead_arg,
             tsdf_frontier_standoff_arg,
             wall_standoff_arg,
+            wall_max_surface_dist_arg,
             wall_switch_goal_distance_arg,
             wall_switch_scan_angle_arg,
             wall_switch_scan_yaw_arg,
@@ -1017,6 +1043,7 @@ def generate_launch_description():
             wall_path_look_offset_arg,
             wall_normal_offset_arg,
             wall_path_heading_weight_arg,
+            wall_yaw_only_arg,
             mapper_arg,
             thrust_boost_arg,
             hard_inflation_arg,
@@ -1051,6 +1078,7 @@ def generate_launch_description():
             near_fade_arg,
             near_fade_range_arg,
             map_rebuild_arg,
+            odom_coherent_noise_arg,
             carve_no_return_arg,
             output_dir_arg,
             revisit_arg,

@@ -324,6 +324,11 @@ def generate_launch_description():
         'wall_path_heading_weight', default_value='0.35',
         description='Orientation blend: 0=wall-derived look heading, 1=path-derived look heading.',
     )
+    wall_yaw_only_arg = DeclareLaunchArgument(
+        'wall_yaw_only', default_value='true', choices=['true', 'false'],
+        description=('walllooking: wall guides yaw only; the planner path drives '
+                     'translation and wall_standoff/wall_path_influence are ignored.'),
+    )
     hard_inflation_arg = DeclareLaunchArgument(
         'hard_inflation_m', default_value='1.00',
         description='A* hard-wall radius around occupied cells (cost = inf).',
@@ -411,6 +416,18 @@ def generate_launch_description():
                     'the planner moves on rather than re-picking beside the goal it '
                     'just reached. Waived when no other candidate qualifies. 0 = off.',
     )
+    arrival_blacklist_duration_arg = DeclareLaunchArgument(
+        'arrival_blacklist_duration_s', default_value='20.0',
+        description='Seconds a reached frontier goal stays off the candidate list. '
+                    'This is the planner\'s only memory of where it has been: once it '
+                    'expires the cluster scores as if never visited. Shorter than the '
+                    'travel time to the next goal and a pair of clusters ping-pongs.',
+    )
+    blacklist_duration_arg = DeclareLaunchArgument(
+        'blacklist_duration_s', default_value='30.0',
+        description='Seconds a goal abandoned as stuck or unreachable (STUCK, repeated '
+                    'A* failure, motion BLOCKED) stays off the candidate list.',
+    )
     depth = LaunchConfiguration('depth')
     odom_topic = LaunchConfiguration('odom_topic')
 
@@ -423,6 +440,8 @@ def generate_launch_description():
         survey_center_x_arg,
         survey_center_y_arg,
         min_goal_separation_arg,
+        arrival_blacklist_duration_arg,
+        blacklist_duration_arg,
         wall_z_band_arg,
         revisit_scan_slowdown_arg,
         revisit_min_closures_arg,
@@ -467,6 +486,7 @@ def generate_launch_description():
         wall_path_look_offset_arg,
         wall_normal_offset_arg,
         wall_path_heading_weight_arg,
+        wall_yaw_only_arg,
         Node(
             package='frontier_slam',
             executable='motion_safety_gate',
@@ -536,6 +556,9 @@ def generate_launch_description():
                 'survey_center_x': _float_parameter('survey_center_x'),
                 'survey_center_y': _float_parameter('survey_center_y'),
                 'min_goal_separation_m': _float_parameter('min_goal_separation_m'),
+                'arrival_blacklist_duration_s': _float_parameter(
+                    'arrival_blacklist_duration_s'),
+                'blacklist_duration_s': _float_parameter('blacklist_duration_s'),
             }],
         ),
         Node(
@@ -564,6 +587,10 @@ def generate_launch_description():
                 'odom_topic': odom_topic,
                 'look_offset_deg': _float_parameter('wall_orientation_offset_deg'),
                 'wall_z_band_m': _float_parameter('wall_z_band_m'),
+                # Was never wired: the node kept its 8 m default while the
+                # launcher's value only reached wall_looking, so a wall past 8 m
+                # selected no side and the viewing offset silently became 0.
+                'max_wall_distance_m': _float_parameter('wall_max_surface_dist'),
                 'revisit_scan_slowdown': _float_parameter('revisit_scan_slowdown'),
                 'lookahead_m': _float_parameter('wall_orientation_lookahead_m'),
                 'map_points_topic': LaunchConfiguration('wall_points_topic'),
@@ -590,6 +617,7 @@ def generate_launch_description():
                 'path_look_offset_deg': _float_parameter('wall_path_look_offset_deg'),
                 'wall_normal_offset_deg': _float_parameter('wall_normal_offset_deg'),
                 'path_heading_weight': _float_parameter('wall_path_heading_weight'),
+                'yaw_only': _bool_parameter('wall_yaw_only'),
                 'speed_factor': _float_parameter('speed_factor'),
                 'turn_factor': _float_parameter('turn_factor'),
                 'voxel_size': _float_parameter('voxel_size'),

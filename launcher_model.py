@@ -1034,6 +1034,26 @@ PARAMS = [
           "planner commits to moving on rather than re-picking a cluster it is "
           "already standing in. 0 is off.",
           step=0.5, lo=0.0, hi=50.0, visible=_frontier),
+    Param("arrival_blacklist_duration_s", "Arrival blacklist (s)", "float", 20.0,
+          "planning.goals",
+          "How long a frontier goal the vehicle reached stays off the candidate "
+          "list. This is the planner's only memory of where it has already "
+          "been — nothing else in the score knows a cluster was visited, and a "
+          "wall keeps producing frontier cells forever because the unknown "
+          "behind it is never observed. Set it shorter than the time it takes "
+          "to drive to the next goal and the cluster just left is a candidate "
+          "again on arrival, which is exactly the back-and-forth failure mode. "
+          "Size it above the round-trip time between the clusters you want "
+          "visited in turn.",
+          step=5.0, lo=0.0, hi=600.0, visible=_frontier),
+    Param("blacklist_duration_s", "Stuck blacklist (s)", "float", 30.0,
+          "planning.goals",
+          "How long a goal abandoned as unreachable stays off the candidate "
+          "list — STUCK (no progress for the stuck timeout), repeated A* "
+          "failure, or a BLOCKED report from the motion layer. Separate from "
+          "the arrival blacklist because failing to reach a goal and having "
+          "surveyed it are different reasons to skip it.",
+          step=5.0, lo=0.0, hi=600.0, visible=_frontier),
 
     Param("projected_map_band_m", "Planning band half-height (m)", "float", 1.0,
           "planning.map",
