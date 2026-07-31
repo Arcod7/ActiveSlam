@@ -413,6 +413,38 @@ than of how often one happens. And the trigger fires organically on a
 mission-derived threshold, where before the calibration it needed
 `sigma_allow_xy_m` raised to 0.45 to fire at all.
 
+### How the revisit policy actually spends the mission
+
+Worth measuring separately from whether the trigger helps, because it changes
+what the policy *is*. Across the four paired seeds:
+
+| state | uncertainty arm | scheduled arm |
+|---|---|---|
+| exploring | 17-52% | 40-51% |
+| revisiting | 7-32% | 7-16% |
+| cooldown | 41-60% | 41-43% |
+
+**Cooldown, not revisiting, is where the mission goes.** `cooldown_s` defaults
+to 60 s, so a 300 s run with three revisits spends about 180 s with the trigger
+suppressed, and on one seed the vehicle explored for only 17% of its mission.
+That compresses any difference between trigger policies into a small slice of
+the run and is a large part of why the n=4 comparison had no power. The
+13-seed campaign uses 30 s.
+
+**Revisits do not end on uncertainty.** Nine of ten exits were `CLOSED` -- the
+`revisit_min_closures=1` counter -- against a single `RESUMED_DOPT`, with U_r
+at exit between 0.34 and 0.76, mostly *above* the 0.5 resume threshold. This is
+structural rather than bad luck: `U_r < 0.5` requires
+`r_xy^(4/3) * r_yaw^(2/3) < 0.5`, and with `sigma_yaw` pinned near 0.023 the
+yaw factor is 0.60, so the position term must reach `sigma_xy < 0.175 m`. One
+loop closure does not pull the whole chain's uncertainty-relative-to-anchor
+that low. `ratio_resume` is therefore close to inactive by construction.
+
+The honest description of the implemented policy is **U_r decides when to go,
+and a successful closure decides when to stop** -- which is defensible (you
+leave once you have the relocalisation you went for) but is not the dual
+threshold the design describes, and should be written up as the former.
+
 ### The experiment is underpowered, which is not the same as a null result
 
 The paired ATE difference is +0.006 m with a standard deviation of 0.256 and a
