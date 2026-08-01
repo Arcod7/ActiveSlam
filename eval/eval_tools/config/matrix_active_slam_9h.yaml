@@ -105,8 +105,6 @@ common_args:
   plan_inflation_m: 3.0
 
   # Wall-oriented executor geometry.
-  # Side selection looks only within this depth slice: depth is directly
-  # observed, so geometry above or below it cannot be collided with.
   # Explicitly off: the consecutive-goal separation is implemented but
   # untested in a full run, so it must not ride along in this matrix.
   min_goal_separation_m: 0.0
@@ -115,7 +113,6 @@ common_args:
   # the pose graph and the map rebuild more time on geometry where a closure
   # is actually possible.
   revisit_scan_slowdown: 3.0
-  wall_z_band_m: 1.5
   wall_orientation_offset_deg: 40.0
   wall_orientation_lookahead_m: 2.0
   tsdf_frontier_standoff_m: 2.5

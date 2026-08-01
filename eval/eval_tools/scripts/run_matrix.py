@@ -79,7 +79,11 @@ VALID_KEYS = {
     'wall_normal_offset_deg', 'wall_path_heading_weight',
     # Survey working area: bounds frontier exploration to the structure.
     'survey_radius_m', 'survey_center_x', 'survey_center_y',
-    'min_goal_separation_m', 'wall_z_band_m', 'revisit_scan_slowdown',
+    'min_goal_separation_m', 'revisit_scan_slowdown',
+    # Goal blacklists: the planner's only visited-memory, so a batch that
+    # cannot set them cannot reproduce a launcher config.
+    'arrival_blacklist_duration_s', 'blacklist_duration_s',
+    'wall_max_surface_dist',
     'revisit_min_closures', 'arrival_dwell_s', 'stall_exit_s',
     'dopt_median_window', 'cooldown_s',
     'revisit_schedule_every_m',

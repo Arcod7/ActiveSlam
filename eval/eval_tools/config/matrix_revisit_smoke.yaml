@@ -75,7 +75,6 @@ common_args:
 
   min_goal_separation_m: 0.0
   revisit_scan_slowdown: 3.0
-  wall_z_band_m: 1.5
   wall_orientation_offset_deg: 40.0
   wall_orientation_lookahead_m: 2.0
   tsdf_frontier_standoff_m: 2.5

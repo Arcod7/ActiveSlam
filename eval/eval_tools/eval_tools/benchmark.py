@@ -118,7 +118,9 @@ class BenchmarkNode(Node):
         self.declare_parameter('output_dir', '')
         self.declare_parameter('rpe_delta', 1.0)
         self.declare_parameter('gt_topic', '/StoneFish/Odometry')
+        self.declare_parameter('preset', '')
 
+        self._preset = self.get_parameter('preset').value
         out_dir = self.get_parameter('output_dir').value
         if not out_dir:
             out_dir = new_run_dir(pytime.strftime('%Y%m%d_%H%M%S'))
@@ -455,6 +457,9 @@ class BenchmarkNode(Node):
         if self._latest_map_chamfer is not None:
             map_rows.append(f'Chamfer {self._latest_map_chamfer:.3f} m')
         map_section = ('\n' + '\n'.join(map_rows) + '\n') if map_rows else ''
+        # Absent when run outside the launcher (no preset selected), so a
+        # standalone `ros2 launch eval_tools eval.launch.py` HUD is unchanged.
+        preset_section = f'{self._preset}\n' if self._preset else ''
         # Spaced pipes and spaced units: the HUD panel renders this monospaced.
         # Grouped one concern per line — trajectory error, the two sigmas, then
         # the scalars derived from them — and graph counts set apart, because
@@ -462,6 +467,7 @@ class BenchmarkNode(Node):
         # column, so line width is the budget and height is what there is to
         # spare; the reverse of the two-line layout this replaced.
         text.text = (
+            f'{preset_section}'
             f'err {abs_error:.2f} m  |  ATE {ate:.2f} m\n'
             f'RPE {rpe_t_str} / {rpe_r_str}\n'
             f'sigma xy {sigma_xy_str}  |  sigma yaw {sigma_yaw_str}\n'

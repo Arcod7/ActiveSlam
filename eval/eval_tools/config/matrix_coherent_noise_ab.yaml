@@ -38,7 +38,6 @@ common_args:
   thrust_boost: 'false'
   wall_orientation_offset_deg: 45.0
   wall_orientation_lookahead_m: 2.0
-  wall_z_band_m: 1.5
   wall_standoff: 1.5
   wall_switch_goal_distance: 6.0
   wall_switch_scan_angle: 3.14159

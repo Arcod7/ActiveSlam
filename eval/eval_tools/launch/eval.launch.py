@@ -39,6 +39,7 @@ def _launch_eval_nodes(context, *args, **kwargs):
             'output_dir': output_dir,
             'rpe_delta': ParameterValue(
                 LaunchConfiguration('rpe_delta'), value_type=float),
+            'preset': LaunchConfiguration('preset'),
         }],
     )
 
@@ -100,11 +101,16 @@ def generate_launch_description():
         'voxel_size', default_value='0.2',
         description='Map cell size in metres; mirrors the belief map',
     )
+    preset_arg = DeclareLaunchArgument(
+        'preset', default_value='',
+        description='Launcher preset name to show on the Eval HUD (e.g. loop_closure_revisit)',
+    )
 
     return LaunchDescription([
         output_dir_arg,
         rpe_delta_arg,
         mapper_arg,
         voxel_size_arg,
+        preset_arg,
         OpaqueFunction(function=_launch_eval_nodes),
     ])
