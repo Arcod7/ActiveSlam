@@ -87,6 +87,85 @@ def attitude_hold_effort(roll: float, pitch: float,
     return roll_effort, pitch_effort
 
 
+class LowPass:
+    """Exponential low-pass on a channel that is already the quantity wanted.
+
+    LowPassRate's sibling for a measured rate rather than a differentiated one:
+    a gyro needs smoothing, not differencing. max_gap_s treats a stall as a
+    dropout and holds the last value rather than jumping on the stale sample.
+    """
+
+    def __init__(self, tau_s: float, max_gap_s: float = 0.0) -> None:
+        self._tau = max(0.0, tau_s)
+        self._max_gap = max(0.0, max_gap_s)
+        self._last_t: float | None = None
+        self.value = 0.0
+
+    def update(self, sample: float, t: float) -> float:
+        sample = float(sample)
+        if self._last_t is None:
+            self.value = sample
+        else:
+            dt = t - self._last_t
+            if dt > 0.0 and not (self._max_gap and dt > self._max_gap):
+                alpha = dt / (self._tau + dt) if self._tau > 0.0 else 1.0
+                self.value += alpha * (sample - self.value)
+        self._last_t = float(t)
+        return self.value
+
+    def reset(self) -> None:
+        self._last_t = None
+        self.value = 0.0
+
+
+class HeadingReference:
+    """Rate-limited, wrap-aware first-order shaping for a heading setpoint.
+
+    The raw viewing target is a staircase: path geometry rebuilt on ~1 Hz map
+    updates, jittered by the SLAM pose, re-signed by tens of degrees at mode
+    changes. A heading loop tight enough to track well chases every edge of
+    it, and smoothing the actuator command instead puts a rate limiter inside
+    the loop -- amplitude-dependent phase lag, which is what sustains a limit
+    cycle. Shaping belongs on the reference: the loop then follows a target
+    that moves like the hull does.
+
+    First-order pull toward the target, capped at max_rate. After max_gap_s
+    without an update the next call re-seeds at `current` (the vehicle's own
+    heading), so re-entering closed-loop control never demands an instant
+    turn, whatever mode it comes from. A non-finite target is ignored.
+    """
+
+    def __init__(self, tau_s: float, max_rate: float,
+                 max_gap_s: float = 1.0) -> None:
+        if max_rate <= 0.0:
+            raise ValueError('max_rate must be positive')
+        self._tau = max(0.0, tau_s)
+        self._max_rate = max_rate
+        self._max_gap = max(0.0, max_gap_s)
+        self._last_t: float | None = None
+        self.value = 0.0
+
+    def update(self, target: float, t: float, current: float) -> float:
+        if not math.isfinite(target):
+            return self.value
+        if self._last_t is None or (self._max_gap
+                                    and t - self._last_t > self._max_gap):
+            self.value = wrap_angle(current)
+        else:
+            dt = t - self._last_t
+            if dt > 0.0:
+                alpha = dt / (self._tau + dt) if self._tau > 0.0 else 1.0
+                step = alpha * wrap_angle(target - self.value)
+                cap = self._max_rate * dt
+                self.value = wrap_angle(
+                    self.value + max(-cap, min(cap, step)))
+        self._last_t = float(t)
+        return self.value
+
+    def reset(self) -> None:
+        self._last_t = None
+
+
 class LowPassRate:
     """Low-pass-filtered finite difference of a sampled channel.
 
@@ -139,12 +218,25 @@ class SlewLimiter:
     1.37 rad/s on a hull whose steady scan rate is 0.22. An effort limit bounds
     only the rate that is eventually reached; bounding how fast the effort may
     change bounds the acceleration used to get there, whatever issued it.
+
+    `release_rate_per_s` may raise the rate allowed while the command shrinks
+    toward zero. Applying torque is what whips the hull, so that stays slow;
+    removing it only lets the hull coast, and rate-limiting it is pure lag. At
+    a symmetric 0.25/s the yaw command needed 1.2 s to fall from full
+    authority, still pushing the old way long after the heading error changed
+    sign -- measured 2026-07-31 at a median 52 deg of overshoot. Defaults to
+    the apply rate, i.e. the symmetric behaviour every other caller expects.
     """
 
-    def __init__(self, max_rate_per_s: float, max_gap_s: float = 0.5) -> None:
+    def __init__(self, max_rate_per_s: float, max_gap_s: float = 0.5,
+                 release_rate_per_s: float | None = None) -> None:
         if max_rate_per_s <= 0.0:
             raise ValueError('max_rate_per_s must be positive')
+        if release_rate_per_s is not None and release_rate_per_s <= 0.0:
+            raise ValueError('release_rate_per_s must be positive')
         self._max_rate = max_rate_per_s
+        self._release_rate = (max_rate_per_s if release_rate_per_s is None
+                              else release_rate_per_s)
         self._max_gap = max(0.0, max_gap_s)   # a longer gap is a stall, not a ramp
         self._last_t: float | None = None
         self.value = 0.0
@@ -153,8 +245,22 @@ class SlewLimiter:
         dt = (0.0 if self._last_t is None
               else min(max(0.0, t - self._last_t), self._max_gap))
         self._last_t = float(t)
-        step = self._max_rate * dt
-        self.value += max(-step, min(step, float(target) - self.value))
+        delta = float(target) - self.value
+        if delta == 0.0 or dt == 0.0:
+            return self.value
+
+        direction = math.copysign(1.0, delta)
+        # Shrinking |value| releases torque; growing it applies fresh torque. A
+        # step that crosses zero does both, in that order, splitting the tick.
+        shrink = (min(abs(delta), abs(self.value))
+                  if self.value * direction < 0.0 else 0.0)
+        released = min(shrink, self._release_rate * dt)
+        self.value += direction * released
+        if released < shrink:
+            return self.value
+        apply_dt = max(0.0, dt - released / self._release_rate)
+        self.value += direction * min(
+            abs(delta) - released, self._max_rate * apply_dt)
         return self.value
 
     def reset(self) -> None:

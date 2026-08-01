@@ -11,11 +11,21 @@ The BlueROV2 is holonomic in the horizontal plane.  Route velocity is therefore
 projected onto body surge and sway, allowing the vehicle to keep travelling
 along the planned path while its camera looks slightly toward the wall.
 
+Heading is held by a cascade -- error to desired yaw rate to effort -- damped by
+a sensed rate, so the gyro topic below is a control input, not telemetry.
+
+Subscribed topics of note:
+  gyro_topic  (geometry_msgs/Vector3Stamped; default
+      /slam/sensors/imu_angular_velocity) body-frame angular velocity
+
 Published topics:
   /motion/body_command    (geometry_msgs/Twist; normalized safety-gate input)
   /motion/selected_wall   (visualization_msgs/MarkerArray) the nearest point on
       the side currently chosen, and a link to it from the vehicle — the map
       evidence behind the viewing offset (see wall_markers)
+  /motion/commanded_heading (visualization_msgs/MarkerArray) the viewing heading
+      being asked for, against the one held — the yaw setpoint and its tracking
+      error, live (see heading_markers)
 """
 
 import math
@@ -23,14 +33,21 @@ import os
 
 from frontier_slam.control_utils import (
     depth_hold_effort,
+    HeadingReference,
+    LowPass,
     LowPassRate,
     SlewLimiter,
     wrap_angle,
     yaw_from_quat,
+    yaw_rate_command,
+)
+from frontier_slam.heading_markers import (
+    heading_markers,
+    TOPIC as HEADING_MARKER_TOPIC,
 )
 from frontier_slam.session_log import open_session_log
 from frontier_slam.wall_markers import selected_wall_markers, TOPIC as WALL_MARKER_TOPIC
-from geometry_msgs.msg import PointStamped, Twist
+from geometry_msgs.msg import PointStamped, Twist, Vector3Stamped
 from nav_msgs.msg import Odometry, Path
 import numpy as np
 import rclpy
@@ -109,10 +126,16 @@ def _side_geometry(
     dx = pts[:, 0] - p[0]
     dy = pts[:, 1] - p[1]
     distance = np.hypot(dx, dy)
-    in_range = distance <= max_distance_m
-    if not np.any(in_range):
-        return None
-    pts, dx, dy, distance = pts[in_range], dx[in_range], dy[in_range], distance[in_range]
+    # A non-positive or non-finite cap means no range gate: the nearest wall is
+    # whatever is nearest. A finite cap makes the vehicle lose the wall outright
+    # once it drifts past it — reported as wall=none, which drops the viewing
+    # offset entirely — rather than merely track a more distant one.
+    if math.isfinite(max_distance_m) and max_distance_m > 0.0:
+        in_range = distance <= max_distance_m
+        if not np.any(in_range):
+            return None
+        pts, dx, dy, distance = (
+            pts[in_range], dx[in_range], dy[in_range], distance[in_range])
 
     # Starboard unit vector for a route bearing in world NED. Elementwise, not a
     # matmul: a two-column gemv dispatches to threaded BLAS, and at control rate
@@ -290,64 +313,99 @@ def parse_xyz_cloud(msg: PointCloud2) -> "np.ndarray | None":
 
 
 class WallOrientedController(Node):
-    # Heading is held by a direct heading->thrust law, because the only yaw rate
-    # available here is a differentiated heading estimate and that cannot close a
-    # loop: compass sigma is 0.05 rad at 10 Hz, so differentiation yields ~0.24
-    # rad/s of noise against a 0.25 rad/s target -- measured on a constant-spin
-    # scan, the fed-back rate read backwards on 4 of 18 samples and the command
-    # flipped sign on 10 of 17. No gain or filter fixes that: resolving the rate
-    # at 10:1 would need ~3 s of averaging. Heading error itself is clean (under
-    # 2 deg of noise), so the law that uses it directly is smooth.
-    #
-    # yaw_rate_command()/MAX_YAW_RATE in control_utils stay: a real gyro measures
-    # rate without differentiating, and the cascade goes back on top of one.
-    # Until then YAW_EFFORT_LIMIT bounds authority instead of achieved rate --
-    # equivalent only while thrust_boost is off, which is what caps spin here.
-    # Yaw is inertia plus a little drag -- close to a double integrator, which
-    # proportional control alone cannot stabilise; only drag damps it, so the
-    # gain has to stay under what drag can absorb. At 0.60 the loop diverged on
-    # a smooth setpoint: heading error grew 8.4 -> 24.2 -> 25.7 deg mean across
-    # a run, peaking at 146, while look_hdg moved only 3 deg/s. The gain has
-    # since gone 0.07 (pre-cascade) -> 0.15 -> 0.30, all under that 0.60.
-    # The real fix is the D term, which needs a rate a gyro can supply and a
-    # differentiated heading cannot -- see the note above.
-    # Effective loop gain is KP_YAW * turn_factor, so the launcher's turn_factor
-    # is the live knob if this still rings.
-    # Raised from 0.15 on 2026-07-31: at 0.15 the heading sat a mean 34 deg
-    # behind its setpoint across five runs, so the vehicle almost never reached
-    # the offset it was asked for -- only 5% of ticks landed within 45-60 deg of
-    # the path. Effective gain is KP_YAW * turn_factor = 0.24 at the shipped
-    # 0.8, still 2.5x under the 0.60 that diverged. Peak acceleration is
-    # unchanged: YAW_EFFORT_LIMIT below still caps it at 0.30.
-    KP_YAW = 0.30
-    YAW_RATE_TAU = 0.15  # diagnostic only; the CSV logs it, control ignores it
-    # Deliberately unchanged by the gain rise. Effort is torque, so this is the
-    # peak angular acceleration; raising it would make the vehicle snap harder,
-    # which is not what the gain rise is for. The doubled gain simply reaches
-    # this same ceiling at 57 deg of error instead of 115 -- more effort
-    # everywhere below saturation, never more than before above it.
+    # Heading is held by a cascade: error -> desired yaw rate -> effort, with the
+    # rate measured by the gyro (/slam/sensors/imu_angular_velocity). The direct
+    # heading->thrust law this replaces had no damping term -- yaw is inertia
+    # plus a little drag, so only drag damped it, and it arrived at the setpoint
+    # still turning: 20 deg mean overshoot, 47% of the incoming error, measured
+    # 2026-07-31 over 25 swings. Raising the gain could not fix that (at 0.60 the
+    # loop diverged, error 8.4 -> 25.7 deg mean, peaking at 146) and neither
+    # could the slew limiter, which had already taken it from 52 deg to 20.
+    # A differentiated heading estimate cannot supply the rate -- sd 0.37 rad/s
+    # against a 0.47 rad/s mean slew, same run. A gyro senses rate directly.
+    # Chosen so a 180 deg step settles no slower than the law this replaces
+    # (6.3 s against 6.1 s) with the overshoot gone, and stays that way against
+    # an unmodelled actuator lag of up to 0.6 s. Raising them to 1.6/1.5 settles
+    # 0.8 s sooner but starts ringing again past 0.4 s of lag.
+    KP_HEADING = 1.2      # heading error -> desired rate, 1/s; saturates at 38 deg
+    # Halved from 1.0 on 2026-08-01, with the shaped reference in place. At 1.0
+    # the damping term dominated the command on steady headings -- corr(cmd,
+    # -rate) 0.51 vs corr(cmd, err) 0.30, median 0.13 effort from ambient rate
+    # wobble, saturated 20% of ticks -- so damping sized for killing 90 deg
+    # swings was amplifying noise the rest of the time, and through the ~0.25 s
+    # of filter+ZOH+thrust delay it reinjects energy near 1 Hz rather than
+    # removing it. 0.5 still brakes an overrun hard (a 0.5 rad/s excess is a
+    # -0.25 command) and keeps the loop overdamped (zeta ~1.1).
+    # ...and settled at 0.35 by pole placement against the measured plant
+    # (ACC ~5.1 rad/s^2 per unit effort at the shipped turn_factor, drag
+    # ~1.4/s): inner-loop bandwidth ACC*kd + drag = 3.2 rad/s, the 45 deg
+    # phase-margin limit for the ~0.25 s filter+ZOH+thrust delay, and the
+    # heading loop lands at wn 1.46 rad/s, zeta 1.09 -- no overshoot, no idle
+    # dither (0.35 * 0.07 rad/s ambient rate = 0.025 effort, the old P law's
+    # level).
+    KP_YAW_RATE = 0.35    # rate error -> effort, s
+    # Bounds the spin actually achieved rather than the authority used to get
+    # there, so it holds whatever the thrust ceiling is. The overshooting P law
+    # reached 1.36 rad/s; the hull's steady scan rate is 0.22. A rate loop this
+    # shallow keeps a standing offset, so the rate reached is ~0.63 of this.
+    MAX_YAW_RATE = 0.8    # rad/s (~46 deg/s)
+    YAW_RATE_TAU = 0.10   # s, low-pass on the gyro
+    # Complementary fusion of the steering yaw (see _fuse_steering_yaw).
+    YAW_FUSE_TAU_S = 1.5
+    YAW_FUSE_SNAP_RAD = 0.35  # past this the innovation is a graph correction
+    # Heading gain used when no gyro is publishing — the direct law that
+    # preceded the cascade, at the gain it shipped with. Overshoots (that is
+    # what the cascade is for) but is the behaviour this hull is known to
+    # survive. Applies to a real-robot run too, where mavlink_odometry supplies
+    # orientation but no rate.
+    KP_YAW_FALLBACK = 0.30
+    # Effort is torque, so this is the peak angular acceleration.
     YAW_EFFORT_LIMIT = 0.30
-    # Effort per second on the published yaw command -- how fast torque may be
-    # applied, not how much. Lowered alongside the gain so the stronger
-    # mid-range commands are still eased in: 1.2 s to full authority, was 1.0.
-    YAW_SLEW_PER_S = 0.25
+    # The commanded heading is shaped, not the actuator command: the raw
+    # viewing target is a staircase (path geometry on ~1 Hz map updates, SLAM
+    # pose jitter, mode-change re-signs) and slew-limiting the command instead
+    # put a rate limiter inside the loop -- measured 2026-08-01 as a limit
+    # cycle: mean effort 0.15 near the setpoint against 0.03 for the old P
+    # law, saturated 18% of the time, sustaining ~0.18 rad/s of yaw wobble the
+    # loop itself was injecting. The reference glides at the rate the hull
+    # actually holds (~0.63 * MAX_YAW_RATE), so tracking it never saturates.
+    LOOK_REF_TAU = 0.4    # s, pull toward the raw target
+    LOOK_REF_RATE = 0.6   # rad/s, cap on how fast the commanded heading moves
+    # Backstop only, for the open-loop callers (scan, escape); the closed-loop
+    # command is smooth by construction now the reference is shaped. 1.0/s sat
+    # inside the loop and was the limit cycle's phase lag.
+    YAW_SLEW_PER_S = 3.0
     KP_SPEED = 0.25
     KP_HEAVE = 0.35
     KD_HEAVE = 0.50  # damps the 6.1 s depth limit cycle P alone sustains
     DEPTH_RATE_TAU = 0.20  # s, low-pass on the differentiated depth
 
-    # Both rates are differentiated from a pose estimate that steps on graph
-    # corrections and stalls while the optimiser runs. Beyond these bounds the
-    # sample is one of those, not motion: measured true motion peaks at 1.26
-    # rad/s and 0.17 m/s.
-    YAW_RATE_MAX = 1.5  # rad/s (~86 deg/s)
+    # Depth rate is differentiated from a pose estimate that steps on graph
+    # corrections and stalls while the optimiser runs. Beyond this bound the
+    # sample is one of those, not motion: true motion peaks at 0.17 m/s. Yaw
+    # rate needs no such guard now it is sensed rather than differenced.
     DEPTH_RATE_MAX = 0.6  # m/s
     ODOM_GAP_S = 0.5  # a longer gap carries no usable rate
     ODOM_STALE_S = 1.0  # past this the pose is too old to steer on
+    GYRO_STALE_S = 0.5  # past this the cascade has no damping term — see _loop
 
     MAX_SPEED = 0.35
-    GOAL_RADIUS = 2.0
-    GOAL_REACHED_TIMEOUT = 10.0
+    GOAL_RADIUS = 4.0
+    # Translation tapers between here and GOAL_RADIUS. KP_SPEED alone
+    # does not brake: it only bites below MAX_SPEED/KP_SPEED = 1.4 m, which is
+    # inside the arrival radius, so the vehicle used to reach the goal at full
+    # speed and have its thrust cut in a single tick -- it then coasted through.
+    ARRIVAL_BRAKE_M = 5.0
+    # Floor of the ramp. Tapering all the way to zero is an asymptote: thrust
+    # vanishes just outside GOAL_RADIUS and the vehicle stalls there without
+    # ever registering arrival. A slowdown must still cross the radius.
+    ARRIVAL_MIN_SCALE = 0.3
+    # Misalignment slows travel, it must not stop it: cos() clamped at zero
+    # froze the vehicle for the 3-5 s of every re-aim (measured 2026-08-01 at
+    # each direction change). The creep this floor allows cannot overshoot
+    # WAYPOINT_ADVANCE_DIST in that time.
+    ALIGN_MIN_SCALE = 0.2
+    GOAL_REACHED_TIMEOUT = 5.0
     SCAN_YAW = 0.08  # open-loop effort; ~0.22 rad/s achieved without boost
     INIT_SCAN_DURATION = 10.0
     # wall-oriented heading — narrow and slow keeps the wall in the sonar.
@@ -369,6 +427,16 @@ class WallOrientedController(Node):
     # over half a 45 deg offset, so the vehicle has clearly committed to the
     # side it holds before it is allowed to abandon it.
     SIDE_SWITCH_SETTLED_RAD = math.radians(25.0)
+    # ...and it must have held that way, not merely touched it. Sampled at one
+    # instant the gate leaked: the error passes through the band on its way
+    # across, so a switch could still be taken mid-swing and reverse a turn
+    # already under way. Measured 2026-07-31: 19% of switches came within 20 s
+    # of the previous one and the closest pair was 5 s apart, against the ~10 s
+    # a 90 deg re-sign needs.
+    SIDE_SWITCH_SETTLED_S = 2.0
+    # Below this lateral offset the remembered wall sits on the route axis and
+    # cannot sign a side (see _resign_side_from_memory).
+    MEMORY_SIDE_MIN_LATERAL_M = 0.3
     MAP_STALE_S = 5.0
     # The extractor replans at 3 Hz, so this tolerates 6 missed publications
     # before the path is abandoned for the straight-line bearing to the goal.
@@ -383,7 +451,7 @@ class WallOrientedController(Node):
         self.declare_parameter("look_offset_deg", 30.0)
         self.declare_parameter("lookahead_m", 0.0)
         self.declare_parameter("map_points_topic", "/octomap_point_cloud_centers")
-        self.declare_parameter("max_wall_distance_m", 8.0)
+        self.declare_parameter("max_wall_distance_m", 0.0)  # 0 = no range gate
         self.declare_parameter("wall_z_band_m", 1.5)
         self.declare_parameter("side_switch_margin_m", 0.3)
         # Scan this many times slower while a revisit is in progress: the
@@ -393,6 +461,10 @@ class WallOrientedController(Node):
         # 1.0 = off.
         self.declare_parameter("revisit_scan_slowdown", 1.0)
         self.declare_parameter("odom_topic", "/StoneFish/Odometry")
+        # Sensed, not differentiated from odom_topic — the cascade's damping
+        # term. Retargetable so a real gyro can feed the same loop.
+        self.declare_parameter(
+            "gyro_topic", "/slam/sensors/imu_angular_velocity")
         self.declare_parameter("goal_topic", "/frontier_slam/goal")
         self.declare_parameter("path_topic", "/frontier_slam/path")
         self.declare_parameter("command_topic", "/motion/body_command")
@@ -423,6 +495,16 @@ class WallOrientedController(Node):
         # stays centred on the target instead of drifting along the wall.
         self._patrol_anchor = None
         self._patrol_sign = 1.0
+        # Axis the patrol beat walks along, fixed for the dwell. Recomputing it
+        # per tick fed the route heading it is derived from back into itself.
+        self._patrol_tangent: float | None = None
+        # Viewing heading held during the dwell, as an offset from the bearing
+        # to the wall so it survives the beat reversing.
+        self._patrol_look_delta: float | None = None
+        # Last wall actually seen, kept so a gap in the map does not drop the
+        # side and re-sign the viewing offset. A wall does not stop existing
+        # because this tick's scan missed it.
+        self._wall_memory: np.ndarray | None = None
         # Route heading last driven on, so a stopped vehicle still has one to
         # offset its viewing heading from.
         self._last_route_heading: float | None = None
@@ -430,11 +512,17 @@ class WallOrientedController(Node):
         # _select_wall_side runs before this tick's error exists, so one tick of
         # staleness is inherent and harmless at control rate.
         self._last_heading_error = 0.0
+        # Yaw setpoint behind the command about to be sent, for the RViz arrow.
+        # None while no heading is being closed on (open-loop spin, stale pose).
+        self._last_look_heading: float | None = None
+        # When the heading error last entered SIDE_SWITCH_SETTLED_RAD and stayed.
+        self._settled_since: float | None = None
         self.create_subscription(
             String, "/frontier_slam/revisit_state", self._revisit_state_cb, 10
         )
         map_topic = str(self.get_parameter("map_points_topic").value)
         odom_topic = str(self.get_parameter("odom_topic").value)
+        gyro_topic = self._gyro_topic = str(self.get_parameter("gyro_topic").value)
         goal_topic = str(self.get_parameter("goal_topic").value)
         path_topic = str(self.get_parameter("path_topic").value)
         command_topic = str(self.get_parameter("command_topic").value)
@@ -444,14 +532,14 @@ class WallOrientedController(Node):
         self._depth_rate = LowPassRate(
             self.DEPTH_RATE_TAU, max_rate=self.DEPTH_RATE_MAX, max_gap_s=self.ODOM_GAP_S
         )
-        self._yaw_rate = LowPassRate(
-            self.YAW_RATE_TAU,
-            wrap=True,
-            max_rate=self.YAW_RATE_MAX,
-            max_gap_s=self.ODOM_GAP_S,
-        )
+        self._yaw_rate = LowPass(self.YAW_RATE_TAU, max_gap_s=self.ODOM_GAP_S)
+        self._gyro_at: float | None = None
         self._yaw_slew = SlewLimiter(self.YAW_SLEW_PER_S)
+        self._look_ref = HeadingReference(self.LOOK_REF_TAU, self.LOOK_REF_RATE)
         self._yaw = 0.0
+        # Complementary steering yaw: gyro-integrated, pulled toward the SLAM
+        # estimate by _fuse_steering_yaw. None until the first estimate.
+        self._yaw_ctrl: float | None = None
         self._odom_at: float | None = None
         self._path: list[tuple[float, float]] = []
         self._path_at: float | None = None
@@ -474,6 +562,7 @@ class WallOrientedController(Node):
         self.create_subscription(PointStamped, goal_topic, self._goal_cb, 1)
         self.create_subscription(Path, path_topic, self._path_cb, 1)
         self.create_subscription(Odometry, odom_topic, self._odom_cb, 10)
+        self.create_subscription(Vector3Stamped, gyro_topic, self._gyro_cb, 10)
         self.create_subscription(Image, "/sensor_msgs/image_depth", self._depth_cb, 1)
         self.create_subscription(PointCloud2, map_topic, self._map_cb, 1)
         self._command_pub = self.create_publisher(Twist, command_topic, 1)
@@ -482,6 +571,8 @@ class WallOrientedController(Node):
         self._activity_pub = self.create_publisher(String, "/frontier_slam/activity", 1)
         self._selected_wall_pub = self.create_publisher(
             MarkerArray, WALL_MARKER_TOPIC, 1)
+        self._heading_pub = self.create_publisher(
+            MarkerArray, HEADING_MARKER_TOPIC, 1)
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
 
         self.get_logger().info(
@@ -543,13 +634,53 @@ class WallOrientedController(Node):
         ]
         self._wp_idx = int(np.argmin(distances))
 
+    def _gyro_cb(self, msg: Vector3Stamped) -> None:
+        """Body-frame yaw rate. Level enough here that z is the heading rate."""
+        now = self._t_ros()
+        prev = self._gyro_at
+        self._gyro_at = now
+        self._yaw_rate.update(msg.vector.z, now)
+        # Carry the steering yaw between estimate corrections. Raw rate, not
+        # the low-passed one: integration wants an unbiased sample.
+        if (self._yaw_ctrl is not None and prev is not None
+                and 0.0 < now - prev < self.ODOM_GAP_S):
+            self._yaw_ctrl = wrap_angle(
+                self._yaw_ctrl + msg.vector.z * (now - prev))
+
+    def _fuse_steering_yaw(self, now: float, dt: 'float | None') -> None:
+        """Pull the gyro-carried steering yaw toward the SLAM estimate.
+
+        The estimate's yaw wanders at 0.11 rad/s sd against a true hull rate
+        of 0.07 median (2026-08-01) -- steering on it directly turns estimate
+        noise into real motion, which no gain choice can prevent. The gyro
+        carries the high frequencies; the estimate wins over YAW_FUSE_TAU_S,
+        so heading stays anchored to the SLAM frame without shaking with it.
+        """
+        if self._yaw_ctrl is None or self._gyro_stale(now):
+            self._yaw_ctrl = self._yaw
+            return
+        innovation = wrap_angle(self._yaw - self._yaw_ctrl)
+        if abs(innovation) > self.YAW_FUSE_SNAP_RAD:
+            # A step this size is a graph correction, not noise -- follow it.
+            self._yaw_ctrl = self._yaw
+            return
+        if dt is not None and dt > 0.0:
+            alpha = dt / (self.YAW_FUSE_TAU_S + dt)
+            self._yaw_ctrl = wrap_angle(self._yaw_ctrl + alpha * innovation)
+
+    def _steering_yaw(self) -> float:
+        return self._yaw if self._yaw_ctrl is None else self._yaw_ctrl
+
     def _odom_cb(self, msg: Odometry) -> None:
         p = msg.pose.pose.position
         self._pose = np.array([p.x, p.y, p.z])
         self._yaw = yaw_from_quat(msg.pose.pose.orientation)
+        prev_odom = self._odom_at
         self._odom_at = self._t_ros()
+        self._fuse_steering_yaw(
+            self._odom_at,
+            None if prev_odom is None else self._odom_at - prev_odom)
         self._depth_rate.update(float(p.z), self._odom_at)
-        self._yaw_rate.update(self._yaw, self._odom_at)
         if self._init_scan_end is None:
             if self._depth_setpoint is None:
                 self._depth_setpoint = float(p.z)
@@ -576,14 +707,33 @@ class WallOrientedController(Node):
 
         Falls back to the current pose when no wall has been selected, which
         makes the vehicle hold station exactly as the sweep would.
+
+        The axis is taken from the bearing to the wall itself and then held for
+        the whole dwell. Deriving it from the route heading instead closed a
+        loop: the route heading defined the axis, the axis placed the target,
+        and driving to the target redefined the route heading -- measured
+        2026-08-01 spinning the viewing heading through four bearings 90 deg
+        apart once a second, for the whole patrol.
         """
         if self._patrol_anchor is None:
             self._patrol_anchor = self._pose[:2].copy()
-        if self._wall_side == 0 or self._last_route_heading is None:
-            return self._patrol_anchor
-        look = offset_heading(
-            self._last_route_heading, self._wall_side, self._look_offset_deg)
-        tangent = look + math.pi / 2.0
+            self._patrol_tangent = None
+            self._patrol_look_delta = None
+        if self._patrol_tangent is None:
+            wall = self._wall_memory
+            if wall is None or self._wall_side == 0:
+                return self._patrol_anchor
+            to_wall = math.atan2(wall[1] - self._pose[1], wall[0] - self._pose[0])
+            self._patrol_tangent = wrap_angle(to_wall + math.pi / 2.0)
+            # Held relative to the wall, but starting from the heading transit
+            # was already commanding, so entering the dwell asks for no turn at
+            # all. Pointing straight at the wall instead costs a 45 deg swing on
+            # arrival -- the offset is 45 deg off the route and the wall is
+            # roughly abeam of it -- which is a turn the dwell has no use for.
+            self._patrol_look_delta = (
+                0.0 if self._last_look_heading is None
+                else wrap_angle(self._last_look_heading - to_wall))
+        tangent = self._patrol_tangent
         step = self._patrol_sign * self.REVISIT_PATROL_M
         target = self._patrol_anchor + step * np.array(
             [math.cos(tangent), math.sin(tangent)])
@@ -596,6 +746,8 @@ class WallOrientedController(Node):
         self._revisiting = msg.data == "revisiting"
         if not self._revisiting and was:
             self._patrol_anchor = None
+            self._patrol_tangent = None
+            self._patrol_look_delta = None
         slowdown = self._revisit_scan_slowdown if msg.data == "revisiting" else 1.0
         if slowdown != self._scan_slowdown:
             self._scan_slowdown = slowdown
@@ -613,15 +765,43 @@ class WallOrientedController(Node):
             error, self._depth_rate.value, self.KP_HEAVE, self.KD_HEAVE
         )
 
+    def _resign_side_from_memory(self, route_heading: float, now: float) -> None:
+        """Keep the held side attached to the wall, not to the route.
+
+        The side is route-relative, so a direction change flips which side the
+        same physical wall is on. That is a frame change, not a wall change --
+        making it earn the switch dwell left the viewing offset pointing into
+        open water for seconds at every reversal (measured 2026-08-01: a
+        ~180 deg look sweep and a 3-5 s stall at each waypoint or revisit
+        direction change). The dwell in _select_wall_side still gates changes
+        of wall.
+        """
+        wall = self._wall_memory
+        if wall is None or self._wall_side == 0:
+            return
+        lateral = ((wall[0] - self._pose[0]) * -math.sin(route_heading)
+                   + (wall[1] - self._pose[1]) * math.cos(route_heading))
+        if abs(lateral) < self.MEMORY_SIDE_MIN_LATERAL_M:
+            return
+        side = 1 if lateral > 0.0 else -1
+        if side != self._wall_side:
+            self._wall_side = side
+            self._side_candidate = side
+            self._side_candidate_t = now
+
     def _select_wall_side(self, route_heading: float, now: float) -> None:
+        self._resign_side_from_memory(route_heading, now)
         if (
             self._map_points is None
             or self._map_received_at is None
             or now - self._map_received_at > self.MAP_STALE_S
         ):
-            self._wall_side = 0
+            # The side is deliberately kept. Zeroing it drops the viewing offset
+            # to zero and then re-signs it by 2*look_offset_deg when the map
+            # returns -- a 90 deg setpoint step for what was only a gap in the
+            # scan. Distance goes NaN because that is genuinely unmeasured now.
             self._wall_distance = float("nan")
-            self._publish_selected_wall(None)
+            self._publish_selected_wall(self._wall_memory)
             return
         # Re-read live: the launcher pushes this with `ros2 param set` while
         # running, and a value cached at startup would ignore it silently.
@@ -636,6 +816,13 @@ class WallOrientedController(Node):
         candidate = choose_wall_side(
             left, right, self._wall_side, self._side_switch_margin
         )
+        if candidate == 0 and self._wall_side != 0:
+            # Nothing in the depth band this tick — a turn sweeps the sonar off
+            # the structure for seconds at a time. Hold the side already chosen
+            # rather than treating a gap in the scan as the wall having gone.
+            self._wall_distance = float("nan")
+            self._publish_selected_wall(self._wall_memory)
+            return
         # Switching sides re-signs the viewing offset, so each change steps the
         # yaw setpoint by 2*look_offset_deg at once -- measured at 48.6 deg,
         # against 2.4 deg/s while the side holds. The 0.3 m margin alone does
@@ -652,7 +839,12 @@ class WallOrientedController(Node):
         # the vehicle look like it was ignoring the wall and driving straight.
         # So also require the previous swing to have converged: no new side is
         # taken while the heading is still far from the one currently commanded.
-        settled = abs(self._last_heading_error) <= self.SIDE_SWITCH_SETTLED_RAD
+        if abs(self._last_heading_error) > self.SIDE_SWITCH_SETTLED_RAD:
+            self._settled_since = None
+        elif self._settled_since is None:
+            self._settled_since = now
+        settled = (self._settled_since is not None
+                   and now - self._settled_since >= self.SIDE_SWITCH_SETTLED_S)
         if candidate != self._wall_side:
             if candidate != self._side_candidate:
                 self._side_candidate = candidate
@@ -669,14 +861,51 @@ class WallOrientedController(Node):
 
         # Drawn from the side actually held, not the fresh candidate: during the
         # switch dwell the marker must show what is steering the vehicle now.
-        self._publish_selected_wall(nearest_wall_point(
+        wall_point = nearest_wall_point(
             self._map_points, self._pose, route_heading, self._wall_z_band,
-            self._max_wall_distance, self._wall_side))
+            self._max_wall_distance, self._wall_side)
+        if wall_point is not None:
+            self._wall_memory = np.asarray(wall_point, dtype=np.float64).copy()
+        self._publish_selected_wall(wall_point if wall_point is not None
+                                    else self._wall_memory)
 
     def _publish_selected_wall(self, wall_point) -> None:
         self._selected_wall_pub.publish(selected_wall_markers(
             self._pose, wall_point, self._voxel_size,
             self.get_clock().now().to_msg()))
+
+    def _arrival_brake(self, goal_dist: float) -> float:
+        """Translation scale: 1.0 beyond the ramp, ARRIVAL_MIN_SCALE at the radius."""
+        span = self.ARRIVAL_BRAKE_M - self.GOAL_RADIUS
+        if span <= 0.0:
+            return 1.0
+        return float(np.clip((goal_dist - self.GOAL_RADIUS) / span,
+                             self.ARRIVAL_MIN_SCALE, 1.0))
+
+    def _gyro_stale(self, now: float) -> bool:
+        return self._gyro_at is None or now - self._gyro_at > self.GYRO_STALE_S
+
+    def _yaw_effort(self, heading_error: float, now: float) -> float:
+        """Cascaded heading hold, shared by the hold and drive paths.
+
+        Without a rate the cascade must not simply run with measured_rate=0:
+        that leaves a proportional law of effective gain KP_HEADING *
+        KP_YAW_RATE = 1.2, four times the law this replaced and twice the 0.60
+        measured to diverge, saturating at 14 deg of error instead of 57. Losing
+        damping should not also mean losing the gain ceiling, so the fallback is
+        the explicit pre-cascade law rather than a degenerate case of this one.
+        """
+        if self._gyro_stale(now):
+            return float(np.clip(self.KP_YAW_FALLBACK * heading_error,
+                                 -self.YAW_EFFORT_LIMIT, self.YAW_EFFORT_LIMIT))
+        return yaw_rate_command(
+            heading_error,
+            self._yaw_rate.value,
+            self.KP_HEADING,
+            self.KP_YAW_RATE,
+            self.MAX_YAW_RATE,
+            limit=self.YAW_EFFORT_LIMIT,
+        )
 
     def _hold_yaw_cmd(self, now: float) -> tuple:
         """Yaw effort holding the viewing heading while the vehicle waits.
@@ -689,21 +918,29 @@ class WallOrientedController(Node):
         if route_heading is None:
             return 0.0, float("nan"), float("nan"), float("nan")
         self._select_wall_side(route_heading, now)
-        look_heading = offset_heading(
+        raw_look = offset_heading(
             route_heading, self._wall_side, self._look_offset_deg
         )
-        heading_error = wrap_angle(look_heading - self._yaw)
-        self._last_heading_error = heading_error
-        yaw_cmd = float(
-            np.clip(
-                self.KP_YAW * heading_error,
-                -self.YAW_EFFORT_LIMIT,
-                self.YAW_EFFORT_LIMIT,
-            )
-        )
+        # Raw error gates the side switch (distance to the final target);
+        # control tracks the shaped reference.
+        steering_yaw = self._steering_yaw()
+        self._last_heading_error = wrap_angle(raw_look - steering_yaw)
+        look_heading = self._look_ref.update(raw_look, now, steering_yaw)
+        heading_error = wrap_angle(look_heading - steering_yaw)
+        self._last_look_heading = look_heading
+        yaw_cmd = self._yaw_effort(heading_error, now)
         return yaw_cmd, route_heading, look_heading, heading_error
 
-    def _drive(self, target_xy: np.ndarray, now: float) -> tuple:
+    def _wall_look_heading(self) -> 'float | None':
+        """Bearing to the wall last seen, or None if none has been yet."""
+        wall = self._wall_memory
+        if wall is None:
+            return None
+        bearing = math.atan2(wall[1] - self._pose[1], wall[0] - self._pose[0])
+        return wrap_angle(bearing + (self._patrol_look_delta or 0.0))
+
+    def _drive(self, target_xy: np.ndarray, now: float,
+               look_at_wall: bool = False) -> tuple:
         delta = target_xy - self._pose[:2]
         distance = float(np.hypot(*delta))
         travel_heading = math.atan2(delta[1], delta[0])
@@ -712,26 +949,40 @@ class WallOrientedController(Node):
         )
         self._select_wall_side(look_path_heading, now)
         self._last_route_heading = look_path_heading
-        look_heading = offset_heading(
-            look_path_heading, self._wall_side, self._look_offset_deg
-        )
-        heading_error = wrap_angle(look_heading - self._yaw)
-        self._last_heading_error = heading_error
-        yaw_cmd = float(
-            np.clip(
-                self.KP_YAW * heading_error,
-                -self.YAW_EFFORT_LIMIT,
-                self.YAW_EFFORT_LIMIT,
+        # The patrol beat reverses at each end, which swings a route-relative
+        # viewing heading by 180 deg for a vehicle that has not turned. Facing
+        # the wall itself is invariant to which way along it we are going, and
+        # the hull is holonomic, so it strafes the beat without re-aiming.
+        raw_look = self._wall_look_heading() if look_at_wall else None
+        if raw_look is None:
+            raw_look = offset_heading(
+                look_path_heading, self._wall_side, self._look_offset_deg
             )
-        )
+        # Raw error gates the side switch (distance to the final target);
+        # control tracks the shaped reference.
+        steering_yaw = self._steering_yaw()
+        self._last_heading_error = wrap_angle(raw_look - steering_yaw)
+        look_heading = self._look_ref.update(raw_look, now, steering_yaw)
+        heading_error = wrap_angle(look_heading - steering_yaw)
+        self._last_look_heading = look_heading
+        yaw_cmd = self._yaw_effort(heading_error, now)
 
         # Reduce travel while the requested viewing heading is far away, then
         # project the unchanged route velocity onto the current body axes.
-        alignment = max(0.0, math.cos(heading_error))
+        # Raw error, deliberately not the shaped one. This gate doubles as the
+        # interlock the waypoint tracker depends on: translation waits until
+        # the vehicle points roughly at its final aim. Gating on the shaped
+        # error let it translate mid-glide, overshoot the (densified) waypoints
+        # between 1 Hz replans, and put the current waypoint behind it -- the
+        # route heading then flipped ~180 deg once a second (54 look jumps
+        # >60 deg in 13 min, measured 2026-08-01). Shaping is for the yaw loop
+        # only. Floored at ALIGN_MIN_SCALE rather than zero, so a re-aim slows
+        # the vehicle instead of freezing it (see the constant).
+        alignment = max(self.ALIGN_MIN_SCALE, math.cos(self._last_heading_error))
         speed = float(
             np.clip(self.KP_SPEED * distance * alignment, 0.0, self.MAX_SPEED)
         )
-        route_in_body = wrap_angle(travel_heading - self._yaw)
+        route_in_body = wrap_angle(travel_heading - self._steering_yaw())
         surge = speed * math.cos(route_in_body)
         sway = speed * math.sin(route_in_body)
         return (
@@ -751,6 +1002,12 @@ class WallOrientedController(Node):
         if self._pose is None:
             return
 
+        # Cleared every tick, re-set only by the paths that close on a heading
+        # (_hold_yaw_cmd, _drive). An open-loop spin — initial scan, stuck
+        # escape, stale-pose hold — therefore draws no commanded arrow, and a
+        # future one inherits that without needing to know about the marker.
+        self._last_look_heading = None
+
         now = self._t_ros()
         if self._odom_at is not None and now - self._odom_at > self.ODOM_STALE_S:
             # Steering on a pose seconds old is what makes the vehicle lurch.
@@ -766,6 +1023,19 @@ class WallOrientedController(Node):
             if write_csv:
                 self._write_csv(0.0, 0.0, 0.0, 0.0, "ODOM_STALE")
             return
+
+        # Unlike the pose, a missing rate is not a reason to stop — _yaw_effort
+        # falls back to the pre-cascade law. reset() rather than assignment so
+        # the filter re-seeds on the first sample back instead of ramping up
+        # from zero, and so the CSV logs no rate rather than a stale one.
+        if self._gyro_stale(now):
+            if self._yaw_rate.value != 0.0:
+                self._yaw_rate.reset()
+            self.get_logger().warn(
+                f"no gyro on {self._gyro_topic} — yaw damping off, holding "
+                f"heading with the pre-cascade law (KP {self.KP_YAW_FALLBACK})",
+                throttle_duration_sec=10.0,
+            )
 
         heave = self._heave_cmd()
         if self._init_scan_end is not None and now < self._init_scan_end:
@@ -847,8 +1117,14 @@ class WallOrientedController(Node):
             look_heading,
             heading_error,
             look_path_heading,
-        ) = self._drive(target_xy, now)
+        ) = self._drive(target_xy, now, look_at_wall=patrol_target is not None)
         event = "REVISIT_PATROL" if patrol_target is not None else ""
+        if patrol_target is None:
+            # Not while patrolling: the beat runs inside GOAL_RADIUS, where the
+            # ramp is zero, and would brake the vehicle to a standstill.
+            brake = self._arrival_brake(goal_dist)
+            surge *= brake
+            sway *= brake
         if self._min_front_dist < self.EMERGENCY_STOP_DIST:
             surge, sway = -self.BACK_SURGE_SPEED, 0.0
             event = "EMERG_STOP"
@@ -945,6 +1221,11 @@ class WallOrientedController(Node):
             float(np.clip(yaw * turn_factor, -cap, cap)), self._t_ros()
         )
         self._command_pub.publish(msg)
+        # Drawn here rather than per caller: every command leaves through this
+        # method, so the arrow cannot show a setpoint no command was sent for.
+        self._heading_pub.publish(heading_markers(
+            self._pose, self._last_look_heading, self._steering_yaw(),
+            self.get_clock().now().to_msg()))
 
     def _write_csv(
         self,
