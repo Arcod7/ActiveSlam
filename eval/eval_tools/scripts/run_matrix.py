@@ -84,6 +84,12 @@ VALID_KEYS = {
     # cannot set them cannot reproduce a launcher config.
     'arrival_blacklist_duration_s', 'blacklist_duration_s',
     'wall_max_surface_dist',
+    # Planner and executor share this one; a batch stuck on the package
+    # default cannot reproduce a launcher that retuned it.
+    'goal_radius_m',
+    # Stated rather than inherited: both currently equal the launch default,
+    # so a change to that default would silently redefine the batch.
+    'wall_yaw_only', 'rpe_delta',
     'revisit_min_closures', 'arrival_dwell_s', 'stall_exit_s',
     'dopt_median_window', 'cooldown_s',
     'revisit_schedule_every_m',
@@ -721,6 +727,7 @@ def aggregate(batch_dir: str, manifests: list = None) -> None:
     fieldnames = ['name', 'seed', 'status', 'gt_path_m', 'gt_yaw_deg',
                   'final_ate', 'mean_rpe_trans',
                   'final_abs_error', 'final_coverage', 'final_iou', 'final_chamfer',
+                  'final_explored', 'final_n_belief',
                   'lc_count', 'rebuild_count', 'revisit_count', 'tracebacks',
                   'process_deaths']
     rows = []
@@ -737,6 +744,9 @@ def aggregate(batch_dir: str, manifests: list = None) -> None:
             'final_coverage': _last(map_csv, 'coverage'),
             'final_iou': _last(map_csv, 'iou_occ'),
             'final_chamfer': _last(map_csv, 'chamfer'),
+            # Observed volume, for the coverage-vs-map-size tradeoff.
+            'final_explored': _last(map_csv, 'explored'),
+            'final_n_belief': _last(map_csv, 'n_belief'),
             'lc_count': _last(metrics_csv, 'lc_count'),
             'rebuild_count': _last(metrics_csv, 'rebuild_count'),
             'revisit_count': _last(metrics_csv, 'revisit_count'),
