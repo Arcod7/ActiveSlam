@@ -28,6 +28,11 @@ PLAN_INFLATION_M = 3.00   # planning margin — moderate cost, steers paths away
 SOFT_COST        = 8.0    # cost multiplier inside soft zone   (1.00 m … 1.50 m)
 PLAN_COST        = 3.0    # cost multiplier inside planning zone (1.50 m … 3.00 m)
 PAD_CELLS        = 5      # unknown-cell border added around the grid before planning
+# Corner-cutting passes over the thinned path. A* moves on 8 headings, so its
+# corners are 45 deg steps that reach the controller as a heading step; each
+# pass halves the turn taken at one. Two is where the remaining corner is under
+# the controller's lookahead, so more stops changing what it tracks.
+SMOOTH_PASSES    = 2
 
 
 def _disk(radius: int) -> np.ndarray:
@@ -138,7 +143,7 @@ def find_path(cg: CostGrid, robot_xy: np.ndarray, goal_xy: np.ndarray) -> list:
     cells = _astar(cg.cost_grid, (sr, sc), (gr, gc))
     if not cells:
         return []
-    return [to_world(r, c) for r, c in _thin(cells)]
+    return smooth_path([to_world(r, c) for r, c in _thin(cells)], cg)
 
 
 def _astar(cost_grid: np.ndarray, start: tuple, goal: tuple) -> list | None:
@@ -204,3 +209,55 @@ def _thin(cells: list, stride: int = 10) -> list:
     if kept[-1] != cells[-1]:
         kept.append(cells[-1])
     return kept
+
+
+def _segment_free(cg, a, b) -> bool:
+    """Whether the straight world-frame segment a->b clears the hard inflation.
+
+    Sampled at half a cell so no step can jump over a one-cell wall.
+    """
+    h, w = cg.hard_blocked.shape
+    length = math.hypot(b[0] - a[0], b[1] - a[1])
+    steps = max(2, int(length / (0.5 * cg.res)) + 1)
+    for i in range(steps + 1):
+        f = i / steps
+        wx, wy = a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1])
+        r, c = int((wy - cg.oy) / cg.res), int((wx - cg.ox) / cg.res)
+        if not (0 <= r < h and 0 <= c < w) or cg.hard_blocked[r, c]:
+            return False
+    return True
+
+
+def _chaikin(points: list) -> list:
+    """One corner-cutting pass: every interior corner becomes two quarter points.
+
+    Endpoints are kept — the first is the robot's own position and the last is
+    the goal, and moving either would plan to somewhere it was not asked to go.
+    """
+    if len(points) < 3:
+        return list(points)
+    out = [points[0]]
+    for a, b in zip(points, points[1:]):
+        out.append((a[0] + 0.25 * (b[0] - a[0]), a[1] + 0.25 * (b[1] - a[1])))
+        out.append((a[0] + 0.75 * (b[0] - a[0]), a[1] + 0.75 * (b[1] - a[1])))
+    out.append(points[-1])
+    return out
+
+
+def smooth_path(points: list, cg, passes: int = SMOOTH_PASSES) -> list:
+    """Round off the A* corners, keeping every segment clear of the hard zone.
+
+    Cutting a corner moves the path toward the inside of the turn, which is the
+    side an obstacle is usually on, so each pass is accepted only if the whole
+    result still clears. A rejected pass ends the smoothing rather than trying a
+    smaller cut: the previous pass is already collision-free and the corner it
+    leaves is what A* asked for.
+    """
+    result = list(points)
+    for _ in range(max(0, passes)):
+        candidate = _chaikin(result)
+        if not all(_segment_free(cg, a, b)
+                   for a, b in zip(candidate, candidate[1:])):
+            break
+        result = candidate
+    return result
