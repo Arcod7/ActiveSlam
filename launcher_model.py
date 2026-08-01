@@ -757,15 +757,16 @@ PARAMS = [
           step=0.1, lo=0.1,
           visible=lambda v: (_planner(v) and v["motion"] == "walllooking"
                              and not v["wall_yaw_only"])),
-    Param("wall_max_surface_dist", "Wall acquisition range (m)", "float", 8.0,
+    Param("wall_max_surface_dist", "Wall acquisition range (m)", "float", 0.0,
           "localisation.executor",
-          "Furthest a mapped surface can be and still be steered by. Nothing "
-          "within this radius means no wall is selected, and the no-wall "
-          "response only rotates — so a start pose further out than this from "
-          "the structure never acquires and the planner blacklists every goal "
-          "as BLOCKED:NO_WALL. Raise it when the vehicle starts far from the "
-          "scene. Live-tunable while running.",
-          step=0.5, lo=1.0, hi=40.0,
+          "Furthest a mapped surface can be and still be steered by. 0 means no "
+          "limit — the nearest mapped surface is always the one steered by, "
+          "which is the default. A positive value gates instead: nothing within "
+          "that radius selects no wall, the no-wall response only rotates, and "
+          "a start pose further out than it from the structure never acquires, "
+          "so the planner blacklists every goal as BLOCKED:NO_WALL. "
+          "Live-tunable while running.",
+          step=0.5, lo=0.0, hi=40.0,
           visible=lambda v: _planner(v) and v["motion"] == "walllooking"),
     Param("wall_switch_goal_distance", "Wall-switch goal dist (m)", "float", 6.0,
           "localisation.executor",

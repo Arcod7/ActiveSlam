@@ -293,8 +293,8 @@ def generate_launch_description():
         description='Wall-follow target standoff in metres.',
     )
     wall_max_surface_dist_arg = DeclareLaunchArgument(
-        'wall_max_surface_dist', default_value='8.0',
-        description='Furthest a mapped surface can be and still be steered by, in metres.',
+        'wall_max_surface_dist', default_value='0.0',
+        description='Furthest a mapped surface can be and still be steered by, in metres (0 = no limit).',
     )
     wall_switch_goal_distance_arg = DeclareLaunchArgument(
         'wall_switch_goal_distance', default_value='6.0',
