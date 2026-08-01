@@ -38,9 +38,11 @@ Optional arguments:
               TSDF-only horizontal distance to hold from a frontier surface,
               measured along its outward normal. Default: 1.0 m.
   projected_map_band_m
-              Display only: the Z half-range one /projected_map cell collapses,
-              drawn on /frontier_slam/frontier_debug. Match the mapper in use.
-              Default: 3.0 (the TSDF mapper's own band).
+              The Z half-range one /projected_map cell collapses. Drawn on
+              /frontier_slam/frontier_debug, and the depth slice wall_oriented
+              picks its wall from — only that slice can block a route or reach
+              the hull. Match the mapper in use. Default: 3.0 (the TSDF
+              mapper's own band).
   scenario    Scripted evaluation scenario: none, drift_return, or trajectory.
               Default: none.
   scenario_out_dx/scenario_out_dy
@@ -84,6 +86,7 @@ import os
 from typing import List
 
 from ament_index_python.packages import get_package_share_directory
+from frontier_slam.mission_params import GOAL_RADIUS_M
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition, LaunchConfigurationEquals
@@ -403,12 +406,14 @@ def generate_launch_description():
                     'so the sweep puts more sonar frames on the structure it went back '
                     'to re-observe. 1.0 = off (default; untested in a full run).',
     )
-    wall_z_band_arg = DeclareLaunchArgument(
-        'wall_z_band_m', default_value='1.5',
-        description='Half-thickness (m) of the depth slice wall_oriented uses to pick '
-                    'which side to look at. Depth is directly observed, so geometry '
-                    'further above or below than this cannot be collided with and '
-                    'should not steer the look direction.',
+    goal_radius_arg = DeclareLaunchArgument(
+        'goal_radius_m', default_value=str(GOAL_RADIUS_M),
+        description='How close (m) counts as reaching a goal. One value for the '
+                    'whole stack: the motion executor stops driving here, and the '
+                    'planner validates arrival and moves on at the same radius. '
+                    'Splitting the two deadlocks them — the executor parks outside '
+                    'a radius the planner will not accept, and only the stuck '
+                    'timer frees it.',
     )
     min_goal_separation_arg = DeclareLaunchArgument(
         'min_goal_separation_m', default_value='0.0',
@@ -442,7 +447,6 @@ def generate_launch_description():
         min_goal_separation_arg,
         arrival_blacklist_duration_arg,
         blacklist_duration_arg,
-        wall_z_band_arg,
         revisit_scan_slowdown_arg,
         revisit_min_closures_arg,
         revisit_schedule_every_m_arg,
@@ -479,6 +483,7 @@ def generate_launch_description():
         wall_points_topic_arg,
         wall_standoff_arg,
         wall_max_surface_dist_arg,
+        goal_radius_arg,
         wall_switch_goal_distance_arg,
         wall_switch_scan_angle_arg,
         wall_switch_scan_yaw_arg,
@@ -556,6 +561,7 @@ def generate_launch_description():
                 'survey_center_x': _float_parameter('survey_center_x'),
                 'survey_center_y': _float_parameter('survey_center_y'),
                 'min_goal_separation_m': _float_parameter('min_goal_separation_m'),
+                'goal_radius_m': _float_parameter('goal_radius_m'),
                 'arrival_blacklist_duration_s': _float_parameter(
                     'arrival_blacklist_duration_s'),
                 'blacklist_duration_s': _float_parameter('blacklist_duration_s'),
@@ -572,6 +578,7 @@ def generate_launch_description():
                 'scan_style': LaunchConfiguration('scan_style'),
                 'scan_sweep_deg': _float_parameter('scan_sweep_deg'),
                 'revisit_scan_slowdown': _float_parameter('revisit_scan_slowdown'),
+                'goal_radius_m': _float_parameter('goal_radius_m'),
                 'speed_factor': _float_parameter('speed_factor'),
                 'turn_factor': _float_parameter('turn_factor'),
             }],
@@ -586,11 +593,14 @@ def generate_launch_description():
                 'depth_setpoint': _float_parameter('depth'),
                 'odom_topic': odom_topic,
                 'look_offset_deg': _float_parameter('wall_orientation_offset_deg'),
-                'wall_z_band_m': _float_parameter('wall_z_band_m'),
+                # The wall is picked from the planner's own depth slice; pass
+                # the mapper's value so the two cannot disagree.
+                'projected_map_band_m': _float_parameter('projected_map_band_m'),
                 # Was never wired: the node kept its 8 m default while the
                 # launcher's value only reached wall_looking, so a wall past 8 m
                 # selected no side and the viewing offset silently became 0.
                 'max_wall_distance_m': _float_parameter('wall_max_surface_dist'),
+                'goal_radius_m': _float_parameter('goal_radius_m'),
                 'revisit_scan_slowdown': _float_parameter('revisit_scan_slowdown'),
                 'lookahead_m': _float_parameter('wall_orientation_lookahead_m'),
                 'map_points_topic': LaunchConfiguration('wall_points_topic'),
@@ -609,7 +619,10 @@ def generate_launch_description():
                 'depth_setpoint': _float_parameter('depth'),
                 'odom_topic': odom_topic,
                 'standoff_m': _float_parameter('wall_standoff'),
+                'goal_radius_m': _float_parameter('goal_radius_m'),
                 'max_surface_dist_m': _float_parameter('wall_max_surface_dist'),
+                # Same planner slice wall_oriented picks from.
+                'projected_map_band_m': _float_parameter('projected_map_band_m'),
                 'switch_goal_distance_m': _float_parameter('wall_switch_goal_distance'),
                 'switch_scan_angle_rad': _float_parameter('wall_switch_scan_angle'),
                 'switch_scan_yaw': _float_parameter('wall_switch_scan_yaw'),

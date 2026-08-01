@@ -28,6 +28,11 @@ unit-testable): EXPLORING -> REVISITING -> COOLDOWN -> EXPLORING.
     while revisiting and publishes the revisit goal directly onto
     /frontier_slam/goal; waypoint_controller's own >1m goal-change hysteresis
     preempts cleanly.
+  - If arrival_dwell_s passes at the target with U_r never coming back down
+    (ARRIVED_STERILE), the candidate cluster is treated as drifted rather
+    than just unlucky: the node redirects once to the mission's spawn pose
+    before giving up, since spawn cannot share a drift the graph accumulated
+    after it.
 
 Explicitly out of scope for v1 (see docs/ROADMAP.md Week 3 — future work):
 FPFH/saliency-based candidate scoring, and mirror-graph virtual-factor
@@ -58,6 +63,7 @@ _LOG_DIR = os.path.join(
 CSV_COLUMNS = [
     't_ros', 'state', 'dopt', 'u_ratio', 'sigma_xy', 'sigma_yaw', 'cause',
     'lc_count', 'n_kf', 'tgt_x', 'tgt_y', 'dist_m', 'revisit_count', 'event',
+    'target_is_spawn',
 ]
 
 # Which axis pushed U_r over the trigger. Published verbatim on
@@ -236,6 +242,11 @@ class RevisitStateMachine:
         self.state = RevisitState.EXPLORING
         self.revisit_count = 0
         self.target_idx = None
+        # First robot pose seen this mission — the one point in the graph
+        # guaranteed not to be part of whichever keyframe cluster just proved
+        # sterile. Set once via set_spawn(); None until the node has odometry.
+        self.spawn_xyz = None
+        self.target_is_spawn = False
         # Latched at TRIGGER: the reason it fired, not whichever axis happens
         # to dominate later once the detour has already changed the marginal.
         self.cause = None
@@ -262,12 +273,30 @@ class RevisitStateMachine:
     def ratio(self, dopt) -> "float | None":
         return uncertainty_ratio(dopt, self.dopt_allow())
 
+    def set_spawn(self, xyz) -> None:
+        """Latch the mission's starting pose. Called once, from the first
+        odometry reading — later calls are no-ops so a mid-mission restart of
+        the odometry stream can never move the anchor."""
+        if self.spawn_xyz is None:
+            self.spawn_xyz = np.asarray(xyz, dtype=float)
+
+    def current_target_xyz(self, kf_xyz) -> "np.ndarray | None":
+        """Where the vehicle is currently being sent: the spawn pose during a
+        spawn redirect, otherwise the selected keyframe, or None between
+        revisits or before the target keyframe has a pose yet."""
+        if self.target_is_spawn:
+            return self.spawn_xyz
+        if self.target_idx is not None and self.target_idx < len(kf_xyz):
+            return np.asarray(kf_xyz)[self.target_idx]
+        return None
+
     def tick(self, now: float, dopt, lc_count: int,
              kf_xyz: np.ndarray, robot_xy: np.ndarray,
              sigma_xy=None, sigma_yaw=None) -> "str | None":
         """Advance one tick. Returns an event string ('TRIGGER', 'CLOSED',
         'RESUMED_DOPT', 'TIMEOUT', 'ARRIVED_SATURATED', 'ARRIVED_STERILE',
-        'COOLDOWN_DONE') or None if nothing changed this tick.
+        'SPAWN_REDIRECT', 'COOLDOWN_DONE') or None if nothing changed this
+        tick.
 
         The sigmas only label a trigger with its cause; without them the
         machine behaves exactly as before and the cause stays None.
@@ -312,6 +341,7 @@ class RevisitStateMachine:
         self.state = RevisitState.REVISITING
         self.revisit_count += 1
         self.target_idx = target
+        self.target_is_spawn = False
         self.cause = revisit_cause(sigma_xy, sigma_yaw, cfg.sigma_allow_xy_m,
                                    cfg.sigma_allow_yaw_rad)
         self._lc_at_start = lc_count
@@ -367,10 +397,11 @@ class RevisitStateMachine:
                 and now - self._graph_changed_at > self.cfg.stall_exit_s)
 
     def _track_arrival(self, now, kf_xyz, robot_xy, arrival_radius_m) -> None:
-        if self.target_idx is None or self.target_idx >= len(kf_xyz):
+        target_xyz = self.current_target_xyz(kf_xyz)
+        if target_xyz is None:
             return
         dist = float(np.linalg.norm(
-            np.asarray(kf_xyz)[self.target_idx][:2] - np.asarray(robot_xy)[:2]))
+            np.asarray(target_xyz)[:2] - np.asarray(robot_xy)[:2]))
         if dist >= arrival_radius_m:
             self._arrived_since = None
             self._graph_state = None
@@ -379,12 +410,30 @@ class RevisitStateMachine:
             self._arrived_since = now
 
     def _end_revisit(self, now, event):
+        # A sterile dwell means the candidate cluster itself is drifted, not
+        # just distant: the spawn pose is the one anchor in the graph that
+        # cannot share that drift, so it gets one shot before the mission
+        # gives up and returns to exploring. Only one shot — the redirected
+        # leg's own sterile exit falls through below, so this cannot loop.
+        if (event == 'ARRIVED_STERILE' and not self.target_is_spawn
+                and self.spawn_xyz is not None):
+            return self._redirect_to_spawn(now)
         self.state = RevisitState.COOLDOWN
         self._last_revisit_end = now
         self._travelled_m = 0.0
         self.target_idx = None
+        self.target_is_spawn = False
         self.cause = None
         return event
+
+    def _redirect_to_spawn(self, now):
+        self.target_idx = None
+        self.target_is_spawn = True
+        self._t_start = now
+        self._arrived_since = None
+        self._graph_state = None
+        self._graph_changed_at = None
+        return 'SPAWN_REDIRECT'
 
     def _tick_cooldown(self, now):
         if now - self._last_revisit_end >= self.cfg.cooldown_s:
@@ -489,6 +538,8 @@ class RevisitPlanner(Node):
         # that merely ran out of budget.
         self._exit_pub = self.create_publisher(String, '/frontier_slam/revisit_exit', 10)
         self._ratio_pub = self.create_publisher(Float64, '/frontier_slam/uncertainty_ratio', 10)
+        self._target_spawn_pub = self.create_publisher(
+            Bool, '/frontier_slam/revisit_target_is_spawn', 10)
 
         self.create_timer(1.0 / self.TICK_HZ, self._tick)
         self.get_logger().info(
@@ -515,6 +566,7 @@ class RevisitPlanner(Node):
     def _odom_cb(self, msg: Odometry) -> None:
         p = msg.pose.pose.position
         self._robot_xy = np.array([p.x, p.y])
+        self._sm.set_spawn(np.array([p.x, p.y, p.z]))
 
     def _path_cb(self, msg: Path) -> None:
         if not msg.poses:
@@ -560,12 +612,13 @@ class RevisitPlanner(Node):
         self._state_pub.publish(String(data=self._sm.state.value))
         self._cause_pub.publish(String(data=self._sm.cause or ''))
         self._count_pub.publish(Int32(data=self._sm.revisit_count))
+        self._target_spawn_pub.publish(Bool(data=self._sm.target_is_spawn))
 
         tgt_x = tgt_y = dist_m = float('nan')
-        if suspended and self._sm.target_idx is not None and self._sm.target_idx < len(self._kf_xyz):
-            tgt = self._kf_xyz[self._sm.target_idx]
+        tgt = self._sm.current_target_xyz(self._kf_xyz) if suspended else None
+        if tgt is not None:
             tgt_x, tgt_y = float(tgt[0]), float(tgt[1])
-            dist_m = float(np.linalg.norm(tgt[:2] - self._robot_xy))
+            dist_m = float(np.linalg.norm(np.asarray(tgt)[:2] - self._robot_xy))
             if (self._last_goal_pub_time is None
                     or now - self._last_goal_pub_time >= self.GOAL_REPUBLISH_S):
                 self._publish_goal(tgt)
@@ -593,6 +646,7 @@ class RevisitPlanner(Node):
             self._sm.cause or '',
             self._lc_count, len(self._kf_xyz),
             tgt_x, tgt_y, dist_m, self._sm.revisit_count, event or '',
+            int(self._sm.target_is_spawn),
         ])
 
     def _publish_goal(self, tgt_xyz: np.ndarray) -> None:

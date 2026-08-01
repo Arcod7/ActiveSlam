@@ -93,14 +93,15 @@ _CLOUD = np.array([
     [0.5,  0.0, 0.0],   # inside the deadband — no usable side
     [1.0, -1.0, 9.0],   # left but far outside the depth band
 ])
+_BAND = (-1.5, 1.5)
 
 
 def _nearest(side, **kwargs):
-    return nearest_wall_point(_CLOUD, _POSE, 0.0, 1.5, 20.0, side, **kwargs)
+    return nearest_wall_point(_CLOUD, _POSE, 0.0, _BAND, 20.0, side, **kwargs)
 
 
 def test_the_marked_point_is_the_one_the_steered_distance_came_from():
-    left, right = wall_side_distances(_CLOUD, _POSE, 0.0, 1.5, 20.0)
+    left, right = wall_side_distances(_CLOUD, _POSE, 0.0, _BAND, 20.0)
 
     assert np.allclose(_nearest(-1), [1.0, -3.0, 0.0])
     assert np.hypot(*_nearest(-1)[:2]) == left
@@ -110,6 +111,14 @@ def test_the_marked_point_is_the_one_the_steered_distance_came_from():
 def test_the_depth_band_excludes_the_same_points_for_both():
     # The 9 m-deep left point is nearer in XY than the one that is picked.
     assert _nearest(-1)[2] == 0.0
+
+
+def test_an_empty_band_marks_the_nearest_voxel_instead_of_nothing():
+    """The marker must still point somewhere when the planning slice is bare."""
+    off_band = _CLOUD[4:]   # the single 9 m-deep left point
+
+    marked = nearest_wall_point(off_band, _POSE, 0.0, _BAND, 20.0, -1)
+    assert np.allclose(marked, [1.0, -1.0, 9.0])
 
 
 def test_centreline_points_give_no_side_and_are_never_marked():
@@ -124,12 +133,12 @@ def test_holding_no_side_marks_nothing():
 def test_an_empty_side_marks_nothing():
     only_left = _CLOUD[:2]
 
-    assert nearest_wall_point(only_left, _POSE, 0.0, 1.5, 20.0, 1) is None
+    assert nearest_wall_point(only_left, _POSE, 0.0, _BAND, 20.0, 1) is None
 
 
 def test_out_of_range_walls_mark_nothing():
-    assert nearest_wall_point(_CLOUD, _POSE, 0.0, 1.5, 1.0, -1) is None
+    assert nearest_wall_point(_CLOUD, _POSE, 0.0, _BAND, 1.0, -1) is None
 
 
 def test_no_cloud_marks_nothing():
-    assert nearest_wall_point(None, _POSE, 0.0, 1.5, 20.0, -1) is None
+    assert nearest_wall_point(None, _POSE, 0.0, _BAND, 20.0, -1) is None

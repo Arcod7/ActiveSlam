@@ -9,6 +9,7 @@ to preempt a currently committed one.
 """
 from dataclasses import dataclass
 
+from frontier_slam.mission_params import GOAL_RADIUS_M
 import numpy as np
 
 
@@ -28,7 +29,7 @@ class GoalManager:
     def __init__(self, *,
                  min_explore_dist: float = 3.0,
                  goal_vanish_dist: float = 3.0,
-                 goal_radius: float = 2.0,
+                 goal_radius: float = GOAL_RADIUS_M,
                  stuck_timeout: float = 30.0,
                  stuck_min_progress: float = 0.5,
                  blacklist_duration: float = 60.0,
@@ -192,6 +193,29 @@ class GoalManager:
             self._commit(best.wx, best.wy, robot_xy, now)
             return best.wx, best.wy
 
+        # Arrival is tested before the cluster is looked at. A frontier does not
+        # stop existing because the vehicle reached it, and the executor parks at
+        # this same radius, so requiring the cluster to vanish first deadlocked
+        # the pair — the goal was only ever released by the stuck timer.
+        cur_dist = np.hypot(robot_xy[0] - self._committed[0],
+                            robot_xy[1] - self._committed[1])
+        if cur_dist <= self.goal_radius:
+            # Blacklist briefly so the robot doesn't immediately re-pick it.
+            self._blacklist.append((self._committed[0], self._committed[1],
+                                    now + self.arrival_blacklist_duration))
+            # select() filtered the blacklist before this arrival was known, so
+            # the cluster just retired is still the best-scoring candidate --
+            # it is the closest one, the vehicle is parked in it.
+            remaining = [c for c in candidates
+                         if not self.is_blacklisted(c.wx, c.wy)]
+            if not remaining:
+                self._last_goal = self._committed.copy()
+                self._committed = None
+                return float(robot_xy[0]), float(robot_xy[1])
+            nxt = self._fresh_pick(remaining)
+            self._commit(nxt.wx, nxt.wy, robot_xy, now)
+            return nxt.wx, nxt.wy
+
         # Track map-drift of the committed cluster.
         near_old = [c for c in candidates
                     if np.hypot(c.wx - self._committed[0], c.wy - self._committed[1])
@@ -202,18 +226,8 @@ class GoalManager:
             self._committed = np.array([drift.wx, drift.wy])
             return drift.wx, drift.wy
 
-        # Cluster vanished — check whether the robot has arrived.
-        cur_dist = np.hypot(robot_xy[0] - self._committed[0],
-                            robot_xy[1] - self._committed[1])
-        if cur_dist <= self.goal_radius:
-            # Arrived. Blacklist briefly so the robot doesn't immediately re-pick it.
-            self._blacklist.append((self._committed[0], self._committed[1],
-                                    now + self.arrival_blacklist_duration))
-            self._commit(best.wx, best.wy, robot_xy, now)
-            return best.wx, best.wy
-
-        # Cluster gone but robot hasn't arrived yet — keep heading to the last
-        # known position.  STUCK will fire if progress stalls.
+        # Cluster gone and still short of it — keep heading to the last known
+        # position.  STUCK will fire if progress stalls.
         return float(self._committed[0]), float(self._committed[1])
 
     def mark_unreachable(self, goal_xy: np.ndarray, now: float) -> None:

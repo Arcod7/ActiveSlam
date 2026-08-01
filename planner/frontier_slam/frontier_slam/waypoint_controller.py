@@ -39,6 +39,7 @@ from std_msgs.msg import String
 
 from frontier_slam.control_utils import (
     depth_hold_effort, LowPassRate, SlewLimiter, wrap_angle, yaw_from_quat)
+from frontier_slam.mission_params import GOAL_RADIUS_M
 from frontier_slam.scan_sweep import SweepScan, scan_yaw_command
 from frontier_slam.session_log import open_session_log
 
@@ -72,7 +73,6 @@ class WaypointController(Node):
     ODOM_STALE_S          = 1.0    # s — past this the pose is too old to steer on
 
     MAX_SURGE             = 0.25
-    GOAL_RADIUS           = 2.0    # m
     GOAL_REACHED_TIMEOUT  = 10.0   # s — clear stale goal after this long at goal
     SCAN_YAW              = 0.026  # rad/s cmd — slow, for sonar frame overlap at 5 Hz
     INIT_SCAN_DURATION    = 10.0    # s — initial spin before navigating (~1 rotation)
@@ -95,6 +95,10 @@ class WaypointController(Node):
 
     def __init__(self):
         super().__init__('waypoint_controller')
+
+        self.declare_parameter('goal_radius_m', GOAL_RADIUS_M)
+        self._goal_radius = max(0.1, float(
+            self.get_parameter('goal_radius_m').value))
 
         self.declare_parameter('depth_setpoint', -1.0)
         v = float(self.get_parameter('depth_setpoint').value)
@@ -330,7 +334,7 @@ class WaypointController(Node):
         dist_xy = float(np.hypot(self._goal[0] - self._pose[0],
                                  self._goal[1] - self._pose[1]))
 
-        if dist_xy < self.GOAL_RADIUS:
+        if dist_xy < self._goal_radius:
             if self._goal_reached_at is None:
                 self._goal_reached_at = now
             elif now - self._goal_reached_at > self.GOAL_REACHED_TIMEOUT:

@@ -7,6 +7,12 @@ the ordinary waypoint controller while yawing ``look_offset_deg`` to the left
 or right of the route bearing.  The nearest occupied/surface point in the map
 chooses the sign of that offset.
 
+That point is taken from the planner's own depth band — projected_map_band_m
+around the cruise depth, the slice /projected_map collapses: only geometry in
+it can block a route or reach the hull.  When the band holds nothing in range
+the nearest voxel at any depth is used instead — a gap in the slice is not
+evidence that there is no wall.
+
 The BlueROV2 is holonomic in the horizontal plane.  Route velocity is therefore
 projected onto body surge and sway, allowing the vehicle to keep travelling
 along the planned path while its camera looks slightly toward the wall.
@@ -45,6 +51,7 @@ from frontier_slam.heading_markers import (
     heading_markers,
     TOPIC as HEADING_MARKER_TOPIC,
 )
+from frontier_slam.mission_params import GOAL_RADIUS_M
 from frontier_slam.session_log import open_session_log
 from frontier_slam.wall_markers import selected_wall_markers, TOPIC as WALL_MARKER_TOPIC
 from geometry_msgs.msg import PointStamped, Twist, Vector3Stamped
@@ -102,7 +109,7 @@ def _side_geometry(
     points: np.ndarray,
     pose: np.ndarray,
     route_heading: float,
-    z_band_m: float,
+    z_band: 'tuple[float, float]',
     max_distance_m: float,
     lateral_deadband_m: float,
 ):
@@ -118,25 +125,34 @@ def _side_geometry(
     pts = np.asarray(points, dtype=np.float64)
     p = np.asarray(pose, dtype=np.float64)
 
-    # Gate before the vector maths; non-finite points fail both gates anyway.
-    near = np.abs(pts[:, 2] - p[2]) <= z_band_m
-    if not np.any(near):
+    # The depth gate falls back to the whole cloud, so non-finite points can no
+    # longer be left for it to drop: a NaN Z survives the fallback and poisons
+    # the min that picks the wall.
+    pts = pts[np.isfinite(pts).all(axis=1)]
+    if len(pts) == 0:
         return None
-    pts = pts[near]
-    dx = pts[:, 0] - p[0]
-    dy = pts[:, 1] - p[1]
-    distance = np.hypot(dx, dy)
+
+    # Range before depth, so the fallback stays inside what is reachable.
     # A non-positive or non-finite cap means no range gate: the nearest wall is
     # whatever is nearest. A finite cap makes the vehicle lose the wall outright
     # once it drifts past it — reported as wall=none, which drops the viewing
     # offset entirely — rather than merely track a more distant one.
     if math.isfinite(max_distance_m) and max_distance_m > 0.0:
-        in_range = distance <= max_distance_m
+        in_range = np.hypot(pts[:, 0] - p[0], pts[:, 1] - p[1]) <= max_distance_m
         if not np.any(in_range):
             return None
-        pts, dx, dy, distance = (
-            pts[in_range], dx[in_range], dy[in_range], distance[in_range])
+        pts = pts[in_range]
 
+    # Empty band = no collidable geometry in range, not "no wall": steering on
+    # the nearest voxel anywhere beats dropping the viewing offset to zero.
+    z_lo, z_hi = z_band
+    in_band = (pts[:, 2] >= z_lo) & (pts[:, 2] <= z_hi)
+    if np.any(in_band):
+        pts = pts[in_band]
+
+    dx = pts[:, 0] - p[0]
+    dy = pts[:, 1] - p[1]
+    distance = np.hypot(dx, dy)
     # Starboard unit vector for a route bearing in world NED. Elementwise, not a
     # matmul: a two-column gemv dispatches to threaded BLAS, and at control rate
     # the worker spin-wait costs far more than the arithmetic.
@@ -148,13 +164,13 @@ def wall_side_distances(
     points: np.ndarray,
     pose: np.ndarray,
     route_heading: float,
-    z_band_m: float,
+    z_band: 'tuple[float, float]',
     max_distance_m: float,
     lateral_deadband_m: float = 0.1,
 ) -> tuple[float, float]:
     """Return nearest (left, right) planar wall distances relative to the route."""
     geometry = _side_geometry(
-        points, pose, route_heading, z_band_m, max_distance_m, lateral_deadband_m
+        points, pose, route_heading, z_band, max_distance_m, lateral_deadband_m
     )
     if geometry is None:
         return float("inf"), float("inf")
@@ -175,7 +191,7 @@ def nearest_wall_point(
     points: np.ndarray,
     pose: np.ndarray,
     route_heading: float,
-    z_band_m: float,
+    z_band: 'tuple[float, float]',
     max_distance_m: float,
     side: int,
     lateral_deadband_m: float = 0.1,
@@ -189,7 +205,7 @@ def nearest_wall_point(
     if side == 0:
         return None
     geometry = _side_geometry(
-        points, pose, route_heading, z_band_m, max_distance_m, lateral_deadband_m
+        points, pose, route_heading, z_band, max_distance_m, lateral_deadband_m
     )
     if geometry is None:
         return None
@@ -390,14 +406,14 @@ class WallOrientedController(Node):
     GYRO_STALE_S = 0.5  # past this the cascade has no damping term — see _loop
 
     MAX_SPEED = 0.35
-    GOAL_RADIUS = 4.0
-    # Translation tapers between here and GOAL_RADIUS. KP_SPEED alone
-    # does not brake: it only bites below MAX_SPEED/KP_SPEED = 1.4 m, which is
-    # inside the arrival radius, so the vehicle used to reach the goal at full
-    # speed and have its thrust cut in a single tick -- it then coasted through.
-    ARRIVAL_BRAKE_M = 5.0
+    # Translation tapers across this span outside the arrival radius. KP_SPEED
+    # alone does not brake: it only bites below MAX_SPEED/KP_SPEED = 1.4 m,
+    # which is inside the arrival radius, so the vehicle used to reach the goal
+    # at full speed and have its thrust cut in a single tick -- it then coasted
+    # through.
+    ARRIVAL_BRAKE_SPAN_M = 1.0
     # Floor of the ramp. Tapering all the way to zero is an asymptote: thrust
-    # vanishes just outside GOAL_RADIUS and the vehicle stalls there without
+    # vanishes just outside the arrival radius and the vehicle stalls there without
     # ever registering arrival. A slowdown must still cross the radius.
     ARRIVAL_MIN_SCALE = 0.3
     # Misalignment slows travel, it must not stop it: cos() clamped at zero
@@ -452,7 +468,10 @@ class WallOrientedController(Node):
         self.declare_parameter("lookahead_m", 0.0)
         self.declare_parameter("map_points_topic", "/octomap_point_cloud_centers")
         self.declare_parameter("max_wall_distance_m", 0.0)  # 0 = no range gate
-        self.declare_parameter("wall_z_band_m", 1.5)
+        self.declare_parameter("goal_radius_m", GOAL_RADIUS_M)
+        # The mapper's own planning band: the wall is picked from the slice the
+        # planner routes on, so the two cannot disagree.
+        self.declare_parameter("projected_map_band_m", 1.0)
         self.declare_parameter("side_switch_margin_m", 0.3)
         # Scan this many times slower while a revisit is in progress: the
         # vehicle went back to re-observe known structure, so a slower sweep
@@ -482,7 +501,10 @@ class WallOrientedController(Node):
         )
         self._lookahead_m = max(0.0, float(self.get_parameter("lookahead_m").value))
         self._max_wall_distance = float(self.get_parameter("max_wall_distance_m").value)
-        self._wall_z_band = float(self.get_parameter("wall_z_band_m").value)
+        self._goal_radius = max(0.1, float(
+            self.get_parameter("goal_radius_m").value))
+        self._plan_band = abs(float(
+            self.get_parameter("projected_map_band_m").value))
         self._side_switch_margin = float(
             self.get_parameter("side_switch_margin_m").value
         )
@@ -789,6 +811,18 @@ class WallOrientedController(Node):
             self._side_candidate = side
             self._side_candidate_t = now
 
+    def _z_band(self) -> 'tuple[float, float]':
+        """The planner's depth slice, as (z_lo, z_hi).
+
+        depth_setpoint is the cruise depth the mapper centres /projected_map on
+        (target_depth_m), so this is the same slice frontier detection and A*
+        see. It falls back to the live depth only under auto-depth, where the
+        mapper locks its own centre the same way.
+        """
+        centre = (self._depth_setpoint if self._depth_setpoint is not None
+                  else float(self._pose[2]))
+        return centre - self._plan_band, centre + self._plan_band
+
     def _select_wall_side(self, route_heading: float, now: float) -> None:
         self._resign_side_from_memory(route_heading, now)
         if (
@@ -805,12 +839,14 @@ class WallOrientedController(Node):
             return
         # Re-read live: the launcher pushes this with `ros2 param set` while
         # running, and a value cached at startup would ignore it silently.
-        self._wall_z_band = float(self.get_parameter("wall_z_band_m").value)
+        self._plan_band = abs(float(
+            self.get_parameter("projected_map_band_m").value))
+        z_band = self._z_band()
         left, right = wall_side_distances(
             self._map_points,
             self._pose,
             route_heading,
-            self._wall_z_band,
+            z_band,
             self._max_wall_distance,
         )
         candidate = choose_wall_side(
@@ -862,7 +898,7 @@ class WallOrientedController(Node):
         # Drawn from the side actually held, not the fresh candidate: during the
         # switch dwell the marker must show what is steering the vehicle now.
         wall_point = nearest_wall_point(
-            self._map_points, self._pose, route_heading, self._wall_z_band,
+            self._map_points, self._pose, route_heading, z_band,
             self._max_wall_distance, self._wall_side)
         if wall_point is not None:
             self._wall_memory = np.asarray(wall_point, dtype=np.float64).copy()
@@ -876,10 +912,10 @@ class WallOrientedController(Node):
 
     def _arrival_brake(self, goal_dist: float) -> float:
         """Translation scale: 1.0 beyond the ramp, ARRIVAL_MIN_SCALE at the radius."""
-        span = self.ARRIVAL_BRAKE_M - self.GOAL_RADIUS
+        span = self.ARRIVAL_BRAKE_SPAN_M
         if span <= 0.0:
             return 1.0
-        return float(np.clip((goal_dist - self.GOAL_RADIUS) / span,
+        return float(np.clip((goal_dist - self._goal_radius) / span,
                              self.ARRIVAL_MIN_SCALE, 1.0))
 
     def _gyro_stale(self, now: float) -> bool:
@@ -1053,7 +1089,7 @@ class WallOrientedController(Node):
 
         goal_dist = float(np.hypot(*(self._goal[:2] - self._pose[:2])))
         patrol_target = None
-        if goal_dist < self.GOAL_RADIUS:
+        if goal_dist < self._goal_radius:
             if self._revisiting:
                 # Walk the wall instead of holding station. Falls through to the
                 # normal drive below rather than commanding thrust here, so the
@@ -1120,7 +1156,7 @@ class WallOrientedController(Node):
         ) = self._drive(target_xy, now, look_at_wall=patrol_target is not None)
         event = "REVISIT_PATROL" if patrol_target is not None else ""
         if patrol_target is None:
-            # Not while patrolling: the beat runs inside GOAL_RADIUS, where the
+            # Not while patrolling: the beat runs inside the arrival radius, where the
             # ramp is zero, and would brake the vehicle to a standstill.
             brake = self._arrival_brake(goal_dist)
             surge *= brake

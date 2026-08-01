@@ -3,6 +3,7 @@ import math
 from types import SimpleNamespace
 
 from frontier_slam.control_utils import HeadingReference
+from frontier_slam.mission_params import GOAL_RADIUS_M
 from frontier_slam.wall_oriented_controller import (
     choose_wall_side,
     lookahead_path_heading,
@@ -38,7 +39,7 @@ def test_nearest_wall_side_is_measured_relative_to_route():
         [0.0, 1.0, 5.0],   # right at 1 m
         [0.0, 0.5, 9.0],   # closer in XY, but outside the depth band
     ])
-    left, right = wall_side_distances(points, pose, 0.0, 1.5, 8.0)
+    left, right = wall_side_distances(points, pose, 0.0, (3.5, 6.5), 8.0)
     assert left == pytest.approx(2.0)
     assert right == pytest.approx(1.0)
     assert choose_wall_side(left, right) == 1
@@ -49,7 +50,39 @@ def test_side_classification_rotates_with_route_heading():
     # When travelling East (+Y), South/-X is starboard/right.
     points = np.array([[-1.0, 0.0, 0.0]])
     left, right = wall_side_distances(
-        points, pose, math.pi / 2.0, 1.0, 8.0)
+        points, pose, math.pi / 2.0, (-1.0, 1.0), 8.0)
+    assert math.isinf(left)
+    assert right == pytest.approx(1.0)
+
+
+def test_an_empty_band_falls_back_to_the_nearest_voxel_at_any_depth():
+    """A gap in the planning slice is not evidence that there is no wall."""
+    pose = np.array([0.0, 0.0, 5.0])
+    points = np.array([
+        [0.0, -2.0, 20.0],  # left, far below the band
+        [0.0, 1.0, 20.0],   # right, nearer in XY
+    ])
+    left, right = wall_side_distances(points, pose, 0.0, (3.5, 6.5), 8.0)
+    assert left == pytest.approx(2.0)
+    assert right == pytest.approx(1.0)
+
+
+def test_the_fallback_stays_inside_the_range_gate():
+    """Out of range is a real absence; only the depth gate is soft."""
+    pose = np.array([0.0, 0.0, 5.0])
+    points = np.array([[0.0, 20.0, 20.0]])
+    left, right = wall_side_distances(points, pose, 0.0, (3.5, 6.5), 8.0)
+    assert math.isinf(left) and math.isinf(right)
+
+
+def test_a_non_finite_point_cannot_win_the_fallback():
+    """It used to be dropped by the depth gate; the fallback would keep it."""
+    pose = np.array([0.0, 0.0, 5.0])
+    points = np.array([
+        [float('nan'), float('nan'), float('nan')],
+        [0.0, 1.0, 20.0],
+    ])
+    left, right = wall_side_distances(points, pose, 0.0, (3.5, 6.5), 8.0)
     assert math.isinf(left)
     assert right == pytest.approx(1.0)
 
@@ -209,28 +242,38 @@ def test_a_new_goal_keeps_the_current_path():
     assert controller._goal_reached_at is None
 
 
-def _brake(goal_dist):
-    controller = object.__new__(WallOrientedController)
+def _brake(goal_dist, radius=GOAL_RADIUS_M):
+    controller = _bare_controller(_goal_radius=radius)
     return controller._arrival_brake(goal_dist)
 
 
 def test_approach_runs_at_full_speed_beyond_the_brake_ramp():
-    assert _brake(WallOrientedController.ARRIVAL_BRAKE_M + 5.0) == pytest.approx(1.0)
+    assert _brake(GOAL_RADIUS_M
+                  + WallOrientedController.ARRIVAL_BRAKE_SPAN_M
+                  + 5.0) == pytest.approx(1.0)
 
 
 def test_approach_speed_slows_to_the_floor_but_never_stops():
     """Braking to zero at the radius is an asymptote: the vehicle stalled just
-    outside GOAL_RADIUS and never registered arrival."""
+    outside the arrival radius and never registered arrival."""
     floor = WallOrientedController.ARRIVAL_MIN_SCALE
     assert floor > 0.0
-    assert _brake(WallOrientedController.GOAL_RADIUS) == pytest.approx(floor)
-    assert _brake(WallOrientedController.GOAL_RADIUS - 1.0) == pytest.approx(floor)
+    assert _brake(GOAL_RADIUS_M) == pytest.approx(floor)
+    assert _brake(GOAL_RADIUS_M - 1.0) == pytest.approx(floor)
 
 
 def test_approach_speed_tapers_linearly_across_the_ramp():
-    mid = 0.5 * (WallOrientedController.ARRIVAL_BRAKE_M
-                 + WallOrientedController.GOAL_RADIUS)
+    mid = GOAL_RADIUS_M + 0.5 * WallOrientedController.ARRIVAL_BRAKE_SPAN_M
     assert _brake(mid) == pytest.approx(0.5)
+
+
+def test_the_brake_ramp_follows_a_retuned_arrival_radius():
+    """The ramp is defined as a span outside the radius, so tuning
+    goal_radius_m moves the whole approach with it."""
+    span = WallOrientedController.ARRIVAL_BRAKE_SPAN_M
+    assert _brake(10.0, radius=10.0) == pytest.approx(
+        WallOrientedController.ARRIVAL_MIN_SCALE)
+    assert _brake(10.0 + span, radius=10.0) == pytest.approx(1.0)
 
 
 def test_misalignment_slows_travel_but_never_stops_it():
@@ -294,7 +337,8 @@ def _side_controller(wall_side, points):
         _map_received_at=0.0,
         _pose=np.array([0.0, 0.0, 5.0]),
         _max_wall_distance=20.0,
-        _wall_z_band=2.0,
+        _depth_setpoint=5.0,
+        _plan_band=2.0,
         _side_switch_margin=0.3,
         _wall_side=wall_side,
         _wall_distance=float("nan"),

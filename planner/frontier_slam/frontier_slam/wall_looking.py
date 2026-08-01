@@ -21,7 +21,7 @@ Published topics:
 
 Behaviour:
   SEARCH — no usable wall (empty/stale TSDF, or nothing wall-like within
-           `max_surface_dist_m` of the robot's depth band): slow rotation +
+           `max_surface_dist_m` at any depth): slow rotation +
            depth hold, letting the mapper build surface before reporting
            BLOCKED after `no_wall_timeout_s`.
   TRACK — blend planner travel with the wall tangent, blend viewing orientation
@@ -60,6 +60,7 @@ from visualization_msgs.msg import MarkerArray
 
 from frontier_slam.control_utils import (
     depth_hold_effort, LowPassRate, wrap_angle, yaw_from_quat)
+from frontier_slam.mission_params import GOAL_RADIUS_M
 from frontier_slam.session_log import open_session_log
 from frontier_slam.wall_markers import selected_wall_markers, TOPIC as WALL_MARKER_TOPIC
 
@@ -95,7 +96,6 @@ class WallLooking(Node):
     MAX_SURGE           = 0.20   # approach/retreat clamp
     MAX_SWAY            = 0.25   # tangential clamp
     SCAN_YAW            = 0.08   # rotation while no wall is in range
-    Z_BAND_M            = 1.5    # only surface points within ±this of robot depth
     NORMAL_Z_MAX        = 0.7    # |n_z| above this = floor/ceiling, not a wall
     NORMAL_EMA_ALPHA    = 0.3    # smoothing on the tracked normal (nearest-point
                                  # jumps between samples cause yaw jitter otherwise)
@@ -103,7 +103,6 @@ class WallLooking(Node):
     PROGRESS_TIMEOUT_S  = 15.0   # no path-waypoint progress → BLOCKED
     PROGRESS_MIN_M      = 0.5
     WAYPOINT_ADVANCE_DIST = 1.5
-    GOAL_RADIUS         = 2.0
     EMERGENCY_STOP_DIST = 0.4    # m — front camera floor; below: forced back-off
     BACK_SURGE_SPEED    = 0.12   # m/s backward during emergency back-off
     CTRL_HZ             = 10.0
@@ -112,9 +111,13 @@ class WallLooking(Node):
     def __init__(self) -> None:
         super().__init__('wall_looking')
 
+        self.declare_parameter('goal_radius_m', GOAL_RADIUS_M)
         self.declare_parameter('standoff_m',    1.5)
         self.declare_parameter('tangent_speed', 0.15)
         self.declare_parameter('max_surface_dist_m', 8.0)
+        # The mapper's own planning band: the wall is picked from the slice the
+        # planner routes on, so the two cannot disagree.
+        self.declare_parameter('projected_map_band_m', 1.0)
         self.declare_parameter('no_wall_timeout_s', 10.0)
         self.declare_parameter('switch_goal_distance_m', 6.0)
         self.declare_parameter('switch_scan_s', 25.0)
@@ -144,6 +147,8 @@ class WallLooking(Node):
         self.declare_parameter('voxel_size', 0.2)
 
         self._voxel_size = float(self.get_parameter('voxel_size').value)
+        self._goal_radius = max(0.1, float(
+            self.get_parameter('goal_radius_m').value))
         self._standoff   = float(self.get_parameter('standoff_m').value)
         self._tan_speed  = float(self.get_parameter('tangent_speed').value)
         self._direction  = 1 if int(self.get_parameter('direction').value) >= 0 else -1
@@ -308,6 +313,18 @@ class WallLooking(Node):
 
     # ------------------------------------------------------------------
     # Wall selection
+    def _z_band(self) -> 'tuple[float, float]':
+        """The planner's depth slice, as (z_lo, z_hi).
+
+        depth_setpoint is the cruise depth the mapper centres /projected_map
+        on, so this is the slice frontier detection and A* work on. Re-read
+        live: the launcher pushes the band to this node and the mapper together.
+        """
+        band = abs(float(self.get_parameter('projected_map_band_m').value))
+        centre = (self._depth_setpoint if self._depth_setpoint is not None
+                  else float(self._pose[2]))
+        return centre - band, centre + band
+
     def _nearest_wall(self, target_xy: np.ndarray | None = None) -> 'tuple[np.ndarray, np.ndarray, int] | None':
         """Select a usable wall, optionally preferring one aligned to a target.
 
@@ -321,10 +338,10 @@ class WallLooking(Node):
             return None
 
         pts, nrm = self._wall_pts, self._wall_nrm
-        # Wall-like only: near the robot's depth band, mostly-horizontal normal
-        # (rules out seafloor / hull-top hits whose normals point up/down).
-        mask = ((np.abs(pts[:, 2] - self._pose[2]) <= self.Z_BAND_M) &
-                (np.abs(nrm[:, 2]) <= self.NORMAL_Z_MAX))
+        # Wall-like only: a mostly-horizontal normal (rules out seafloor /
+        # hull-top hits whose normals point up/down). Hard, unlike the depth
+        # band below — a floor is not a wall at any depth.
+        mask = np.abs(nrm[:, 2]) <= self.NORMAL_Z_MAX
         if not np.any(mask):
             return None
 
@@ -338,6 +355,14 @@ class WallLooking(Node):
                               pts[:, 1] - self._switch_exclude_xy[1]) > exclusion
         if not np.any(valid):
             return None
+
+        # Prefer the planner's own depth slice — the only geometry that can
+        # block a route or reach the hull — but a bare slice is a gap in the
+        # scan, not an absence of wall, so fall back to the whole of it.
+        z_lo, z_hi = self._z_band()
+        in_band = valid & (pts[:, 2] >= z_lo) & (pts[:, 2] <= z_hi)
+        if np.any(in_band):
+            valid = in_band
 
         candidates = np.flatnonzero(valid)
         if target_xy is None or self._switch_exclude_xy is None:
@@ -476,7 +501,7 @@ class WallLooking(Node):
 
         goal_dist = float(np.hypot(self._goal[0] - self._pose[0],
                                    self._goal[1] - self._pose[1]))
-        if goal_dist < self.GOAL_RADIUS:
+        if goal_dist < self._goal_radius:
             self._send_thrust(0.0, 0.0, heave, 0.0)
             if write_csv:
                 self._write_csv(0.0, 0.0, 0.0, heave, 'GOAL_REACHED')

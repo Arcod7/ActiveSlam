@@ -46,6 +46,7 @@ from frontier_slam.frontier_detection import (
     standoff_point_from_tsdf_surface,
 )
 from frontier_slam.goal_manager import GoalManager
+from frontier_slam.mission_params import GOAL_RADIUS_M
 from frontier_slam.path_planner import (
     CostGrid, HARD_INFLATION_M, INFLATION_M, PLAN_INFLATION_M,
     build_cost_grid, find_path,
@@ -91,9 +92,11 @@ class FrontierExtractor(Node):
         # scales with the mapper's normal_every, so a wider decimation there
         # wants a wider radius here to average anything at all.
         self.declare_parameter('tsdf_surface_normal_average_radius_m', 0.8)
-        # Display only: the Z range one /projected_map cell collapses, drawn as
-        # the band_columns marker. Must match the mapper that publishes the map
-        # (tsdf_mapper's projected_map_band_m, or octomap's occupancy_min/max_z).
+        # Display only here: the Z range one /projected_map cell collapses,
+        # drawn as the band_columns marker. Must match the mapper that
+        # publishes the map (tsdf_mapper's projected_map_band_m, or octomap's
+        # occupancy_min/max_z); re-read at use because the launcher pushes it
+        # live to this node and the TSDF mapper together.
         self.declare_parameter('projected_map_band_m', 3.0)
         self.declare_parameter('hard_inflation_m', HARD_INFLATION_M)
         self.declare_parameter('inflation_m', INFLATION_M)
@@ -112,6 +115,7 @@ class FrontierExtractor(Node):
         # planner moves on instead of re-picking a cluster beside the one it
         # just reached. Waived when no other candidate qualifies.
         self.declare_parameter('min_goal_separation_m', 0.0)
+        self.declare_parameter('goal_radius_m', GOAL_RADIUS_M)
         # How long a goal stays off the candidate list. The arrival value is
         # the planner's only memory of where it has already been: once it
         # expires the cluster scores as if never visited, so a value shorter
@@ -143,8 +147,6 @@ class FrontierExtractor(Node):
             self.get_parameter('tsdf_surface_normal_max_distance_m').value))
         self._tsdf_surface_normal_average_radius = max(0.0, float(
             self.get_parameter('tsdf_surface_normal_average_radius_m').value))
-        self._projected_map_band = abs(float(
-            self.get_parameter('projected_map_band_m').value))
         self._hard_inflation_m = float(self.get_parameter('hard_inflation_m').value)
         self._inflation_m = float(self.get_parameter('inflation_m').value)
         self._plan_inflation_m = float(self.get_parameter('plan_inflation_m').value)
@@ -175,7 +177,8 @@ class FrontierExtractor(Node):
         self._goals = GoalManager(
             min_explore_dist=3.0,
             goal_vanish_dist=3.0,
-            goal_radius=2.0,
+            goal_radius=max(0.1, float(
+                self.get_parameter('goal_radius_m').value)),
             stuck_timeout=30.0,
             stuck_min_progress=0.5,
             blacklist_duration=max(0.0, float(
@@ -474,7 +477,8 @@ class FrontierExtractor(Node):
                  if math.hypot(c.wx - raw[0], c.wy - raw[1]) > 1e-3]
         self._viz.publish_frontier_debug(
             frontier_xy, border_xy, pairs, self._robot_pos,
-            float(self._map.info.resolution), self._projected_map_band)
+            float(self._map.info.resolution),
+            abs(float(self.get_parameter('projected_map_band_m').value)))
 
     def _publish_goal(self, gx: float, gy: float, clusters: list) -> None:
         self._current_goal_xy = np.array([gx, gy])

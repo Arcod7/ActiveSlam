@@ -459,6 +459,102 @@ def test_suspended_flag_per_state(state, expected_suspended):
 
 
 # ----------------------------------------------------------------------
+# Spawn redirect: a sterile dwell means the candidate cluster is itself
+# drifted, so the machine gets one shot at the mission's starting pose
+# before giving up.
+# ----------------------------------------------------------------------
+
+def test_current_target_xyz_is_none_before_any_trigger():
+    sm = RevisitStateMachine(_cfg())
+    assert sm.current_target_xyz(_kf_for_trigger()) is None
+
+
+def test_set_spawn_latches_only_the_first_call():
+    sm = RevisitStateMachine(_cfg())
+    sm.set_spawn(np.array([1.0, 2.0, 3.0]))
+    sm.set_spawn(np.array([9.0, 9.0, 9.0]))
+    assert np.array_equal(sm.spawn_xyz, np.array([1.0, 2.0, 3.0]))
+
+
+def test_arrived_sterile_redirects_to_spawn_once():
+    sm = RevisitStateMachine(_cfg(arrival_radius_m=2.5, arrival_dwell_s=10.0))
+    sm.set_spawn(np.array([0.0, 0.0, 0.0]))
+    kf = _kf_for_trigger()
+    sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
+    at_target = kf[sm.target_idx][:2] + np.array([0.1, 0.0])
+    sm.tick(now=1.0, dopt=0.05, lc_count=1, kf_xyz=kf, robot_xy=at_target)
+    for i, t in enumerate((5.0, 9.0), start=2):
+        assert sm.tick(now=t, dopt=0.05, lc_count=i, kf_xyz=kf,
+                       robot_xy=at_target) is None
+    event = sm.tick(now=12.0, dopt=0.05, lc_count=4, kf_xyz=kf, robot_xy=at_target)
+    assert event == 'SPAWN_REDIRECT'
+    # Still REVISITING, not COOLDOWN: the detour continues toward spawn.
+    assert sm.state == RevisitState.REVISITING
+    assert sm.target_is_spawn is True
+    assert sm.target_idx is None
+    assert np.array_equal(sm.current_target_xyz(kf), sm.spawn_xyz)
+
+
+def test_no_redirect_without_a_known_spawn():
+    # Regression guard: before the first odometry callback (no set_spawn yet)
+    # a sterile dwell must behave exactly as it did before this feature.
+    sm = RevisitStateMachine(_cfg(arrival_radius_m=2.5, arrival_dwell_s=10.0))
+    kf = _kf_for_trigger()
+    sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
+    at_target = kf[sm.target_idx][:2] + np.array([0.1, 0.0])
+    sm.tick(now=1.0, dopt=0.05, lc_count=1, kf_xyz=kf, robot_xy=at_target)
+    for i, t in enumerate((5.0, 9.0), start=2):
+        sm.tick(now=t, dopt=0.05, lc_count=i, kf_xyz=kf, robot_xy=at_target)
+    event = sm.tick(now=12.0, dopt=0.05, lc_count=4, kf_xyz=kf, robot_xy=at_target)
+    assert event == 'ARRIVED_STERILE'
+    assert sm.state == RevisitState.COOLDOWN
+
+
+def test_arrived_saturated_does_not_redirect_to_spawn():
+    # The stall exit means the graph itself is not moving -- a fresh
+    # destination cannot change that, so only ARRIVED_STERILE redirects.
+    sm = RevisitStateMachine(_cfg(arrival_radius_m=2.5, arrival_dwell_s=30.0,
+                                  stall_exit_s=5.0))
+    sm.set_spawn(np.array([0.0, 0.0, 0.0]))
+    kf = _kf_for_trigger()
+    sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
+    at_target = kf[sm.target_idx][:2] + np.array([0.1, 0.0])
+    sm.tick(now=1.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=at_target)
+    sm.tick(now=5.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=at_target)
+    event = sm.tick(now=7.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=at_target)
+    assert event == 'ARRIVED_SATURATED'
+    assert sm.state == RevisitState.COOLDOWN
+    assert sm.target_is_spawn is False
+
+
+def test_spawn_leg_gives_up_for_real_on_its_own_sterile_dwell():
+    # The redirect is one shot: once the spawn leg is itself sterile, the
+    # machine must not try a third target and must end normally.
+    sm = RevisitStateMachine(_cfg(arrival_radius_m=2.5, arrival_dwell_s=10.0))
+    spawn = np.array([0.0, 0.0, 0.0])
+    sm.set_spawn(spawn)
+    kf = _kf_for_trigger()
+    sm.tick(now=0.0, dopt=0.05, lc_count=0, kf_xyz=kf, robot_xy=np.array([19.0, 0.0]))
+    at_target = kf[sm.target_idx][:2] + np.array([0.1, 0.0])
+    sm.tick(now=1.0, dopt=0.05, lc_count=1, kf_xyz=kf, robot_xy=at_target)
+    for i, t in enumerate((5.0, 9.0), start=2):
+        sm.tick(now=t, dopt=0.05, lc_count=i, kf_xyz=kf, robot_xy=at_target)
+    assert sm.tick(now=12.0, dopt=0.05, lc_count=4, kf_xyz=kf,
+                   robot_xy=at_target) == 'SPAWN_REDIRECT'
+
+    at_spawn = spawn[:2] + np.array([0.1, 0.0])
+    assert sm.tick(now=20.0, dopt=0.05, lc_count=5, kf_xyz=kf,
+                   robot_xy=at_spawn) is None
+    for i, t in enumerate((25.0, 29.0), start=6):
+        assert sm.tick(now=t, dopt=0.05, lc_count=i, kf_xyz=kf,
+                       robot_xy=at_spawn) is None
+    event = sm.tick(now=31.0, dopt=0.05, lc_count=9, kf_xyz=kf, robot_xy=at_spawn)
+    assert event == 'ARRIVED_STERILE'
+    assert sm.state == RevisitState.COOLDOWN
+    assert sm.target_is_spawn is False
+
+
+# ----------------------------------------------------------------------
 # Uncertainty ratio (Suresh et al. 2020 eq. 5)
 # ----------------------------------------------------------------------
 
