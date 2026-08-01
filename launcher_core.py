@@ -63,6 +63,7 @@ BAG_TOPICS = [
     "/slam/sigma_xy", "/slam/sigma_yaw", "/slam/covariance",
     "/frontier_slam/goal", "/frontier_slam/path", "/frontier_slam/activity",
     "/frontier_slam/revisit_state", "/frontier_slam/revisit_cause",
+    "/frontier_slam/revisit_target_is_spawn",
     "/octomap_binary", "/tsdf/octomap_binary", "/projected_map",
 ]
 # The simulator's ground truth and the metrics scored against it; on hardware
@@ -165,6 +166,13 @@ def _octomap_band_depth(v):
     occupancy Z band. The TSDF mapper takes it live (target_depth_m), so
     re-centring the projection band there costs no map."""
     return v["robot_depth_target"] if v["mapper"] == "octomap" else None
+
+
+def _octomap_band(v):
+    """Same split for the band's half-thickness: octomap bakes it into
+    occupancy_min/max_z at launch, the TSDF mapper and the planner nodes take
+    it live (projected_map_band_m), so only octomap restarts on a change."""
+    return v["projected_map_band_m"] if v["mapper"] == "octomap" else None
 
 
 def _mapper_backend(v):
@@ -383,6 +391,10 @@ def build_groups(bringup_share=""):
                  f"loop_closure:={'true' if v['loop_closure'] else 'false'}",
                  f"noise_seed:={v['noise_seed']}",
                  f"map_rebuild:={'true' if _map_rebuild(v) else 'false'}",
+                 # Not in POSE_GRAPH_ARGS: that list emits raw values, and a
+                 # Python bool renders as "True", which the arg's choices reject.
+                 f"odom_coherent_noise:="
+                 f"{'true' if v['odom_coherent_noise'] else 'false'}",
                  # Seeded where the vehicle is now, not at the spawn pose — a
                  # restart mid-run would otherwise re-anchor X/Y at the origin.
                  f"initial_x:={v.get('slam_seed_x', v['robot_x'])}",
@@ -393,7 +405,8 @@ def build_groups(bringup_share=""):
         cmd = ["ros2", "launch", "eval_tools", "eval.launch.py",
                f"mapper:={_mapper_backend(v)}",
                f"voxel_size:={v['voxel_size']}",
-               f"rpe_delta:={v['rpe_delta']}"]
+               f"rpe_delta:={v['rpe_delta']}",
+               f"preset:={v['preset']}"]
         if v["output_dir"]:
             cmd.append(f"output_dir:={v['output_dir']}")
         return [cmd]
@@ -432,6 +445,7 @@ def build_groups(bringup_share=""):
                  f"scenario_out_dx:={v['scenario_out_dx']}",
                  f"scenario_out_dy:={v['scenario_out_dy']}",
                  f"survey_radius_m:={v['survey_radius_m']}",
+                 f"goal_radius_m:={v['goal_radius_m']}",
                  f"min_goal_separation_m:={v['min_goal_separation_m']}",
                  f"arrival_blacklist_duration_s:={v['arrival_blacklist_duration_s']}",
                  f"blacklist_duration_s:={v['blacklist_duration_s']}",
@@ -444,7 +458,6 @@ def build_groups(bringup_share=""):
                  f"motion:={_motion_arg(v['motion'])}",
                  f"speed_factor:={v['speed_factor']}",
                  f"turn_factor:={v['turn_factor']}",
-                 f"wall_z_band_m:={v['wall_z_band_m']}",
                  f"wall_orientation_offset_deg:={v['wall_orientation_offset_deg']}",
                  f"wall_orientation_lookahead_m:={v['wall_orientation_lookahead_m']}",
                  f"tsdf_frontier_standoff_m:={v['tsdf_frontier_standoff_m']}",
@@ -582,7 +595,8 @@ def build_groups(bringup_share=""):
               mapper, depends=["mapper", ("map_rebuild", _map_rebuild),
                                "tsdf_octomap", "voxel_size", "trunc_distance",
                                "space_carving", "carve_no_return",
-                               "cache_max_scans", "projected_map_band_m",
+                               "cache_max_scans",
+                               ("projected_map_band_m", _octomap_band),
                                ("robot_depth_target", _octomap_band_depth)]),
         Group("gt_map", "Ground-truth reference map",
               "A second map built from the exact simulator pose, overlaid "
@@ -596,7 +610,8 @@ def build_groups(bringup_share=""):
               slam, depends=["noise_profile", "noise_profile_pressure",
                              "noise_profile_imu", "noise_profile_compass",
                              "noise_profile_dvl", "loop_closure", "noise_seed",
-                             "map_rebuild", *POSE_GRAPH_ARGS], visible=is_slam),
+                             "map_rebuild", "odom_coherent_noise",
+                             *POSE_GRAPH_ARGS], visible=is_slam),
         Group("eval", "Benchmark + eval",
               "ATE/RPE against ground truth, TUM trajectory export and map "
               "metrics, written to eval/runs/<timestamp>/.",
@@ -625,7 +640,9 @@ def build_groups(bringup_share=""):
                                 "wall_normal_offset_deg", "wall_path_heading_weight",
                                 "wall_yaw_only",
                                 "hard_inflation_m", "inflation_m", "plan_inflation_m",
-                                "projected_map_band_m", "survey_radius_m",
+                                ("projected_map_band_m", _octomap_band),
+                                "survey_radius_m",
+                                "goal_radius_m",
                                 "min_goal_separation_m",
                                 "arrival_blacklist_duration_s",
                                 "blacklist_duration_s", "revisit_scan_slowdown"],

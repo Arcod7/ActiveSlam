@@ -49,6 +49,7 @@ import os
 import shutil
 import sysconfig
 import tempfile
+from frontier_slam.mission_params import GOAL_RADIUS_M
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -268,17 +269,25 @@ def generate_launch_description():
         description="Divide the scan yaw rate by this while a revisit is in progress. "
         "1.0 = off (default; untested in a full run as of 2026-07-27).",
     )
-    wall_z_band_arg = DeclareLaunchArgument(
-        "wall_z_band_m", default_value="1.5",
-        description="Half-thickness (m) of the depth slice wall_oriented uses to pick "
-        "which side to look at. Depth is directly observed, so geometry further above "
-        "or below cannot be collided with and should not steer the look direction.",
+    goal_radius_arg = DeclareLaunchArgument(
+        "goal_radius_m", default_value=str(GOAL_RADIUS_M),
+        description="How close (m) counts as reaching a goal. One value for the "
+        "whole stack: the motion executor stops driving here and the planner "
+        "retires the goal at the same radius. Splitting the two deadlocks them.",
     )
     min_goal_separation_arg = DeclareLaunchArgument(
         "min_goal_separation_m", default_value="0.0",
         description="Minimum distance (m) between consecutive frontier goals, so the "
         "planner moves on rather than re-picking beside the goal it just reached. "
         "Waived when no other candidate qualifies. 0 = off.",
+    )
+    arrival_blacklist_duration_arg = DeclareLaunchArgument(
+        "arrival_blacklist_duration_s", default_value="20.0",
+        description="How long a reached goal stays blacklisted (s)",
+    )
+    blacklist_duration_arg = DeclareLaunchArgument(
+        "blacklist_duration_s", default_value="30.0",
+        description="How long an unreachable goal stays blacklisted (s)",
     )
     plan_inflation_arg = DeclareLaunchArgument(
         "plan_inflation_m",
@@ -572,7 +581,9 @@ def generate_launch_description():
         description="half-thickness (m) of the Z band collapsed into "
         "/projected_map, centred on depth. One value for every backend: "
         "octomap_server takes it as occupancy_min_z/max_z (z_band.py), the "
-        "TSDF mapper and the frontier extractor as projected_map_band_m",
+        "TSDF mapper, the frontier extractor and wall_oriented as "
+        "projected_map_band_m — the wall executor picks its wall from the "
+        "same slice the planner routes on",
     )
     # Pose-graph structure and factor noise, forwarded to slam.launch.py.
     # Defaults mirror pose_graph.py's own, so leaving them alone changes nothing.
@@ -670,6 +681,10 @@ def generate_launch_description():
                 ["'true' if '", LaunchConfiguration("mode"),
                  "' == 'frontier' else 'false'"]
             ),
+            # The mapper owns both of these; forwarding them to the SLAM stack
+            # alone leaves the TSDF volume on its own defaults.
+            "map_rebuild": LaunchConfiguration("map_rebuild"),
+            "carve_no_return": LaunchConfiguration("carve_no_return"),
             "target_depth_m": LaunchConfiguration("depth"),
             "projected_map_band_m": LaunchConfiguration("projected_map_band_m"),
             "tsdf_octomap": LaunchConfiguration("tsdf_octomap"),
@@ -779,8 +794,11 @@ def generate_launch_description():
             "survey_radius_m": LaunchConfiguration("survey_radius_m"),
             "survey_center_x": LaunchConfiguration("survey_center_x"),
             "survey_center_y": LaunchConfiguration("survey_center_y"),
+            "goal_radius_m": LaunchConfiguration("goal_radius_m"),
             "min_goal_separation_m": LaunchConfiguration("min_goal_separation_m"),
-            "wall_z_band_m": LaunchConfiguration("wall_z_band_m"),
+            "arrival_blacklist_duration_s": LaunchConfiguration(
+                "arrival_blacklist_duration_s"),
+            "blacklist_duration_s": LaunchConfiguration("blacklist_duration_s"),
             "revisit_scan_slowdown": LaunchConfiguration("revisit_scan_slowdown"),
             "revisit_min_closures": LaunchConfiguration("revisit_min_closures"),
             "arrival_dwell_s": LaunchConfiguration("arrival_dwell_s"),
@@ -1052,8 +1070,10 @@ def generate_launch_description():
             survey_radius_arg,
             survey_center_x_arg,
             survey_center_y_arg,
+            goal_radius_arg,
             min_goal_separation_arg,
-            wall_z_band_arg,
+            arrival_blacklist_duration_arg,
+            blacklist_duration_arg,
             revisit_scan_slowdown_arg,
             revisit_min_closures_arg,
             arrival_dwell_arg,

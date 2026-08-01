@@ -506,6 +506,7 @@ class RosLink:
         self.activity_at = 0.0
         self.revisit_state = None
         self.revisit_cause = None
+        self.revisit_target_is_spawn = False
 
     def start(self):
         if self.node:
@@ -566,6 +567,9 @@ class RosLink:
                 String, "/frontier_slam/revisit_state", self._revisit_cb, 1)
             self.node.create_subscription(
                 String, "/frontier_slam/revisit_cause", self._revisit_cause_cb, 1)
+            self.node.create_subscription(
+                Bool, "/frontier_slam/revisit_target_is_spawn",
+                self._revisit_target_spawn_cb, 1)
         except Exception as e:
             self.error = f"could not create launcher node: {e}"
             self.node = None
@@ -588,6 +592,9 @@ class RosLink:
 
     def _revisit_cause_cb(self, msg):
         self.revisit_cause = msg.data or None
+
+    def _revisit_target_spawn_cb(self, msg):
+        self.revisit_target_is_spawn = msg.data
 
     @staticmethod
     def _pose_from_msg(msg):
@@ -1610,9 +1617,12 @@ def robot_state_text(link, values, running, driving, drive_active):
     # Checked before the mode: a revisit detour preempts the goal in goto mode
     # too, and reporting the target point while driving away from it is a lie.
     if link.revisit_state == "revisiting":
-        where = ("at the revisit site, holding until d-opt drops"
+        # The redirect only fires once the first candidate proved sterile, so
+        # a spawn leg means the local cluster itself was drifted, not just far.
+        site = "spawn point" if link.revisit_target_is_spawn else "revisit site"
+        where = (f"at the {site}, holding until d-opt drops"
                  if link.activity in HOLDING_ACTIVITIES
-                 else "driving to the revisit site")
+                 else f"driving to the {site}")
         why = REVISIT_CAUSE_TEXT.get(link.revisit_cause)
         return f"{where}\n— triggered by {why}" if why else where
     cooling = " (revisit cooldown)" if link.revisit_state == "cooldown" else ""

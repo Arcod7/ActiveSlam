@@ -21,7 +21,6 @@ LIVE = {
     "ratio_trigger":              ("revisit_planner", "ratio_trigger"),
     "ratio_resume":               ("revisit_planner", "ratio_resume"),
     "revisit_min_closures":       ("revisit_planner", "revisit_min_closures"),
-    "wall_z_band_m":              ("wall_oriented_controller", "wall_z_band_m"),
     "arrival_dwell_s":            ("revisit_planner", "arrival_dwell_s"),
     "stall_exit_s":               ("revisit_planner", "stall_exit_s"),
     "wall_standoff":             ("wall_looking", "standoff_m"),
@@ -67,6 +66,7 @@ LIVE_MAPPER = {
     "voxel_min_weight":           "voxel_min_weight",
     "voxel_min_solid_confidence": "voxel_min_solid_confidence",
     "robot_depth_target":         "target_depth_m",
+    "projected_map_band_m":       "projected_map_band_m",
 }
 
 
@@ -75,12 +75,20 @@ def mapper_live_targets(pid, values):
 
     The ground-truth mapper is built from the same thresholds so the map
     metrics keep comparing like with like, and it only exists under slam:=slam.
+    The planning band also reaches its planner-side consumers — the extractor's
+    band marker and wall_oriented's wall slice — so one push moves the map, the
+    display and the wall selection together.
     """
     if pid not in LIVE_MAPPER or not _tsdf(values):
         return []
     nodes = ["tsdf_mapper"]
     if values["slam"] == "slam":
         nodes.append("tsdf_mapper_gt")
+    if pid == "projected_map_band_m" and _planner(values):
+        nodes.append("frontier_extractor")
+        executor = MOTION_EXECUTOR_NODE.get(values["motion"])
+        if executor in ("wall_oriented_controller", "wall_looking"):
+            nodes.append(executor)
     return [(node, LIVE_MAPPER[pid]) for node in nodes]
 
 
@@ -543,6 +551,15 @@ PARAMS = [
           "the heading half of D-optimality, so it moves when a revisit fires "
           "for heading rather than position.",
           step=0.005, lo=0.0001, hi=1.0, visible=_slam),
+    Param("odom_coherent_noise", "Coherent odometry noise", "bool", False,
+          "localisation.noise",
+          "Size the DVL scale and bias terms from run-long accumulated "
+          "displacement and rotation instead of per-edge. On, exact NEES is "
+          "3.43 against a target of 3; off, the marginal is 6-10x "
+          "overconfident (docs/UNCERTAINTY_MODEL.md). Changes what sigma_xy "
+          "and the revisit trigger report, so a run is not comparable with "
+          "one recorded the other way.",
+          visible=_slam),
 
     Param("revisit", "Uncertainty revisit", "bool", True, "localisation.revisit",
           "Suspend the current goal and drive back to mapped areas when the "
@@ -731,14 +748,6 @@ PARAMS = [
           "Lookahead radius along the A* path used to pick the heading. 0 uses "
           "the heading at the current position.",
           step=0.5, lo=0.0,
-          visible=lambda v: _planner(v) and v["motion"] == "walloriented"),
-    Param("wall_z_band_m", "Wall depth slice (m)", "float", 1.5,
-          "localisation.executor",
-          "Half-thickness of the depth slice used to pick which side the wall "
-          "is on. Depth is directly observed, so geometry further above or "
-          "below than this cannot be collided with and should not steer the "
-          "look direction. Live-tunable while running.",
-          step=0.5, lo=0.5, hi=10.0,
           visible=lambda v: _planner(v) and v["motion"] == "walloriented"),
     Param("wall_yaw_only", "Wall guides yaw only", "bool", True,
           "localisation.executor",
@@ -1029,6 +1038,19 @@ PARAMS = [
           "the nearest unknown cell instead of finishing the structure it was "
           "sent to. The centre is wherever the vehicle started.",
           step=1.0, lo=0.0, hi=200.0, visible=_frontier),
+    # Default mirrors frontier_slam.mission_params.GOAL_RADIUS_M, which this
+    # file cannot import (pure standard library). test_goal_radius_single_source
+    # fails if the two drift apart.
+    Param("goal_radius_m", "Goal arrival radius (m)", "float", 4.0,
+          "planning.goals",
+          "How close counts as reaching a goal. One value for the whole stack: "
+          "the motion executor stops driving here, and the planner accepts the "
+          "goal as reached and moves on at the same radius. The two were once "
+          "separate — the executor parked at 4 m while the planner still wanted "
+          "2 m, so no goal was ever reached by arriving and only the 30 s stuck "
+          "timer moved the vehicle on. Raise it to commit to less of the "
+          "approach, lower it to drive closer before the goal is retired.",
+          step=0.5, lo=0.5, hi=20.0, visible=_frontier),
     Param("min_goal_separation_m", "Min goal separation (m)", "float", 0.0,
           "planning.goals",
           "Minimum distance between one frontier goal and the next, so the "
@@ -1066,8 +1088,10 @@ PARAMS = [
           "that are actually open. One value for every backend — octomap_server "
           "takes it as occupancy_min_z/max_z (floored at the vehicle height), "
           "the TSDF mapper as projected_map_band_m — and the planner is handed "
-          "the same number so its band marker draws what it is really "
-          "planning on.",
+          "the same number: its band marker draws it, and the wall-oriented "
+          "executor picks its wall from the same slice, since only geometry "
+          "in it can block a route or reach the hull. Live-tunable under the "
+          "TSDF mapper; octomap bakes it in at launch.",
           step=0.25, lo=0.05, hi=10.0,
           visible=_planner),
     Param("hard_inflation_m", "Hard wall zone (m)", "float", 1.00,
