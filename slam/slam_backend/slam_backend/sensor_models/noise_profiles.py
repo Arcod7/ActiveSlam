@@ -15,6 +15,10 @@ class IMUNoise:
     sigma_pitch_rad: float = 0.01
     sigma_yaw_rad: float = 0.05
     gyro_bias_drift_rad_s: float = 0.0
+    # White noise on the rate channel. Separate from gyro_bias_drift_rad_s,
+    # which is a random walk on the integrated angle: a gyro measures rate
+    # directly, so its rate output is not the derivative of its noisy angle.
+    sigma_gyro_rad_s: float = 0.0
     publish_rate_hz: float = 50.0
 
 

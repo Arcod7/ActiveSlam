@@ -3,7 +3,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import QuaternionStamped
+from geometry_msgs.msg import QuaternionStamped, Vector3Stamped
 import numpy as np
 import os
 from scipy.spatial.transform import Rotation
@@ -38,6 +38,11 @@ class IMUSimNode(Node):
             
         self.sub = self.create_subscription(Odometry, '/StoneFish/Odometry', self.odom_cb, 10)
         self.pub = self.create_publisher(QuaternionStamped, '/slam/sensors/imu_orientation', 10)
+        # Separate topic per quantity, matching imu_orientation/compass_heading.
+        # A gyro senses rate directly, so this is not the derivative of the
+        # orientation above and carries none of its bias drift.
+        self.rate_pub = self.create_publisher(
+            Vector3Stamped, '/slam/sensors/imu_angular_velocity', 10)
         
         # Rate limiting
         self.publish_interval = 1.0 / self.profile.publish_rate_hz
@@ -96,8 +101,26 @@ class IMUSimNode(Node):
         out_msg.quaternion.y = float(qy)
         out_msg.quaternion.z = float(qz)
         out_msg.quaternion.w = float(qw)
-        
+
         self.pub.publish(out_msg)
+
+        # Body-frame rate, straight off the odometry twist (nav_msgs puts twist
+        # in child_frame_id) plus white noise — the frame a gyro reports in.
+        w = msg.twist.twist.angular
+        rate = np.array([w.x, w.y, w.z], dtype=float)
+        sigma = self.profile.sigma_gyro_rad_s
+        if sigma > 0:
+            rate += np.random.normal(0, sigma, 3)
+
+        rate_msg = Vector3Stamped()
+        # Built field by field, not `= msg.header`: that aliases the object the
+        # orientation message above already holds, so setting frame_id here
+        # would retag that one too.
+        rate_msg.header.stamp = msg.header.stamp
+        rate_msg.header.frame_id = msg.child_frame_id
+        rate_msg.vector.x, rate_msg.vector.y, rate_msg.vector.z = (
+            float(rate[0]), float(rate[1]), float(rate[2]))
+        self.rate_pub.publish(rate_msg)
 
 def main(args=None):
     rclpy.init(args=args)

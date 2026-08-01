@@ -9,6 +9,7 @@ imu:                         # degraded gyro-integrated attitude
   sigma_pitch_rad: 0.05
   sigma_yaw_rad: 0.05        # ~2.9° short-term gyro attitude
   gyro_bias_drift_rad_s: 0.001
+  sigma_gyro_rad_s: 0.02    # ~1.1 deg/s
   publish_rate_hz: 50.0
 compass:                     # magnetic interference dominates absolute heading
   sigma_yaw_rad: 0.20        # ~11.5°
