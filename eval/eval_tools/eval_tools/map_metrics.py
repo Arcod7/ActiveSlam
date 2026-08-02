@@ -36,7 +36,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import PointCloud2
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64, Int32
 from sensor_msgs_py import point_cloud2
 from scipy.spatial import cKDTree
 
@@ -183,6 +183,9 @@ class MapMetricsNode(Node):
         # Correctly-mapped extent: coverage times what was observed, so a run
         # cannot look good on the HUD by having seen almost nothing.
         self.pub_correct = self.create_publisher(Float64, '/eval/map_correct', 10)
+        # Observed extent, unweighted by quality: the denominator `correct` is a
+        # fraction of, so the HUD can show what a coverage figure is relative to.
+        self.pub_explored = self.create_publisher(Int32, '/eval/map_explored', 10)
 
         self._latest_belief_grid = None
         self._latest_gt_grid = None
@@ -239,6 +242,7 @@ class MapMetricsNode(Node):
         self.pub_coverage.publish(Float64(data=float(coverage)))
         self.pub_accuracy.publish(Float64(data=float(iou_occ)))
         self.pub_correct.publish(Float64(data=float(correct)))
+        self.pub_explored.publish(Int32(data=int(explored)))
 
     def _compute_tsdf_metrics(self):
         if self._latest_belief_cloud is None or self._latest_gt_cloud is None:
@@ -264,6 +268,7 @@ class MapMetricsNode(Node):
         self.pub_accuracy.publish(Float64(data=float(rmse_b2g)))
         self.pub_chamfer.publish(Float64(data=float(chamfer)))
         self.pub_correct.publish(Float64(data=float(correct)))
+        self.pub_explored.publish(Int32(data=int(explored)))
 
     def destroy_node(self):
         self._metrics_file.close()

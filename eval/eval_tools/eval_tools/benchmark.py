@@ -192,6 +192,7 @@ class BenchmarkNode(Node):
         self._latest_map_coverage = None
         self._latest_map_correct = None
         self._latest_map_chamfer = None
+        self._latest_map_explored = None
         # Wall clock, not the ROS clock: this is "how long has this run been up",
         # which must stay right even if a sim clock jumps or replays.
         self._start_monotonic = pytime.monotonic()
@@ -224,6 +225,7 @@ class BenchmarkNode(Node):
         self.create_subscription(Float64, '/eval/map_coverage', self._map_coverage_cb, 10)
         self.create_subscription(Float64, '/eval/map_chamfer', self._map_chamfer_cb, 10)
         self.create_subscription(Float64, '/eval/map_correct', self._map_correct_cb, 10)
+        self.create_subscription(Int32, '/eval/map_explored', self._map_explored_cb, 10)
 
         self.pub_abs_error = self.create_publisher(Float64, '/eval/abs_error', 10)
         self.pub_ate = self.create_publisher(Float64, '/eval/ate', 10)
@@ -328,6 +330,9 @@ class BenchmarkNode(Node):
 
     def _map_chamfer_cb(self, msg: Float64):
         self._latest_map_chamfer = msg.data
+
+    def _map_explored_cb(self, msg: Int32):
+        self._latest_map_explored = msg.data
 
     def _lc_count_cb(self, msg: Int32):
         self._latest_lc_count = msg.data
@@ -452,6 +457,8 @@ class BenchmarkNode(Node):
         map_rows = []
         if self._latest_map_correct is not None:
             map_rows.append(f'Correct {self._latest_map_correct:,.0f} vox')
+        if self._latest_map_explored is not None:
+            map_rows.append(f'Explored {self._latest_map_explored:,} vox')
         if self._latest_map_coverage is not None:
             map_rows.append(f'Coverage {self._latest_map_coverage:.1%}')
         if self._latest_map_chamfer is not None:
@@ -477,6 +484,8 @@ class BenchmarkNode(Node):
             f'\n'
             f'Key Frames {self._latest_kf_count}  |  '
             f'Loop Closures {self._latest_lc_count}\n'
+            f'Revisits {self._latest_revisit_count}  |  '
+            f'Rebuilds {self._latest_rebuild_count}\n'
             f'Run time {_fmt_elapsed(pytime.monotonic() - self._start_monotonic)}'
         )
         markers.markers.append(text)
