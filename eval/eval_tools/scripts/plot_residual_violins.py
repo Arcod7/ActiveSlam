@@ -48,6 +48,8 @@ import numpy as np
 
 import matplotlib
 matplotlib.use('Agg')
+import plot_style
+plot_style.apply()
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.ticker import FixedLocator, FuncFormatter
@@ -314,6 +316,8 @@ def main():
     p.add_argument('batch_dirs', nargs='+',
                    help='run_matrix.py batch directories (globs are fine)')
     p.add_argument('--out', help='output directory (default: <first batch>/figures)')
+    p.add_argument('--exclude', nargs='*', default=[], metavar='ARM:SEED',
+                   help='drop specific runs, e.g. lc_revisit:901')
     args = p.parse_args()
 
     batch_dirs = []
@@ -327,6 +331,12 @@ def main():
     runs = load_batches(batch_dirs)
     if not runs:
         sys.exit('no usable runs found')
+    for spec in args.exclude:
+        arm, _, seed = spec.partition(':')
+        before = len(runs)
+        runs = [r for r in runs
+                if not (r['arm'] == arm and str(r['seed']) == seed)]
+        print(f'  [exclude] {spec}: dropped {before - len(runs)} run(s)')
     arms = [a for a in ARMS if any(r['arm'] == a for r in runs)]
     runs = [r for r in runs if r['arm'] in arms]
     seeds = sorted({r['seed'] for r in runs})

@@ -43,6 +43,8 @@ import numpy as np
 
 import matplotlib
 matplotlib.use('Agg')
+import plot_style
+plot_style.apply()
 import matplotlib.pyplot as plt
 import matplotlib.transforms as transforms
 from matplotlib.lines import Line2D
@@ -56,9 +58,10 @@ except ImportError:
 # Display order. `lc_repeat` is byte-identical to `lc`: not a rung but the
 # measured noise floor, so it sits beside `lc` and is styled apart from the
 # ordinal ramp rather than pretending to be a step along it.
-ARMS = ['nolc', 'lc', 'lc_repeat', 'lc_rebuild', 'lc_revisit', 'full']
+ARMS = ['nolc', 'no_lc', 'lc', 'lc_repeat', 'lc_rebuild', 'lc_revisit', 'full']
 ARM_LABELS = {
     'nolc': 'Open loop',
+    'no_lc': 'Open loop',
     'lc': 'Loop closure',
     'lc_repeat': 'Repeat (control)',
     'lc_rebuild': '+ rebuild',
@@ -72,11 +75,14 @@ ARM_LABELS = {
 # reads as a point on that ramp.
 _CONTROL_COLOR = '#eb6834'
 ARM_STYLE = {
-    'nolc':       ('#86b6ef', 'o'),
-    'lc':         ('#5598e7', 's'),
+    'nolc':       ('#7f7f7f', 'o'),
+    'no_lc':      ('#7f7f7f', 'o'),
+    # no_lc / lc / lc_revisit match plot_style.ARM_COLOR, so a run keeps its
+    # colour between these figures and the ladder-comparison set.
+    'lc':         ('#1f77b4', 's'),
     'lc_repeat':  (_CONTROL_COLOR, 'P'),
     'lc_rebuild': ('#2a78d6', 'v'),
-    'lc_revisit': ('#1c5cab', '^'),
+    'lc_revisit': ('#d62728', '^'),
     'full':       ('#0d366b', 'D'),
 }
 _FALLBACK = ('#5598e7', 'o')
@@ -100,20 +106,11 @@ NEES_DOF, NIS_DOF = 3, 6
 
 
 def _style():
+    # The shared evo look (seaborn whitegrid); only sizing kept local.
+    plot_style.apply()
     plt.rcParams.update({
-        'figure.facecolor': SURFACE, 'axes.facecolor': SURFACE,
-        'savefig.facecolor': SURFACE,
-        'font.family': 'sans-serif',
-        'font.sans-serif': ['DejaVu Sans'],
         'font.size': 9, 'axes.titlesize': 10, 'axes.labelsize': 9,
-        'text.color': INK, 'axes.labelcolor': INK2, 'axes.titlecolor': INK,
-        'xtick.color': MUTED, 'ytick.color': MUTED,
-        'xtick.labelcolor': INK2, 'ytick.labelcolor': INK2,
-        'axes.edgecolor': AXIS, 'axes.linewidth': 0.8,
-        'grid.color': GRID, 'grid.linewidth': 0.8, 'grid.linestyle': '-',
         'legend.frameon': False, 'legend.fontsize': 8,
-        'xtick.direction': 'out', 'ytick.direction': 'out',
-        'xtick.major.size': 3, 'ytick.major.size': 3,
     })
 
 
@@ -995,6 +992,54 @@ def fig_tradeoff(runs, arms, out_dir):
     return pts
 
 
+def fig_tradeoff_paths(runs, arms, out_dir):
+    """fig6 with history: each run's route through (explored, coverage) space,
+    from the empty map to where fig6's point sits."""
+    fig, ax = plt.subplots(figsize=(7.6, 5.6))
+    ends_x, ends_y = [], []
+    for arm in arms:
+        first = True
+        for r in by_arm(runs, arm):
+            path = os.path.join(r['dir'], 'map_metrics.csv')
+            if not os.path.exists(path):
+                continue
+            xs, ys = [], []
+            with open(path) as f:
+                for row in csv.DictReader(f):
+                    try:
+                        xs.append(float(row['explored']) / 1000.0)
+                        ys.append(float(row['coverage']))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+            if len(xs) < 2:
+                continue
+            ax.plot(xs, ys, '-', color=arm_color(arm), lw=1.0, alpha=0.4,
+                    zorder=2)
+            ax.plot(xs[-1], ys[-1], arm_marker(arm), color=arm_color(arm),
+                    markersize=7, markeredgecolor='white', markeredgewidth=1.1,
+                    linestyle='none', zorder=3,
+                    label=ARM_LABELS[arm].replace('\n', ' ') if first else None)
+            ends_x.append(xs[-1])
+            ends_y.append(ys[-1])
+            first = False
+    if not ends_x:
+        print('  [note] fig6b skipped: no map_metrics.csv histories')
+        return
+
+    ax.set_xlabel('Surface observed (thousands of ground-truth voxels)')
+    ax.set_ylabel('Fraction placed within 0.4 m (map coverage)')
+    ax.set_xlim(0, max(ends_x) * 1.08)
+    ax.set_ylim(0, 1.0)
+    ax.legend(loc='lower right', ncol=1)
+    _despine(ax)
+
+    top = _titles(fig, 'Route to the tradeoff: coverage against explored extent over time',
+                  'one line per run, from empty map to final state · '
+                  'marker = where the run ended (fig6\'s point)')
+    fig.tight_layout(rect=(0, 0, 1, top))
+    _save(fig, out_dir, 'fig6b_tradeoff_paths')
+
+
 # ------------------------------------------------------------------- output
 
 def _save(fig, out_dir, stem):
@@ -1066,6 +1111,9 @@ def main():
     p.add_argument('--out', help='output directory (default: <first batch>/figures)')
     p.add_argument('--style', choices=('paired', 'box'), default='paired',
                    help='panel style for fig1 (default: paired)')
+    p.add_argument('--exclude', nargs='*', default=[], metavar='ARM:SEED',
+                   help='drop specific runs, e.g. lc_revisit:901 for a run '
+                        'that never converged inside the batch duration')
     args = p.parse_args()
     global PANEL_STYLE
     PANEL_STYLE = args.style
@@ -1087,6 +1135,13 @@ def main():
     if not runs:
         sys.exit('no usable runs found')
 
+    for spec in args.exclude:
+        arm, _, seed = spec.partition(':')
+        before = len(runs)
+        runs = [r for r in runs
+                if not (r['arm'] == arm and str(r['seed']) == seed)]
+        print(f'  [exclude] {spec}: dropped {before - len(runs)} run(s)')
+
     arms = [a for a in ARMS if any(r['arm'] == a for r in runs)]
     extra = sorted({r['arm'] for r in runs} - set(ARMS))
     if extra:
@@ -1105,6 +1160,7 @@ def main():
     fig_consistency(runs, arms, seeds, out_dir)
     fig_repeatability(runs, arms, seeds, out_dir)
     fig_tradeoff(runs, arms, out_dir)
+    fig_tradeoff_paths(runs, arms, out_dir)
     write_summary(runs, arms, out_dir)
     print(f'\nFigures in {out_dir}')
 
