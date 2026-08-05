@@ -14,6 +14,7 @@ find_package(pluginlib REQUIRED)
 find_package(Qt5 REQUIRED COMPONENTS Widgets)
 find_package(rclcpp REQUIRED)
 find_package(rviz_common REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
@@ -29,6 +30,7 @@ ament_target_dependencies(${PROJECT_NAME}
   pluginlib
   rclcpp
   rviz_common
+  std_msgs
   visualization_msgs
 )
 target_link_libraries(${PROJECT_NAME} Qt5::Widgets)

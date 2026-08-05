@@ -18,6 +18,7 @@ struct PanelFixture
   eval_hud_rviz::EvalHudPanel panel;
   QLabel * state_label = panel.findChild<QLabel *>("eval_hud_state_label");
   QLabel * metrics_label = panel.findChild<QLabel *>("eval_hud_metrics_label");
+  QLabel * viz_cap_label = panel.findChild<QLabel *>("eval_hud_viz_cap_label");
 };
 }  // namespace
 
@@ -63,4 +64,29 @@ TEST(EvalHudPanel, MotionStateRowTakesTheMarkerTextAndColour)
   // The arrow colour has to reach the stylesheet, otherwise the row and the
   // marker can disagree.
   EXPECT_TRUE(fixture.state_label->styleSheet().contains(cyan.name()));
+}
+
+TEST(EvalHudPanel, VoxelCapRowOnlyShowsWhileThereIsAWarning)
+{
+  int argc = 1;
+  char application_name[] = "eval_hud_panel_viz_cap_test";
+  char * argv[] = {application_name, nullptr};
+  QApplication application(argc, argv);
+
+  PanelFixture fixture;
+  ASSERT_NE(fixture.viz_cap_label, nullptr);
+  EXPECT_TRUE(fixture.viz_cap_label->isHidden());
+
+  const QString warning = "VOXEL VIEW CAPPED - showing 100000 of 250000 (40%)";
+  ASSERT_TRUE(
+    QMetaObject::invokeMethod(
+      &fixture.panel, "updateVizCap", Q_ARG(QString, warning)));
+  EXPECT_EQ(fixture.viz_cap_label->text(), warning);
+  EXPECT_FALSE(fixture.viz_cap_label->isHidden());
+
+  // An empty payload is how tsdf_mapper clears the cap, so the row must go.
+  ASSERT_TRUE(
+    QMetaObject::invokeMethod(
+      &fixture.panel, "updateVizCap", Q_ARG(QString, QString())));
+  EXPECT_TRUE(fixture.viz_cap_label->isHidden());
 }

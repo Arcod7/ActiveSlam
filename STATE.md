@@ -519,7 +519,11 @@ them; and a worst-case all-no-return frame costs ~75 ms at
   The `tsdf`/`tsdf_rebuild` rows still need re-specifying and
   re-running on a moving robot before any rebuild-fidelity claim can be made.
   A 10+ minute single session is also now done (the 600 s baseline above).
-  Still open: `evo_ape`/`evo_rpe` cross-check against the written TUM files.
+  The `evo_ape`/`evo_rpe` cross-check against the written TUM files is done
+  (2026-08-02, `ladder10_20260801_0337/lc_s900`): unaligned APE RMSE matches
+  `benchmark.py`'s ATE exactly at 0.382222 m, RPE agrees to within 0.4 % at a
+  1 s delta, and the SE(3)-aligned APE is 0.214 m. Note evo has no seconds
+  delta unit — use `-d 10 -u f` for the 9.88 Hz estimate rate.
 - ✅ **Teardown hardening**: every node now tolerates a second SIGINT during
   shutdown without printing a traceback (previously a stray `KeyboardInterrupt`
   inside `destroy_node()`'s `finally` block would escape uncaught), and

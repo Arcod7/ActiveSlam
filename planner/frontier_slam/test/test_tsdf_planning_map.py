@@ -135,6 +135,8 @@ class _Recorder:
         self._voxels_cache = None
         self._planning_cache = None
         self._monotonic = lambda: 100.0
+        self._viz_cap = ''
+        self._viz_cap_last = ''
         self.rebuilt = []
 
     _voxels_gate = property(lambda self: self._vg)
@@ -147,6 +149,10 @@ def _stub(voxels_ready, planning_ready):
     m._pg = type('G', (), {'ready': lambda _s, _n: planning_ready})()
     m._rebuild_voxel_cache = lambda started: m.rebuilt.append('voxels')
     m._rebuild_planning_cache = lambda started: m.rebuilt.append('planning')
+    m._publish_viz_cap = lambda text: TSDFMapper._publish_viz_cap(m, text)
+    m._viz_cap_pub = type(
+        'P', (), {'publish': lambda _s, x: m.cap_published.append(x.data)})()
+    m.cap_published = []
     return m
 
 
@@ -190,6 +196,29 @@ def test_publish_voxels_unpacks_a_triple():
         'T', (), {'to_msg': lambda _s2: 'stamp'})()})()
     TSDFMapper._publish_voxels(m)
     assert len(published) == 3
+
+
+def test_cap_warning_goes_to_its_own_topic_and_only_on_change():
+    """The HUD row is state: republishing it every tick would flood /tsdf/viz_cap."""
+    m = _stub(voxels_ready=False, planning_ready=False)
+
+    def _msg():
+        return type('M', (), {'header': type('H', (), {'stamp': None})()})()
+
+    m._voxels_cache = (_msg(), _msg(), None)
+    m._solid_cloud_pub = m._voxels_pub = type(
+        'P', (), {'publish': lambda _s, _x: None})()
+    m.get_clock = lambda: type('C', (), {'now': lambda _s: type(
+        'T', (), {'to_msg': lambda _s2: 'stamp'})()})()
+
+    m._viz_cap = 'VOXEL VIEW CAPPED - showing 1 of 2 (50%)'
+    TSDFMapper._publish_voxels(m)
+    TSDFMapper._publish_voxels(m)
+    assert m.cap_published == [m._viz_cap]
+
+    m._viz_cap = ''
+    TSDFMapper._publish_voxels(m)
+    assert m.cap_published[-1] == ''
 
 
 # ── the gate charges work, not lock contention ───────────────────────────────

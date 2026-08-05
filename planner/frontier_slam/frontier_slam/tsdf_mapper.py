@@ -41,6 +41,9 @@ Published topics:
                            that colour, so the height the planner actually
                            reasons over is visible against the map it ignores.
                            Only available with publish_projected_map:=true.
+  /tsdf/viz_cap          (std_msgs/String) one-line warning for the RViz HUD
+                           panel when max_voxels_viz thins the CUBE_LIST;
+                           empty string clears it
   /tsdf/occupied_voxels  (sensor_msgs/PointCloud2) confidently solid TSDF
                            voxel centres for collision-aware goal validation
   /projected_map         (nav_msgs/OccupancyGrid) 2-D planning map for the
@@ -75,7 +78,7 @@ from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointField
-from std_msgs.msg import ColorRGBA, Header, Int32
+from std_msgs.msg import ColorRGBA, Header, Int32, String
 from visualization_msgs.msg import Marker, MarkerArray
 import tf2_ros
 from scipy.spatial.transform import Rotation, Slerp
@@ -332,6 +335,15 @@ class TSDFMapper(Node):
         self._normals_cloud_pub = self.create_publisher(
             PointCloud2, '/tsdf/surface_normals_cloud', 1)
         self._voxels_pub  = self.create_publisher(MarkerArray, '/tsdf/voxels',           1)
+        # Transient-local: the HUD row survives an RViz restart between two
+        # voxel ticks instead of coming up blank on a capped map.
+        self._viz_cap_pub = self.create_publisher(
+            String, '/tsdf/viz_cap',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       reliability=ReliabilityPolicy.RELIABLE,
+                       history=HistoryPolicy.KEEP_LAST))
+        self._viz_cap      = ''
+        self._viz_cap_last = None
         self._solid_cloud_pub = self.create_publisher(
             PointCloud2, '/tsdf/occupied_voxels', 1)
 
@@ -809,8 +821,15 @@ class TSDFMapper(Node):
         stamp = self.get_clock().now().to_msg()
         self._solid_cloud_pub.publish(_restamp(solid_cloud, stamp))
         self._voxels_pub.publish(_restamp(markers, stamp))
+        self._publish_viz_cap(self._viz_cap)
         if free_cloud is not None:
             self._free_cloud_pub.publish(_restamp(free_cloud, stamp))
+
+    def _publish_viz_cap(self, text: str) -> None:
+        """Latched, and only on change -- a HUD row is state, not a stream."""
+        if text != self._viz_cap_last:
+            self._viz_cap_last = text
+            self._viz_cap_pub.publish(String(data=text))
 
     def _rebuild_voxel_cache(self, started: float) -> None:
         """Walk the VDB grid once and rebuild every cached voxel-view message.
@@ -863,9 +882,10 @@ class TSDFMapper(Node):
             del_m.ns     = 'tsdf_voxels'
             del_m.id     = 0
             del_m.action = Marker.DELETE
+            self._viz_cap = ''
             self._voxels_cache = (
                 _make_pointcloud2(header, np.empty((0, 3), dtype=np.float32)),
-                MarkerArray(markers=[del_m, _cap_banner(0, 0, None, header)]),
+                MarkerArray(markers=[del_m]),
                 free_cloud)
             return
 
@@ -876,7 +896,6 @@ class TSDFMapper(Node):
         solid_cloud = _make_pointcloud2(header, solid_pts)
 
         n = len(pts)
-        all_pts = pts   # pre-thinning, so the banner sits over the whole map
         if n > self._max_viz:
             sel    = np.random.choice(n, self._max_viz, replace=False)
             pts    = pts[sel]
@@ -918,9 +937,8 @@ class TSDFMapper(Node):
         m.colors   = [ColorRGBA(r=float(c[0]), g=float(c[1]),
                                 b=float(c[2]), a=float(c[3])) for c in colors]
 
-        banner = _cap_banner(len(pts), n, all_pts, header)
-        self._voxels_cache = (solid_cloud, MarkerArray(markers=[m, banner]),
-                              free_cloud)
+        self._viz_cap = _cap_status(len(pts), n)
+        self._voxels_cache = (solid_cloud, MarkerArray(markers=[m]), free_cloud)
         self.get_logger().info(
             f'Voxels: {len(pts)} of {n} published in {self._voxels_gate.last_s:.2f}s',
             throttle_duration_sec=5.0)
@@ -1060,7 +1078,6 @@ class TSDFMapper(Node):
         self._solid_cloud_pub.publish(_make_pointcloud2(header, centers))
 
         n_total = len(centers)
-        all_centers = centers   # pre-thinning, so the banner sits over the whole map
         if n_total > self._max_viz:
             centers = centers[np.random.choice(n_total, self._max_viz, replace=False)]
 
@@ -1084,8 +1101,8 @@ class TSDFMapper(Node):
         m.colors   = [ColorRGBA(r=float(c[0]), g=float(c[1]),
                                 b=float(c[2]), a=float(c[3])) for c in colors]
 
-        banner = _cap_banner(len(centers), n_total, all_centers, header)
-        self._voxels_pub.publish(MarkerArray(markers=[m, banner]))
+        self._voxels_pub.publish(MarkerArray(markers=[m]))
+        self._publish_viz_cap(_cap_status(len(centers), n_total))
         self.get_logger().info(
             f'Voxels (surface-derived): {len(centers)} of {n_total} published',
             throttle_duration_sec=5.0)
@@ -1633,41 +1650,20 @@ def _make_normals_cloud(header: Header, points: np.ndarray,
     return msg
 
 
-def _cap_banner(shown: int, total: int, pts: 'np.ndarray | None',
-                header: Header) -> Marker:
-    """Text banner beside the map when max_voxels_viz thins the CUBE_LIST.
+def _cap_status(shown: int, total: int) -> str:
+    """One HUD line for /tsdf/viz_cap when max_voxels_viz thins the CUBE_LIST.
 
-    Anchored past the map's +X edge, not the centroid, so it reads like a
-    legend off to the side instead of a label sitting in the middle of the
-    voxels it describes. The cap is a render budget on the marker only --
-    /tsdf/occupied_voxels still carries every solid voxel -- so the wording
-    has to say the map is complete, or a thinned view reads as a mapping
-    failure. DELETEs itself when nothing was dropped, so the banner cannot
-    linger once the map shrinks back under the cap.
+    The cap is a render budget on the marker only -- /tsdf/occupied_voxels
+    still carries every solid voxel -- so the wording has to say the map is
+    complete, or a thinned view reads as a mapping failure. Empty string when
+    nothing was dropped, which clears the HUD row rather than leaving a stale
+    warning once the map shrinks back under the cap.
     """
-    m = Marker()
-    m.header.stamp    = header.stamp
-    m.header.frame_id = header.frame_id
-    m.ns       = 'tsdf_voxels_cap'
-    m.id       = 0
-    m.type     = Marker.TEXT_VIEW_FACING
-    m.lifetime = Duration(sec=4)
-    if pts is None or len(pts) == 0 or shown >= total:
-        m.action = Marker.DELETE
-        return m
-
-    m.action  = Marker.ADD
-    m.scale.z = 0.8                                  # text height in metres
-    m.color   = ColorRGBA(r=1.0, g=0.75, b=0.1, a=1.0)
-    # world_ned is +Z down, so min Z is the top of the map.
-    m.pose.position.x = float(pts[:, 0].max()) + 2.0
-    m.pose.position.y = float(pts[:, 1].mean())
-    m.pose.position.z = float(pts[:, 2].min()) - 1.5
-    m.pose.orientation.w = 1.0
+    if total <= 0 or shown >= total:
+        return ''
     pct = 100.0 * shown / total
-    m.text = (f'VOXEL VIEW CAPPED - {shown} of {total} ({pct:.0f}%)\n'
-              f'display limit only, map is complete')
-    return m
+    return (f'VOXEL VIEW CAPPED - showing {shown} of {total} ({pct:.0f}%) - '
+            f'display limit only, map is complete')
 
 
 def _normals_markers(points: np.ndarray, normals: np.ndarray,
