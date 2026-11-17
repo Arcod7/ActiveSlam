@@ -39,6 +39,7 @@ def _launch_eval_nodes(context, *args, **kwargs):
             'output_dir': output_dir,
             'rpe_delta': ParameterValue(
                 LaunchConfiguration('rpe_delta'), value_type=float),
+            'preset': LaunchConfiguration('preset'),
         }],
     )
 
@@ -50,6 +51,10 @@ def _launch_eval_nodes(context, *args, **kwargs):
         parameters=[{
             'output_dir': output_dir,
             'mapper': LaunchConfiguration('mapper'),
+            # Mirrors the map's cell size: explored extent is counted on this
+            # grid, so a run mapped at 0.15 m must not be binned at 0.2 m.
+            'voxel_size': ParameterValue(
+                LaunchConfiguration('voxel_size'), value_type=float),
         }],
     )
 
@@ -92,10 +97,20 @@ def generate_launch_description():
         'mapper', default_value='octomap', choices=['octomap', 'tsdf'],
         description='Map backend map_metrics.py should score against the ground-truth map',
     )
+    voxel_size_arg = DeclareLaunchArgument(
+        'voxel_size', default_value='0.2',
+        description='Map cell size in metres; mirrors the belief map',
+    )
+    preset_arg = DeclareLaunchArgument(
+        'preset', default_value='',
+        description='Launcher preset name to show on the Eval HUD (e.g. loop_closure_revisit)',
+    )
 
     return LaunchDescription([
         output_dir_arg,
         rpe_delta_arg,
         mapper_arg,
+        voxel_size_arg,
+        preset_arg,
         OpaqueFunction(function=_launch_eval_nodes),
     ])

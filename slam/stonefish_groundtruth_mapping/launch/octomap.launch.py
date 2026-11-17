@@ -35,6 +35,13 @@ def generate_launch_description():
             '-1 = auto-lock (unknown at launch time, so the map stays full-column).'),
     )
 
+    projected_map_band_m_arg = DeclareLaunchArgument(
+        'projected_map_band_m', default_value='1.0',
+        description=(
+            'Half-thickness (m) of the Z band collapsed into /projected_map, '
+            'centred on depth. Floors at the vehicle height (z_band.py).'),
+    )
+
     voxel_size_arg = DeclareLaunchArgument(
         'voxel_size', default_value='0.2',
         description='octomap_server resolution in metres',
@@ -49,8 +56,10 @@ def generate_launch_description():
         launch_arguments={
             'mapper': 'octomap',
             'depth': LaunchConfiguration('depth'),
+            'projected_map_band_m': LaunchConfiguration('projected_map_band_m'),
             'voxel_size': LaunchConfiguration('voxel_size'),
         }.items(),
     )
 
-    return LaunchDescription([depth_arg, voxel_size_arg, pointcloud, octomap])
+    return LaunchDescription([depth_arg, projected_map_band_m_arg, voxel_size_arg,
+                              pointcloud, octomap])

@@ -30,12 +30,36 @@ from sensor_msgs_py import point_cloud2
 from scipy.spatial.transform import Rotation
 import gtsam
 
-from slam_backend.sensor_models.noise_profiles import load_noise_profile, NoiseProfile
+from slam_backend.sensor_models.noise_profiles import (
+    load_composite_profile, NoiseProfile)
 from slam_backend.geometry_utils import (
     odom_to_matrix, matrix_to_odom, matrix_to_transform_stamped,
     matrix_to_pose_stamped, transform_msg_to_matrix, orthonormalize)
-from slam_backend.odom_noise import odom_trans_sigma
+from slam_backend.odom_noise import odom_trans_sigma, fused_yaw_stats
 from slam_backend.scan_matcher import ScanMatcher
+
+
+def pose_delta(T_old: np.ndarray, T_new: np.ndarray) -> tuple:
+    """Translation (m) and rotation (rad) between two world poses."""
+    T_delta = np.linalg.inv(T_old) @ T_new
+    dist = float(np.linalg.norm(T_delta[:3, 3]))
+    angle = float(np.arccos(np.clip((np.trace(T_delta[:3, :3]) - 1) / 2, -1, 1)))
+    return dist, angle
+
+
+def worst_pose_drift(pairs) -> tuple:
+    """Largest translation/rotation over (T_old, T_new) pairs, and the count.
+
+    Returns (0.0, 0.0, 0) for an empty sequence, so a caller with nothing yet
+    corrected reads as "no drift" rather than raising."""
+    worst_dist = worst_angle = 0.0
+    n = 0
+    for T_old, T_new in pairs:
+        dist, angle = pose_delta(T_old, T_new)
+        worst_dist = max(worst_dist, dist)
+        worst_angle = max(worst_angle, angle)
+        n += 1
+    return worst_dist, worst_angle, n
 
 
 # Rows/cols of a GTSAM [rot|trans] 6x6 that hold the drifting DoF: x, y, yaw.
@@ -74,6 +98,21 @@ def dopt_xyh(cov_gtsam_6x6: np.ndarray) -> float:
     deflate the geometric mean rather than report drift."""
     cov_xyh = cov_gtsam_6x6[np.ix_(XYH_INDICES, XYH_INDICES)]
     return float(np.power(max(np.linalg.det(cov_xyh), 0.0), 1.0 / 3.0))
+
+
+def sigmas_xyh(cov_gtsam_6x6: np.ndarray) -> "tuple[float, float]":
+    """The same marginal as dopt_xyh(), split into the two interpretable
+    numbers the revisit threshold is stated in: a horizontal sigma in metres
+    and a yaw sigma in radians.
+
+    sigma_xy is the 2x2 XY block's det^(1/4), i.e. the radius of the circle of
+    equal area to the covariance ellipse, so sigma_xy**4 * sigma_yaw**2 is
+    dopt_xyh()**3 up to the XY-yaw cross terms.
+    """
+    cov_xyh = cov_gtsam_6x6[np.ix_(XYH_INDICES, XYH_INDICES)]
+    sigma_xy = np.power(max(np.linalg.det(cov_xyh[:2, :2]), 0.0), 0.25)
+    sigma_yaw = np.sqrt(max(cov_xyh[2, 2], 0.0))
+    return float(sigma_xy), float(sigma_yaw)
 
 
 @dataclass
@@ -122,20 +161,26 @@ class PoseGraphNode(Node):
         super().__init__('pose_graph', **kwargs)
 
         self.declare_parameter('noise_profile_path', '')
+        # Per-sensor profile overrides, matching the sim's own: the DVL terms
+        # feeding odom_trans_sigma() must be the ones actually injected.
+        for sensor in ('pressure', 'imu', 'compass', 'dvl'):
+            self.declare_parameter(f'noise_profile_path_{sensor}', '')
         self.declare_parameter('world_frame', 'world_ned')
         self.declare_parameter('base_frame', 'bluerov2/base_link')
         self.declare_parameter('camera_frame', 'bluerov2/Dcam')
-        self.declare_parameter('keyframe_dist_m', 1.0)
-        self.declare_parameter('keyframe_angle_rad', 0.3)
+        # Floor is ~0.17 for both: below that the per-cell cap absorbs the extra.
+        self.declare_parameter('keyframe_dist_m', 0.5)
+        self.declare_parameter('keyframe_angle_rad', 0.2)
         # Station-keeping cap: without it a hover (or a sweep rotating in place)
         # keeps crossing keyframe_angle_rad and piles up co-located keyframes,
         # which is what makes closure candidacy degenerate to all-pairs.
         self.declare_parameter('keyframe_max_per_cell', 3)
         self.declare_parameter('keyframe_cell_radius_m', 0.5)
-        self.declare_parameter('keyframe_cell_angle_rad', 0.5)
+        self.declare_parameter('keyframe_cell_angle_rad', 0.175)   # 10 deg
         self.declare_parameter('loop_closure_enabled', True)
         self.declare_parameter('loop_closure_radius_m', 5.0)
-        self.declare_parameter('loop_closure_min_gap', 10)
+        # Counted in keyframes, so it tracks keyframe_dist_m to stay ~10 m of travel.
+        self.declare_parameter('loop_closure_min_gap', 20)
         # Per-keyframe registration budget. Candidates are thinned to at most
         # max_candidates, spread at least cluster_radius apart, so the budget is
         # not spent on many near-identical targets from one hover.
@@ -159,6 +204,11 @@ class PoseGraphNode(Node):
         # per-edge value is derived from the DVL profile in odom_noise.py.
         self.declare_parameter('odom_sigma_rot', 0.02)
         self.declare_parameter('odom_sigma_trans', 0.002)
+        # Off by default: see odom_trans_sigma()'s docstring. Changes what the
+        # marginal covariance (and so d-opt/sigma_xy/the revisit trigger)
+        # reports for a run with the same scale_error_pct/bias_m_s -- not
+        # comparable to a run recorded with this off.
+        self.declare_parameter('odom_coherent_noise', False)
         self.declare_parameter('scan_sigma_rot', 0.08)
         self.declare_parameter('scan_sigma_trans', 0.12)
         self.declare_parameter('scan_voxel_size', 0.1)
@@ -193,6 +243,7 @@ class PoseGraphNode(Node):
         self.loop_closure_cluster_radius_m = p('loop_closure_cluster_radius_m').value
         self.loop_closure_retry_move_m = p('loop_closure_retry_move_m').value
         self.loop_closure_dopt_floor = p('loop_closure_dopt_floor').value
+        self.odom_coherent_noise = p('odom_coherent_noise').value
         self.redetect_max_keyframes = p('redetect_max_keyframes').value
         self.redetect_min_interval_s = p('redetect_min_interval_s').value
         self.min_inlier_ratio = p('min_inlier_ratio').value
@@ -211,13 +262,17 @@ class PoseGraphNode(Node):
         yaml_path = p('noise_profile_path').value
         if not yaml_path or not os.path.exists(yaml_path):
             self.get_logger().warn(f"Invalid noise profile path: '{yaml_path}', using ideal defaults.")
-            profile = NoiseProfile()
-        else:
-            profile = load_noise_profile(yaml_path)
+        profile = load_composite_profile(yaml_path, {
+            sensor: p(f'noise_profile_path_{sensor}').value
+            for sensor in ('pressure', 'imu', 'compass', 'dvl')})
         self._profile = profile
 
         odom_sigmas = (p('odom_sigma_rot').value, p('odom_sigma_trans').value)
         scan_sigmas = (p('scan_sigma_rot').value, p('scan_sigma_trans').value)
+        # Heading error drives the largest share of dead-reckoning drift, since
+        # dead_reckoning.py rotates DVL velocity by the ESTIMATED attitude. Both
+        # numbers are solved from the profile, not fitted.
+        self._yaw_sigma, self._yaw_tau = fused_yaw_stats(profile.imu, profile.compass)
 
         self._scanner = ScanMatcher(
             max_correspondence_dist=p('scan_max_correspondence_dist').value,
@@ -226,6 +281,17 @@ class PoseGraphNode(Node):
         self._setup_gtsam(odom_sigmas, scan_sigmas, profile)
 
         self._keyframes: list[Keyframe] = []
+        # Distance/time dead-reckoned since keyframe 0, only advanced when
+        # odom_coherent_noise is on -- the single running "arm" odom_trans_sigma()
+        # needs to size each edge's slice of the run-long scale/bias variance.
+        self._cum_dist_m = 0.0
+        self._cum_time_s = 0.0
+        # Arms for the body-frame systematic terms: displacement from the first
+        # keyframe, and the norm of the integrated rotation. Running maxima.
+        self._cum_disp_m = 0.0
+        self._cum_rot_time_s = 0.0
+        self._rot_integral = np.zeros((3, 3))
+        self._anchor_xyz = None
         # (T_odom, T_world) of the newest keyframe, as one tuple the optimiser
         # replaces in a single assignment. The odometry thread reads the pair
         # without a lock; reading the two fields off a live Keyframe could
@@ -264,6 +330,9 @@ class PoseGraphNode(Node):
         self.pub_keyframe_count = self.create_publisher(Int32, '/slam/keyframe_count', 10)
         self.pub_loop_closure_count = self.create_publisher(Int32, '/slam/loop_closure_count', 10)
         self.pub_dopt = self.create_publisher(Float64, '/slam/dopt', 10)
+        # The same marginal per axis, so a reader can see which one drove D-opt.
+        self.pub_sigma_xy = self.create_publisher(Float64, '/slam/sigma_xy', 10)
+        self.pub_sigma_yaw = self.create_publisher(Float64, '/slam/sigma_yaw', 10)
         # Consistency diagnostics: unlike D-optimality these say whether the
         # assumed noise models match the residuals actually observed, and need
         # no ground truth, so they are available on a real vehicle too.
@@ -371,16 +440,46 @@ class PoseGraphNode(Node):
         self._sym_a = gtsam.symbol('n', 0)
         self._sym_b = gtsam.symbol('n', 1)
 
-    def _odom_noise_for(self, T_delta: np.ndarray, prev_stamp, stamp):
+    def _odom_noise_for(self, T_delta: np.ndarray, prev_stamp, stamp,
+                        T_odom: np.ndarray = None):
         """Dead-reckoning noise for one edge, scaled by how far and how long
         the vehicle travelled. Rotation keeps its constant: relative attitude
         between two keyframes does not accumulate the way position does."""
+        dist = float(np.linalg.norm(T_delta[:3, 3]))
+        dt = _stamp_seconds(stamp) - _stamp_seconds(prev_stamp)
+        cum_dist = cum_time = cum_disp = cum_rot = None
+        if self.odom_coherent_noise:
+            d0, t0 = self._cum_dist_m, self._cum_time_s
+            self._cum_dist_m += dist
+            self._cum_time_s += max(0.0, dt)
+            cum_dist = (d0, self._cum_dist_m)
+            cum_time = (t0, self._cum_time_s)
+            cum_disp, cum_rot = self._advance_coherent_arms(T_odom, dt)
         sigma = odom_trans_sigma(
-            float(np.linalg.norm(T_delta[:3, 3])),
-            _stamp_seconds(stamp) - _stamp_seconds(prev_stamp),
-            self._profile.dvl, self._odom_trans_floor)
+            dist, dt, self._profile.dvl, self._odom_trans_floor,
+            cum_dist_m=cum_dist, cum_time_s=cum_time,
+            cum_disp_m=cum_disp, cum_rot_time_s=cum_rot,
+            yaw_sigma_rad=self._yaw_sigma, yaw_corr_time_s=self._yaw_tau,
+            yaw_bias_drift_rad_s=self._profile.compass.bias_drift_rad_s)
         return gtsam.noiseModel.Diagonal.Sigmas(
             np.array([self._odom_rot] * 3 + [sigma] * 3))
+
+    def _advance_coherent_arms(self, T_odom, dt):
+        """(before, after) running maxima of displacement and ||integral R dt||.
+
+        Both are the arms the body-frame systematic terms accumulate against,
+        and odom_trans_sigma needs them monotone -- see its docstring for why
+        the running maximum is the tightest bound a factor chain can carry.
+        """
+        if T_odom is None or self._anchor_xyz is None:
+            return None, None
+        disp0, rot0 = self._cum_disp_m, self._cum_rot_time_s
+        disp = float(np.linalg.norm(T_odom[:3, 3] - self._anchor_xyz))
+        self._cum_disp_m = max(self._cum_disp_m, disp)
+        self._rot_integral += T_odom[:3, :3] * max(0.0, dt)
+        self._cum_rot_time_s = max(self._cum_rot_time_s,
+                                   float(np.linalg.norm(self._rot_integral[:2, :])))
+        return (disp0, self._cum_disp_m), (rot0, self._cum_rot_time_s)
 
     def _att_depth_noise_for(self, yaw_var: float):
         """Per-keyframe attitude+depth prior; rebuilt because yaw varies."""
@@ -496,6 +595,7 @@ class PoseGraphNode(Node):
         prepared_new = self._scanner.prepare(cloud_body)
 
         if n == 0:
+            self._anchor_xyz = T_odom[:3, 3].copy()
             pose = gtsam.Pose3(T_odom)
             graph.addPriorPose3(sym, pose, self._odom_noise)
             values.insert(sym, pose)
@@ -507,7 +607,7 @@ class PoseGraphNode(Node):
             T_delta = np.linalg.inv(prev.T_odom) @ T_odom
             graph.add(gtsam.BetweenFactorPose3(
                 prev.symbol, sym, gtsam.Pose3(T_delta),
-                self._odom_noise_for(T_delta, prev.stamp, stamp)))
+                self._odom_noise_for(T_delta, prev.stamp, stamp, T_odom)))
 
             # 2) Sequential scan-matching BetweenFactor (looser, robustified)
             result = self._align(cloud_body, prev, T_delta, prepared_new)
@@ -575,13 +675,16 @@ class PoseGraphNode(Node):
             if redetect:
                 self._redetect_and_apply(redetect)
 
+        # Measured against the last rebuild's baseline, not against this
+        # update: the correction the rebuild publishes is cumulative, so the
+        # threshold deciding whether to publish it has to be too. Gated on
+        # `moved` only as a cheap early-out — nothing moved, nothing changed.
         if self.map_rebuild_enabled and moved:
-            max_dist = max(dist for _, dist, _ in moved)
-            max_angle = max(angle for _, _, angle in moved)
+            max_dist, max_angle, n_drifted = self._drift_since_rebuild()
             rebuild_min_move_m = float(self.get_parameter('rebuild_min_move_m').value)
             rebuild_min_move_rad = float(self.get_parameter('rebuild_min_move_rad').value)
             if max_dist > rebuild_min_move_m or max_angle > rebuild_min_move_rad:
-                self._maybe_trigger_rebuild(max_dist, max_angle, len(moved))
+                self._maybe_trigger_rebuild(max_dist, max_angle, n_drifted)
 
         # Marginal covariance is queried only for the node just added — walking
         # every stored keyframe on each update would grow the per-keyframe cost
@@ -768,18 +871,31 @@ class PoseGraphNode(Node):
 
     def _find_moved_keyframes(self, result_values, threshold_m=0.1, threshold_rad=0.05):
         """Returns [(index, dist, angle), ...] for keyframes that shifted more
-        than the threshold; dist/angle are also read by the map-rebuild
-        trigger (a coarser threshold on the same numbers, see _add_keyframe)."""
+        than the threshold *in this update* — the trigger for re-detecting
+        loop closures on keyframes whose pose just changed.
+
+        Deliberately NOT the map-rebuild trigger: see _drift_since_rebuild."""
         moved = []
         for kf in self._keyframes:
             T_new = result_values.atPose3(kf.symbol).matrix()
-            T_delta = np.linalg.inv(kf.T_world) @ T_new
-            dist = np.linalg.norm(T_delta[:3, 3])
-            angle = np.arccos(np.clip((np.trace(T_delta[:3, :3]) - 1) / 2, -1, 1))
+            dist, angle = pose_delta(kf.T_world, T_new)
             if dist > threshold_m or angle > threshold_rad:
                 moved.append((kf.index, dist, angle))
             self._refresh_pose(kf, T_new)
         return moved
+
+    def _drift_since_rebuild(self):
+        """Worst keyframe correction accumulated since the last re-integration.
+
+        This, not the per-update movement, is what the map is stale by: the
+        rebuild publishes its corrections against _rebuild_old_poses, so the
+        trigger has to be measured against the same baseline. With loop
+        closure running continuously a metre of accumulated correction
+        arrives in centimetre increments, and no single update ever crosses
+        a 0.3 m threshold while the map drifts metres behind the graph."""
+        return worst_pose_drift(
+            (old, kf.T_world) for kf in self._keyframes
+            if (old := self._rebuild_old_poses.get(kf.index)) is not None)
 
     def _redetect_and_apply(self, moved_indices):
         """Re-run loop-closure detection for keyframes that shifted after the
@@ -880,6 +996,9 @@ class PoseGraphNode(Node):
         self.pub_loop_closure_count.publish(Int32(data=n_closures))
 
         self.pub_dopt.publish(Float64(data=dopt_xyh(cov_6x6)))
+        sigma_xy, sigma_yaw = sigmas_xyh(cov_6x6)
+        self.pub_sigma_xy.publish(Float64(data=sigma_xy))
+        self.pub_sigma_yaw.publish(Float64(data=sigma_yaw))
 
     def _publish_visualization(self):
         """Paths and markers, on a timer rather than per keyframe.

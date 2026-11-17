@@ -36,6 +36,14 @@ Published topics:
                              saturation = confidence it is a wall (TSDF depth):
                                           pale = least-confident shown voxel,
                                           vivid = deep solid
+                           voxels inside the planning band — the Z slice
+                           /projected_map is built from — are tinted blue over
+                           that colour, so the height the planner actually
+                           reasons over is visible against the map it ignores.
+                           Only available with publish_projected_map:=true.
+  /tsdf/viz_cap          (std_msgs/String) one-line warning for the RViz HUD
+                           panel when max_voxels_viz thins the CUBE_LIST;
+                           empty string clears it
   /tsdf/occupied_voxels  (sensor_msgs/PointCloud2) confidently solid TSDF
                            voxel centres for collision-aware goal validation
   /projected_map         (nav_msgs/OccupancyGrid) 2-D planning map for the
@@ -53,6 +61,7 @@ Published topics:
 """
 
 from collections import deque, OrderedDict
+import math
 import threading
 import time
 
@@ -69,23 +78,37 @@ from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointField
-from std_msgs.msg import ColorRGBA, Header, Int32
+from std_msgs.msg import ColorRGBA, Header, Int32, String
 from visualization_msgs.msg import Marker, MarkerArray
 import tf2_ros
 from scipy.spatial.transform import Rotation, Slerp
 from vdbfusion import VDBVolume
 
 
+# Blue-ish tint blended over the voxel colour inside the planning band —
+# keep in sync with the "Map voxels (TSDF)" group in legend_rviz.
+BAND_TINT     = np.array([0.05, 0.20, 1.00], dtype=np.float32)
+BAND_TINT_MIX = 0.5   # 1.0 would erase the weight/confidence shading
+
+
 class TSDFMapper(Node):
-    """Threading: ingest (cloud + TF drain + replay), viz (surface + voxels) and
-    stats each own a MutuallyExclusiveCallbackGroup and run under a
-    MultiThreadedExecutor, so a slow grid walk cannot starve /cloud_in or the TF
-    callbacks that resolve deferred scans. _volume_lock serialises every VDB
-    access across those threads; viz work is duty-capped and cached by revision
-    so it re-extracts only when the map actually changed."""
+    """Threading: ingest (cloud + TF drain + replay), stats, and each of the
+    three outputs -- surface, voxel CUBE_LIST, planning map -- own a
+    MutuallyExclusiveCallbackGroup and run under a MultiThreadedExecutor, so a
+    slow grid walk cannot starve /cloud_in or the TF callbacks that resolve
+    deferred scans. _volume_lock serialises every VDB access across those
+    threads; each output is duty-capped by its own gate and cached by revision
+    so it re-extracts only when the map actually changed.
+
+    The three outputs are deliberately not one job. The CUBE_LIST walk is
+    Python per active voxel and grows with the carved volume (8 s on a 110k
+    map, measured 2026-07-31), and it is decorative. /projected_map is what the
+    planner routes on and /tsdf/surface_cloud is what the wall controller
+    steers on; sharing one gate and one group put both behind the CUBE_LIST."""
 
     PUBLISH_HZ   = 1.0   # surface cloud + normals (upper bound; see viz_max_duty)
     VOXEL_VIZ_HZ = 0.5   # voxel CUBE_LIST (expensive iteration)
+    PLANNING_HZ  = 2.0   # /projected_map (thin Z band, vectorised)
 
     def __init__(self) -> None:
         super().__init__('tsdf_mapper')
@@ -94,24 +117,34 @@ class TSDFMapper(Node):
         self.declare_parameter('world_frame',      'world_ned')
         self.declare_parameter('cloud_frame',      'bluerov2/Dcam')
         self.declare_parameter('voxel_size',       0.2)
-        self.declare_parameter('trunc_distance',   0.6)    # metres, ≥ 3× voxel_size
+        # <= 0 resolves to 3x voxel_size, the minimum VDBFusion needs for a
+        # usable gradient. Set it explicitly to map structure thinner than
+        # 2x trunc, which a single signed field cannot hold (see
+        # directional_tsdf).
+        self.declare_parameter('trunc_distance',   0.0)
         self.declare_parameter('space_carving',    True)
+        # WIP: one volume per view-direction bin instead of one shared field,
+        # so a surface seen from both faces stops averaging itself away.
+        self.declare_parameter('directional_tsdf', False)
         self.declare_parameter('min_weight',       2.0)
         self.declare_parameter('voxel_min_weight', 10.0)   # hide voxels observed fewer times
         self.declare_parameter('voxel_min_solid_confidence', 0.80)  # see module docstring
         self.declare_parameter('normal_every',     10)
-        self.declare_parameter('max_voxels_viz',   40_000)
+        self.declare_parameter('max_voxels_viz',   100_000)
         self.declare_parameter('show_free_voxels', False)
         # Discard points beyond the simulated Sonar 3D-15 beam range before
         # integration. The depth-camera proxy may produce farther off-axis
         # points, but the physical Water Linked sensor has a 15 m radial range.
         self.declare_parameter('max_range_m', 15.0)
-        # Free-space carving for no-return pixels: synthesize a pseudo-point
-        # past the sensor max so space_carving frees the traversed voxels.
-        # vdbfusion has no carve-only ray API, so the endpoint itself writes a
-        # surface — carve_range_m keeps it outside the mapped envelope.
+        # Free-space carving for no-return pixels: mark every voxel the ray
+        # crossed free, with no surface at the far end (_carve_no_return_rays).
         self.declare_parameter('carve_no_return', False)
-        self.declare_parameter('carve_range_m', 16.0)
+        # <= 0 resolves to max_range_m: a no-return ray carries no information
+        # past the range the sensor could have detected a return at.
+        self.declare_parameter('carve_range_m', 0.0)
+        # Pixel decimation for carve rays. At 15 m two adjacent Sonar 3D-15
+        # pixels are ~0.09 m apart, so stride 2 still samples below voxel_size.
+        self.declare_parameter('carve_pixel_stride', 2)
         # 2-D planning map derived from this TSDF grid, published on
         # /projected_map for the frontier planner + A* (see module docstring).
         # Off by default so only the belief instance under mode:=frontier
@@ -162,6 +195,9 @@ class TSDFMapper(Node):
         self._max_range    = float(self.get_parameter('max_range_m').value)
         self._carve_no_return = bool(self.get_parameter('carve_no_return').value)
         self._carve_range  = float(self.get_parameter('carve_range_m').value)
+        if self._carve_range <= 0.0:
+            self._carve_range = self._max_range
+        self._carve_stride = max(1, int(self.get_parameter('carve_pixel_stride').value))
         self._projected_map_enabled = bool(
             self.get_parameter('publish_projected_map').value)
         self._free_voxels_enabled = bool(
@@ -178,18 +214,23 @@ class TSDFMapper(Node):
         voxel_size         = float(self.get_parameter('voxel_size').value)
         trunc              = float(self.get_parameter('trunc_distance').value)
         space_carving      = bool(self.get_parameter('space_carving').value)
+        directional        = bool(self.get_parameter('directional_tsdf').value)
+
+        if trunc <= 0.0:
+            trunc = 3.0 * voxel_size
 
         self._voxel_size = voxel_size
         self._trunc      = trunc
         self._space_carving = space_carving
+        self._directional = directional
         # solid-confidence = (trunc - d) / (2*trunc) >= voxel_min_solid_confidence
         #   <=>  d <= trunc * (1 - 2*voxel_min_solid_confidence)
         self._voxel_max_d = trunc * (1.0 - 2.0 * self._voxel_min_solid_confidence)
-        self._volume     = VDBVolume(voxel_size, trunc, space_carving=space_carving)
-        # Every VDB access is serialised on this; the volume itself is not
-        # thread-safe and a rebuild swaps the object outright.
+        self._volumes    = self._new_volumes()
+        # Every VDB access is serialised on this; the volumes themselves are not
+        # thread-safe and a rebuild swaps them outright.
         self._volume_lock = threading.Lock()
-        self._pyopenvdb = bool(self._volume.pyopenvdb_support_enabled)
+        self._pyopenvdb = bool(self._volumes[0].pyopenvdb_support_enabled)
         # Bumped on every integrate/replay/reset so viz can skip unchanged maps.
         self._map_revision = 0
 
@@ -198,7 +239,8 @@ class TSDFMapper(Node):
                 'VDBFusion built without pyopenvdb — voxel visualisation disabled')
 
         self.get_logger().info(
-            f'TSDF  voxel={voxel_size}m  trunc={trunc}m  space_carving={space_carving}')
+            f'TSDF  voxel={voxel_size}m  trunc={trunc}m  space_carving={space_carving}'
+            + (f'  directional={len(self._volumes)} bins (WIP)' if directional else ''))
 
         # Thresholds that filter what the map publishes rather than what it
         # stores, so they can move without touching the grid. Settable at
@@ -231,15 +273,24 @@ class TSDFMapper(Node):
         self._ingest_group = MutuallyExclusiveCallbackGroup()
         self._viz_group    = MutuallyExclusiveCallbackGroup()
         self._stats_group  = MutuallyExclusiveCallbackGroup()
+        # One group each, so the CUBE_LIST walk cannot stall the two outputs a
+        # moving vehicle steers on. Sharing _viz_group starved /tsdf/surface_cloud
+        # for the whole of a grid walk -- past the controller's 5 s staleness
+        # limit once the walk reached 8 s, which dropped its wall-side lock.
+        self._surface_group  = MutuallyExclusiveCallbackGroup()
+        self._planning_group = MutuallyExclusiveCallbackGroup()
 
         viz_max_duty = float(self.get_parameter('viz_max_duty').value)
         self._max_normals = max(0, int(self.get_parameter('max_normals').value))
-        self._surface_gate = _DutyGate(viz_max_duty)
-        self._voxels_gate  = _DutyGate(viz_max_duty)
-        self._surface_revision = -1
-        self._voxels_revision  = -1
-        self._surface_cache = None
-        self._voxels_cache  = None
+        self._surface_gate  = _DutyGate(viz_max_duty)
+        self._voxels_gate   = _DutyGate(viz_max_duty)
+        self._planning_gate = _DutyGate(viz_max_duty)
+        self._surface_revision  = -1
+        self._voxels_revision   = -1
+        self._planning_revision = -1
+        self._surface_cache  = None
+        self._voxels_cache   = None
+        self._planning_cache = None
 
         # ── pub/sub ──────────────────────────────────────────────────────
         # Depth matches the TF queue: a viz cycle can block ingest for its whole
@@ -278,11 +329,21 @@ class TSDFMapper(Node):
                 'Map rebuild consumer enabled: will reset+re-integrate cached scans '
                 'on a validated /slam/rebuild/path_old + path_new pair')
 
+        self._cache_scans_pub = self.create_publisher(Int32, '/tsdf/cache_scans', 10)
         self._cloud_pub   = self.create_publisher(PointCloud2, '/tsdf/surface_cloud',   1)
         self._normals_pub = self.create_publisher(MarkerArray, '/tsdf/surface_normals',  1)
         self._normals_cloud_pub = self.create_publisher(
             PointCloud2, '/tsdf/surface_normals_cloud', 1)
         self._voxels_pub  = self.create_publisher(MarkerArray, '/tsdf/voxels',           1)
+        # Transient-local: the HUD row survives an RViz restart between two
+        # voxel ticks instead of coming up blank on a capped map.
+        self._viz_cap_pub = self.create_publisher(
+            String, '/tsdf/viz_cap',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       reliability=ReliabilityPolicy.RELIABLE,
+                       history=HistoryPolicy.KEEP_LAST))
+        self._viz_cap      = ''
+        self._viz_cap_last = None
         self._solid_cloud_pub = self.create_publisher(
             PointCloud2, '/tsdf/occupied_voxels', 1)
 
@@ -325,9 +386,12 @@ class TSDFMapper(Node):
         self._last_surface_verts = None
 
         self.create_timer(1.0 / self.PUBLISH_HZ,   self._publish_surface,
-                          callback_group=self._viz_group)
+                          callback_group=self._surface_group)
         self.create_timer(1.0 / self.VOXEL_VIZ_HZ, self._publish_voxels,
                           callback_group=self._viz_group)
+        if self._projected_map_pub is not None:
+            self.create_timer(1.0 / self.PLANNING_HZ, self._publish_projected_map,
+                              callback_group=self._planning_group)
 
         self.get_logger().info('tsdf_mapper ready')
 
@@ -336,7 +400,7 @@ class TSDFMapper(Node):
     # ────────────────────────────────────────────────────────────────────
 
     LIVE_PARAMS = ('voxel_min_weight', 'voxel_min_solid_confidence',
-                   'target_depth_m')
+                   'target_depth_m', 'projected_map_band_m')
 
     def _on_set_parameters(self, params):
         """Apply the publish-time thresholds; refuse what the grid was built on.
@@ -357,6 +421,10 @@ class TSDFMapper(Node):
             elif p.name == 'voxel_min_solid_confidence':
                 self._voxel_min_solid_confidence = value
                 self._voxel_max_d = self._trunc * (1.0 - 2.0 * value)
+            elif p.name == 'projected_map_band_m':
+                # Like the centre, live: the projection is recomputed from the
+                # volume each cycle, so widening the band costs no map.
+                self._projected_map_band = abs(value)
             else:
                 self._target_depth = value
                 # Negative hands the band centre back to the next TF lookup.
@@ -449,7 +517,68 @@ class TSDFMapper(Node):
             f'failed={self._tf_failed} overflow={self._tf_overflow} '
             f'queued={len(self._tf_queue)} rev={self._map_revision} '
             f'viz: surface={self._surface_gate.last_s:.2f}s '
-            f'voxels={self._voxels_gate.last_s:.2f}s')
+            f'voxels={self._voxels_gate.last_s:.2f}s '
+            f'planning={self._planning_gate.last_s:.2f}s')
+
+    # ────────────────────────────────────────────────────────────────────
+    # Directional TSDF (WIP)
+    #
+    # A TSDF's sign is defined by the side the sensor observed a surface from,
+    # so a structure thinner than 2x trunc that is seen from both faces writes
+    # opposing fields into the same voxels. VDBFusion weight-averages them, the
+    # zero crossing flattens to ~0 and the surface dissolves into speckle.
+    #
+    # Binning each ray by its dominant view axis keeps the two faces in separate
+    # volumes, which never average; reads merge by picking the most solid bin
+    # per voxel rather than averaging. Splietker & Behnke (IROS 2019) bin by
+    # surface normal — view direction is the cheap proxy, since a face is only
+    # ever observed from the side it points at.
+    #
+    # Not yet validated against the ground-truth map: costs 6 grid walks per viz
+    # cycle, and the merge biases free/solid disputes toward solid.
+    # ────────────────────────────────────────────────────────────────────
+
+    DIRECTION_BINS = 6      # +X -X +Y -Y +Z -Z
+
+    def _new_volumes(self) -> list:
+        n = self.DIRECTION_BINS if self._directional else 1
+        return [VDBVolume(self._voxel_size, self._trunc,
+                          space_carving=self._space_carving) for _ in range(n)]
+
+    def _integrate_into(self, pts_world: np.ndarray, origin: np.ndarray) -> None:
+        """Integrate one scan, split across direction bins when directional."""
+        if not self._directional:
+            self._volumes[0].integrate(pts_world, origin)
+            return
+        bins = _direction_bins(pts_world - origin)
+        for b, volume in enumerate(self._volumes):
+            sel = pts_world[bins == b]
+            if len(sel):
+                volume.integrate(sel, origin)
+
+    def _carve_no_return_rays(self, dirs_world: np.ndarray,
+                              origin: np.ndarray) -> int:
+        """Write d=+trunc (fully free) into every voxel a no-return ray crossed.
+
+        integrate() cannot express this: its rays end at a point, and that
+        endpoint always writes a zero crossing — a surface. A no-return ray has
+        no endpoint, so the voxels are written directly instead, saturated free
+        out to carve_range_m and nothing beyond it.
+        """
+        bins = (_direction_bins(dirs_world) if self._directional
+                else np.zeros(len(dirs_world), dtype=int))
+        # Ray marching is the expensive half and touches no grid, so it stays
+        # outside the lock; only the writes are serialised against viz.
+        parts = [(volume, free_ray_voxels(dirs_world[bins == b], origin,
+                                          self._voxel_size, self._carve_range))
+                 for b, volume in enumerate(self._volumes)]
+        total = 0
+        with self._volume_lock:
+            for volume, voxels in parts:
+                for ijk in voxels.tolist():
+                    volume.update_tsdf(self._trunc, ijk)
+                total += len(voxels)
+        return total
 
     def _integrate_cloud(self, msg: PointCloud2, tf_msg) -> bool:
         """Filter and integrate one cloud using its exact capture-time TF."""
@@ -461,15 +590,13 @@ class TSDFMapper(Node):
         # and the real Sonar 3D-15's 15 m acoustic range.
         pts_cam = pts_cam[np.linalg.norm(pts_cam, axis=1) < self._max_range]
 
-        # Appended after the range filter — these sit past max_range by design.
+        carve_dirs = None
         if self._carve_no_return:
             raw = _parse_pointcloud2_raw(msg)
             if raw is not None:
-                pseudo = synth_no_return_points(raw, msg.width, self._carve_range)
-                if len(pseudo):
-                    pts_cam = np.vstack([pts_cam, pseudo])
+                carve_dirs = no_return_ray_dirs(raw, msg.width, self._carve_stride)
 
-        if len(pts_cam) == 0:
+        if len(pts_cam) == 0 and (carve_dirs is None or not len(carve_dirs)):
             return False
 
         T = _tf_to_matrix(tf_msg.transform)   # T_world_cam (4×4, float64)
@@ -482,15 +609,20 @@ class TSDFMapper(Node):
         pts_world = pts_cam @ R.T + t      # (N,3) world frame, float64
         origin    = t                       # camera origin in world frame, float64
 
-        with self._volume_lock:
-            self._volume.integrate(pts_world, origin)
+        carved = 0
+        if len(pts_world):
+            with self._volume_lock:
+                self._integrate_into(pts_world, origin)
+        if carve_dirs is not None and len(carve_dirs):
+            carved = self._carve_no_return_rays(carve_dirs @ R.T, origin)
         self._map_revision += 1
 
         if self._enable_rebuild:
             self._cache_scan(msg.header.stamp, pts_cam, T)
 
         self.get_logger().info(
-            f'Integrated {len(pts_world)} pts  cam=({t[0]:.2f},{t[1]:.2f},{t[2]:.2f})',
+            f'Integrated {len(pts_world)} pts  carved {carved} voxels  '
+            f'cam=({t[0]:.2f},{t[1]:.2f},{t[2]:.2f})',
             throttle_duration_sec=2.0)
         return True
 
@@ -506,6 +638,9 @@ class TSDFMapper(Node):
         key = (stamp.sec, stamp.nanosec)
         self._scan_cache[key] = (pts_down, T_world_cam)
         _evict_fifo(self._scan_cache, self._cache_max_scans)
+        # Once this saturates at cache_max_scans, a rebuild can no longer
+        # re-integrate the start of the run and permanently drops that surface.
+        self._cache_scans_pub.publish(Int32(data=len(self._scan_cache)))
 
     # ────────────────────────────────────────────────────────────────────
     # Map rebuild consumer (pose_graph.py is the publisher side)
@@ -553,8 +688,7 @@ class TSDFMapper(Node):
         self._write_back_cache(keyframe_ts, corrections)
 
         with self._volume_lock:
-            self._volume = VDBVolume(
-                self._voxel_size, self._trunc, space_carving=self._space_carving)
+            self._volumes = self._new_volumes()
         self._map_revision += 1
         self._replay_queue = list(self._scan_cache.keys())
         self.get_logger().info(
@@ -581,7 +715,7 @@ class TSDFMapper(Node):
                 pts_cam, T = entry
                 R, t = T[:3, :3], T[:3, 3]
                 pts_world = pts_cam.astype(np.float64) @ R.T + t
-                self._volume.integrate(pts_world, t)
+                self._integrate_into(pts_world, t)
         self._map_revision += 1
         if not self._replay_queue:
             self.get_logger().info('Map rebuild replay complete')
@@ -619,19 +753,29 @@ class TSDFMapper(Node):
         sampled = normals = None
         with self._volume_lock:
             try:
-                verts, _tris = self._volume.extract_triangle_mesh(
-                    fill_holes=False, min_weight=float(self._min_weight))
+                # Each direction bin meshes on its own — a shared marching-cubes
+                # pass is exactly the averaging this mode avoids. reshape keeps
+                # an empty bin at (0,3) so the concatenate below still matches.
+                per_bin = [np.asarray(v.extract_triangle_mesh(
+                    fill_holes=False, min_weight=float(self._min_weight))[0],
+                    dtype=np.float32).reshape(-1, 3) for v in self._volumes]
             except Exception as exc:
                 self.get_logger().warn(
                     f'extract_triangle_mesh failed: {exc}', throttle_duration_sec=5.0)
-                verts = None
-            if verts is not None:
-                verts = np.asarray(verts, dtype=np.float32)
-                # Normals need the TSDF grid (pyopenvdb-only); the cloud does not.
-                if len(verts) and self._pyopenvdb:
-                    sampled = verts[::self._normal_stride(len(verts))]
-                    normals = _compute_normals_vdb(
-                        self._volume.tsdf, sampled, self._voxel_size)
+                per_bin = None
+            verts = None if per_bin is None else np.concatenate(per_bin)
+            # Normals need the TSDF grid (pyopenvdb-only); the cloud does not.
+            if verts is not None and len(verts) and self._pyopenvdb:
+                stride = self._normal_stride(len(verts))
+                # Sampled per bin so each vertex's normal comes from the grid
+                # that actually meshed it.
+                pairs = [(p[::stride], v) for p, v in zip(per_bin, self._volumes)
+                         if len(p[::stride])]
+                if pairs:
+                    sampled = np.concatenate([p for p, _ in pairs])
+                    normals = np.concatenate([
+                        _compute_normals_vdb(v.tsdf, p, self._voxel_size)
+                        for p, v in pairs])
         finished = self._monotonic()
         self._surface_gate.record(finished, finished - started)
         if verts is None:
@@ -673,14 +817,19 @@ class TSDFMapper(Node):
 
         if self._voxels_cache is None:
             return
-        solid_cloud, markers, free_cloud, grid = self._voxels_cache
+        solid_cloud, markers, free_cloud = self._voxels_cache
         stamp = self.get_clock().now().to_msg()
         self._solid_cloud_pub.publish(_restamp(solid_cloud, stamp))
         self._voxels_pub.publish(_restamp(markers, stamp))
+        self._publish_viz_cap(self._viz_cap)
         if free_cloud is not None:
             self._free_cloud_pub.publish(_restamp(free_cloud, stamp))
-        if grid is not None:
-            self._projected_map_pub.publish(_restamp(grid, stamp))
+
+    def _publish_viz_cap(self, text: str) -> None:
+        """Latched, and only on change -- a HUD row is state, not a stream."""
+        if text != self._viz_cap_last:
+            self._viz_cap_last = text
+            self._viz_cap_pub.publish(String(data=text))
 
     def _rebuild_voxel_cache(self, started: float) -> None:
         """Walk the VDB grid once and rebuild every cached voxel-view message.
@@ -688,24 +837,26 @@ class TSDFMapper(Node):
         Only the walk needs the volume lock; everything downstream is numpy and
         message building over plain arrays."""
         revision = self._map_revision
-        banded = self._projected_map_pub is not None or self._free_cloud_pub is not None
+        banded = self._free_cloud_pub is not None
         coords = all_d = all_w = None
         pts = d_vals = w_vals = None
         with self._volume_lock:
             if banded:
-                # One walk feeds the solid viz, the 2-D planning map and the free
-                # cloud: keep every voxel at/above the low map weight (min_weight)
-                # so free (d>0) cells survive, then re-filter to solids below for
-                # the CUBE_LIST + /tsdf/occupied_voxels.
-                coords, all_d, all_w = _extract_voxel_arrays(
-                    self._volume.tsdf, self._volume.weights, self._min_weight)
+                # One walk feeds the solid viz and the free cloud: keep every
+                # voxel at/above the low map weight (min_weight) so free (d>0)
+                # cells survive, then re-filter to solids below for the
+                # CUBE_LIST + /tsdf/occupied_voxels.
+                coords, all_d, all_w = _merge_voxel_parts([
+                    _extract_voxel_arrays(v.tsdf, v.weights, self._min_weight)
+                    for v in self._volumes])
             else:
                 # Only iterate voxels we'll actually show (early filtering inside):
                 # confidently solid (TSDF-derived) AND observed often enough (weight).
                 max_d = self._voxel_max_d if not self._show_free else None
-                pts, d_vals, w_vals = _extract_voxels(
-                    self._volume.tsdf, self._volume.weights,
-                    self._voxel_size, min_weight=self._voxel_min_weight, max_d=max_d)
+                pts, d_vals, w_vals = _merge_voxel_parts([
+                    _extract_voxels(v.tsdf, v.weights, self._voxel_size,
+                                    min_weight=self._voxel_min_weight, max_d=max_d)
+                    for v in self._volumes])
         finished = self._monotonic()
         self._voxels_gate.record(finished, finished - started)
         self._voxels_revision = revision
@@ -713,11 +864,8 @@ class TSDFMapper(Node):
         now = self.get_clock().now().to_msg()
         header = Header(stamp=now, frame_id=self._world_frame)
 
-        free_cloud = grid = None
+        free_cloud = None
         if banded:
-            grid = self._build_projected_map_msg(coords, all_d, all_w, now)
-            if grid is None and self._voxels_cache is not None:
-                grid = self._voxels_cache[3]   # keep the last good band
             free_cloud = self._build_free_voxels_msg(coords, all_d, header)
             if coords is not None:
                 solid = (all_w >= self._voxel_min_weight) & (all_d <= self._voxel_max_d)
@@ -734,9 +882,11 @@ class TSDFMapper(Node):
             del_m.ns     = 'tsdf_voxels'
             del_m.id     = 0
             del_m.action = Marker.DELETE
+            self._viz_cap = ''
             self._voxels_cache = (
                 _make_pointcloud2(header, np.empty((0, 3), dtype=np.float32)),
-                MarkerArray(markers=[del_m]), free_cloud, grid)
+                MarkerArray(markers=[del_m]),
+                free_cloud)
             return
 
         # This remains a solid-only cloud even if the optional voxel
@@ -766,6 +916,12 @@ class TSDFMapper(Node):
         wall_conf = np.clip((self._voxel_max_d - d_vals) / max(band, 1e-6), 0.6, 1.0)
         colors = _confidence_colormap(w_norm, saturation=wall_conf)
 
+        band_mask = self._planning_band_voxel_mask(pts)
+        if band_mask is not None:
+            colors[band_mask, :3] = (
+                BAND_TINT_MIX * BAND_TINT
+                + (1.0 - BAND_TINT_MIX) * colors[band_mask, :3])
+
         m = Marker()
         m.header.stamp    = now
         m.header.frame_id = self._world_frame
@@ -781,14 +937,71 @@ class TSDFMapper(Node):
         m.colors   = [ColorRGBA(r=float(c[0]), g=float(c[1]),
                                 b=float(c[2]), a=float(c[3])) for c in colors]
 
-        self._voxels_cache = (solid_cloud, MarkerArray(markers=[m]), free_cloud, grid)
+        self._viz_cap = _cap_status(len(pts), n)
+        self._voxels_cache = (solid_cloud, MarkerArray(markers=[m]), free_cloud)
         self.get_logger().info(
-            f'Voxels: {len(pts)} published in {self._voxels_gate.last_s:.2f}s',
+            f'Voxels: {len(pts)} of {n} published in {self._voxels_gate.last_s:.2f}s',
             throttle_duration_sec=5.0)
 
     # ────────────────────────────────────────────────────────────────────
     # 2-D planning map (/projected_map) derived from the TSDF grid
     # ────────────────────────────────────────────────────────────────────
+
+    def _publish_projected_map(self) -> None:
+        """Own timer, own gate, own callback group.
+
+        This is the map the planner inflates and routes on, so it must not
+        share a duty gate with the CUBE_LIST: that tied a safety input to a
+        decorative one and pushed both to a ~30 s period on a large map."""
+        started = self._monotonic()
+        if (self._map_revision != self._planning_revision
+                and self._planning_gate.ready(started)):
+            self._rebuild_planning_cache(started)
+
+        if self._planning_cache is None:
+            return
+        self._projected_map_pub.publish(
+            _restamp(self._planning_cache, self.get_clock().now().to_msg()))
+
+    def _rebuild_planning_cache(self, started: float) -> None:
+        """Read only the Z band the projection uses, densely.
+
+        The band is a handful of voxel layers, so a dense copyToArray over its
+        bounding box is bounded by the map's XY footprint alone and stays
+        vectorised throughout — where the full iterOnValues() walk is Python
+        per voxel and grows with every carved free cell in the volume.
+
+        Only the work is charged to the duty gate, not the wait for
+        _volume_lock. The CUBE_LIST walk holds that lock for seconds, and
+        charging its contention here muted the planning map for 12 s after a
+        0.1 s read — measured 2026-07-31, a 4.20 s "read" against a 4.07 s
+        concurrent walk. The gate exists to bound CPU spent, and blocking on a
+        mutex spends none."""
+        revision = self._map_revision
+        z = self._band_center_z()
+        if z is None:
+            return
+        kz_lo, kz_hi = _band_index_range(
+            z - self._projected_map_band, z + self._projected_map_band,
+            self._voxel_size)
+        with self._volume_lock:
+            work_started = self._monotonic()
+            coords, d_vals, w_vals = _merge_voxel_parts([
+                _extract_band_arrays(v.tsdf, v.weights, self._min_weight,
+                                     kz_lo, kz_hi)
+                for v in self._volumes])
+            elapsed = self._monotonic() - work_started
+        self._planning_gate.record(self._monotonic(), elapsed)
+        self._planning_revision = revision
+
+        grid = self._build_projected_map_msg(
+            coords, d_vals, w_vals, self.get_clock().now().to_msg())
+        if grid is not None:            # else keep the last good band
+            self._planning_cache = grid
+        self.get_logger().info(
+            f'Planning map: {0 if coords is None else len(coords)} banded voxels '
+            f'in {self._planning_gate.last_s:.2f}s',
+            throttle_duration_sec=5.0)
 
     def _band_center_z(self) -> 'float | None':
         """Target depth (world_ned Z) the projection band centres on, or None if
@@ -817,6 +1030,23 @@ class TSDFMapper(Node):
             occ_max_d=self._voxel_max_d, occ_min_weight=self._voxel_min_weight,
             margin=self._projected_map_margin,
             frame=self._world_frame, stamp=stamp)
+
+    def _planning_band_voxel_mask(self, pts) -> 'np.ndarray | None':
+        """Which voxels lie in the Z band /projected_map is built from.
+
+        Everything outside it is invisible to the planner, so this is the slice
+        its decisions actually rest on — the same [z-band, z+band] test
+        _build_projected_map applies. Returns None when no projected map is
+        published (there is no planning band to show) or its centre has not
+        resolved yet.
+        """
+        if pts is None or len(pts) == 0 or self._projected_map_pub is None:
+            return None
+        z = self._band_center_z()
+        if z is None:
+            return None
+        mask = np.abs(pts[:, 2] - z) <= self._projected_map_band
+        return mask if np.any(mask) else None
 
     def _build_free_voxels_msg(self, coords, d_vals, header):
         """Observed-empty voxel centres, the free half tsdf_to_octomap needs."""
@@ -847,8 +1077,9 @@ class TSDFMapper(Node):
 
         self._solid_cloud_pub.publish(_make_pointcloud2(header, centers))
 
-        if len(centers) > self._max_viz:
-            centers = centers[np.random.choice(len(centers), self._max_viz, replace=False)]
+        n_total = len(centers)
+        if n_total > self._max_viz:
+            centers = centers[np.random.choice(n_total, self._max_viz, replace=False)]
 
         # No per-voxel weight without the grid, so shade by height for depth —
         # the colormap is repurposed here as a plain low-to-high gradient.
@@ -871,8 +1102,9 @@ class TSDFMapper(Node):
                                 b=float(c[2]), a=float(c[3])) for c in colors]
 
         self._voxels_pub.publish(MarkerArray(markers=[m]))
+        self._publish_viz_cap(_cap_status(len(centers), n_total))
         self.get_logger().info(
-            f'Voxels (surface-derived): {len(centers)} published',
+            f'Voxels (surface-derived): {len(centers)} of {n_total} published',
             throttle_duration_sec=5.0)
 
 
@@ -967,13 +1199,13 @@ def fit_pinhole_intrinsics(xyz: np.ndarray, width: int) -> 'tuple | None':
     return x_fit[0], x_fit[1], y_fit[0], y_fit[1]
 
 
-def synth_no_return_points(xyz: np.ndarray, width: int,
-                           carve_range_m: float) -> np.ndarray:
-    """Pseudo-points at carve_range_m along each no-return pixel's ray.
+def no_return_ray_dirs(xyz: np.ndarray, width: int,
+                       stride: int = 1) -> np.ndarray:
+    """Unit rays (sensor frame) for the pixels that returned nothing.
 
-    Feeding these to VDBVolume.integrate(space_carving=True) frees the voxels
-    the ray traverses. Returns an empty (0,3) array when the geometry can't be
-    recovered (no valid pixels to fit against) or nothing is missing."""
+    Directions come from intrinsics fitted to the cloud itself rather than a
+    restatement of the sensor's FoV. Returns an empty (0,3) array when the
+    geometry can't be recovered or nothing is missing."""
     empty = np.empty((0, 3), dtype=np.float64)
     if xyz is None or len(xyz) == 0:
         return empty
@@ -988,9 +1220,33 @@ def synth_no_return_points(xyz: np.ndarray, width: int,
     idx = np.nonzero(invalid)[0]
     u = (idx % width).astype(np.float64)
     v = (idx // width).astype(np.float64)
-    dirs = np.column_stack([(u - cx) / fx, (v - cy) / fy, np.ones(len(idx))])
-    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
-    return dirs * carve_range_m
+    if stride > 1:
+        keep = (u % stride == 0) & (v % stride == 0)
+        u, v = u[keep], v[keep]
+    dirs = np.column_stack([(u - cx) / fx, (v - cy) / fy, np.ones(len(u))])
+    return dirs / np.linalg.norm(dirs, axis=1, keepdims=True)
+
+
+def free_ray_voxels(dirs_world: np.ndarray, origin: np.ndarray,
+                    voxel_size: float, max_range: float) -> np.ndarray:
+    """Unique VDB index coords the rays cross, out to max_range.
+
+    Sampled at half a voxel so no cell along a ray is stepped over; the origin
+    cell is included, nothing past max_range is."""
+    if not len(dirs_world) or max_range <= 0.0:
+        return np.empty((0, 3), dtype=np.int64)
+    step = voxel_size * 0.5
+    t = np.arange(0.0, max_range, step, dtype=np.float64)
+    pts = origin + dirs_world[:, None, :] * t[None, :, None]
+    ijk = np.floor(pts.reshape(-1, 3) / voxel_size).astype(np.int64)
+
+    # Row-unique via a single packed key — np.unique(axis=0) lexsorts and is
+    # several times slower on the ~10^6 samples a full no-return frame makes.
+    lo, hi = ijk.min(axis=0), ijk.max(axis=0)
+    span = hi - lo + 1
+    key = (((ijk[:, 0] - lo[0]) * span[1]) + (ijk[:, 1] - lo[1])) * span[2] \
+        + (ijk[:, 2] - lo[2])
+    return ijk[np.unique(key, return_index=True)[1]]
 
 
 def _tf_to_matrix(tf_transform) -> np.ndarray:
@@ -1058,6 +1314,41 @@ def _interpolate_correction(t: float, keyframe_ts: np.ndarray,
     A[:3, :3] = rotation
     A[:3, 3] = translation
     return A
+
+
+def _direction_bins(dirs: np.ndarray) -> np.ndarray:
+    """Bin index per ray: dominant axis * 2, +1 when that component is negative.
+
+    Opposite views of one surface land in different bins, which is the whole
+    point — see TSDFMapper's directional-TSDF note.
+    """
+    axis = np.argmax(np.abs(dirs), axis=1)
+    negative = dirs[np.arange(len(dirs)), axis] < 0.0
+    return axis * 2 + negative
+
+
+def _merge_voxel_parts(parts: list) -> tuple:
+    """Collapse per-bin (keys, d, w) triples to one, keeping the lowest d per key.
+
+    Picking the most solid bin rather than averaging is what stops a two-sided
+    surface cancelling itself; keys are VDB index coords or world centres, both
+    bit-identical across bins since every bin shares one grid transform.
+    """
+    parts = [p for p in parts if p[0] is not None]
+    if not parts:
+        return None, None, None
+    if len(parts) == 1:
+        return parts[0]
+
+    keys = np.concatenate([p[0] for p in parts])
+    d_vals = np.concatenate([p[1] for p in parts])
+    w_vals = np.concatenate([p[2] for p in parts])
+    # Primary key is the last lexsort argument: sorts by x, y, z, then d.
+    order = np.lexsort((d_vals, keys[:, 2], keys[:, 1], keys[:, 0]))
+    keys, d_vals, w_vals = keys[order], d_vals[order], w_vals[order]
+    first = np.ones(len(keys), dtype=bool)
+    first[1:] = np.any(keys[1:] != keys[:-1], axis=1)
+    return keys[first], d_vals[first], w_vals[first]
 
 
 def _extract_voxels(tsdf_grid, weights_grid, voxel_size: float,
@@ -1145,6 +1436,53 @@ def _extract_voxel_arrays(tsdf_grid, weights_grid, min_weight: float
     return (np.array(coords_list, dtype=np.int64),
             np.array(d_list,      dtype=np.float32),
             np.array(w_list,      dtype=np.float32))
+
+
+def _band_index_range(z_lo: float, z_hi: float,
+                      voxel_size: float) -> 'tuple[int, int]':
+    """Inclusive VDB Z indices whose voxel centres fall in [z_lo, z_hi].
+
+    Centre of index k is k*voxel_size + voxel_size/2, the convention
+    _extract_voxel_arrays and _build_projected_map both use."""
+    half = voxel_size / 2.0
+    return (int(math.ceil((z_lo - half) / voxel_size)),
+            int(math.floor((z_hi - half) / voxel_size)))
+
+
+def _extract_band_arrays(tsdf_grid, weights_grid, min_weight: float,
+                         kz_lo: int, kz_hi: int
+                         ) -> 'tuple[np.ndarray|None, np.ndarray|None, np.ndarray|None]':
+    """Vectorised counterpart of _extract_voxel_arrays over a Z slab only.
+
+    Reads the slab densely with copyToArray instead of stepping active voxels
+    in Python. Inactive cells come back at the grids' background values, and
+    the weights background is 0.0, so the ``w >= min_weight`` filter selects
+    exactly the active set for any min_weight > 0 (checked against
+    activeVoxelCount). Returns the same (coords, d_vals, w_vals) triple, with
+    coords as signed VDB index coordinates.
+    """
+    if kz_hi < kz_lo:
+        return None, None, None
+    try:
+        (i0, j0, k0), (i1, j1, k1) = tsdf_grid.evalActiveVoxelBoundingBox()
+    except Exception:
+        return None, None, None
+    k0, k1 = max(k0, kz_lo), min(k1, kz_hi)
+    if i1 < i0 or j1 < j0 or k1 < k0:
+        return None, None, None
+
+    shape = (i1 - i0 + 1, j1 - j0 + 1, k1 - k0 + 1)
+    d = np.zeros(shape, dtype=np.float32)
+    w = np.zeros(shape, dtype=np.float32)
+    tsdf_grid.copyToArray(d, ijk=(i0, j0, k0))
+    weights_grid.copyToArray(w, ijk=(i0, j0, k0))
+
+    keep = w >= min_weight
+    if not np.any(keep):
+        return None, None, None
+    ii, jj, kk = np.nonzero(keep)
+    coords = np.column_stack([ii + i0, jj + j0, kk + k0]).astype(np.int64)
+    return coords, d[keep], w[keep]
 
 
 def _build_projected_map(coords: np.ndarray, d_vals: np.ndarray, w_vals: np.ndarray,
@@ -1310,6 +1648,22 @@ def _make_normals_cloud(header: Header, points: np.ndarray,
     else:
         msg.data = b''
     return msg
+
+
+def _cap_status(shown: int, total: int) -> str:
+    """One HUD line for /tsdf/viz_cap when max_voxels_viz thins the CUBE_LIST.
+
+    The cap is a render budget on the marker only -- /tsdf/occupied_voxels
+    still carries every solid voxel -- so the wording has to say the map is
+    complete, or a thinned view reads as a mapping failure. Empty string when
+    nothing was dropped, which clears the HUD row rather than leaving a stale
+    warning once the map shrinks back under the cap.
+    """
+    if total <= 0 or shown >= total:
+        return ''
+    pct = 100.0 * shown / total
+    return (f'VOXEL VIEW CAPPED - showing {shown} of {total} ({pct:.0f}%) - '
+            f'display limit only, map is complete')
 
 
 def _normals_markers(points: np.ndarray, normals: np.ndarray,

@@ -24,6 +24,12 @@ from scipy.stats import chi2
 XYH_ROS_INDICES = [0, 1, 5]
 NEES_DOF = 3
 
+# Floor below which a reported marginal is numerical debris rather than a
+# confident estimate: 1e-6 is a 1 mm / 1 mrad sigma, orders below anything the
+# sonar, DVL or compass can justify.
+MIN_XYH_VARIANCE = 1e-6
+MAX_XYH_CONDITION = 1e8
+
 
 def xyh_tangent_error(gt_pos, gt_quat, est_pos, est_quat) -> np.ndarray:
     """Estimate-to-truth error as [dx, dy, dyaw], expressed in the estimate's
@@ -34,14 +40,53 @@ def xyh_tangent_error(gt_pos, gt_quat, est_pos, est_quat) -> np.ndarray:
     return np.array([trans_body[0], trans_body[1], yaw_err])
 
 
+def covariance_rejection(cov, min_variance: float = MIN_XYH_VARIANCE,
+                         max_condition: float = MAX_XYH_CONDITION) -> "str | None":
+    """Why this covariance must not produce a NEES sample, or None if it may.
+
+    Gated on the smallest eigenvalue, not the determinant: a collapse along one
+    axis leaves det almost intact while NEES, which divides by the variance
+    along the error direction, blows up by the full collapse factor.
+    """
+    cov = np.asarray(cov, dtype=float)
+    if not np.all(np.isfinite(cov)):
+        return 'non-finite entries'
+    eigenvalues = np.linalg.eigvalsh(0.5 * (cov + cov.T))
+    smallest, largest = float(eigenvalues[0]), float(eigenvalues[-1])
+    if smallest <= 0.0:
+        return f'not positive definite (min eigenvalue {smallest:.3e})'
+    if smallest < min_variance:
+        return f'variance below floor ({smallest:.3e} < {min_variance:.3e})'
+    if largest / smallest > max_condition:
+        return f'ill-conditioned (condition number {largest / smallest:.3e})'
+    return None
+
+
 def normalised_squared_error(error, cov) -> "float | None":
-    """e^T Sigma^-1 e. None if the covariance is singular, which is the normal
-    state before the first keyframe is solved."""
+    """e^T Sigma^-1 e. None when the covariance cannot support a sample: either
+    singular, the normal state before the first keyframe is solved, or
+    degenerate per covariance_rejection()."""
+    if covariance_rejection(cov) is not None:
+        return None
     error = np.asarray(error, dtype=float)
     try:
         return float(error @ np.linalg.solve(np.asarray(cov, dtype=float), error))
     except np.linalg.LinAlgError:
         return None
+
+
+def robust_anees(samples, dof: int = NEES_DOF) -> "float | None":
+    """ANEES estimated from the sample median rather than the mean.
+
+    NEES is unbounded above, so the mean is not robust: one degenerate
+    covariance contributes a term no realistic number of good samples can
+    dilute. Rescaling the median by the chi-square median returns the same
+    quantity for well-behaved samples while ignoring that tail.
+    """
+    samples = np.asarray(samples, dtype=float)
+    if samples.size == 0:
+        return None
+    return float(np.median(samples) * dof / chi2.ppf(0.5, dof))
 
 
 def anees_bounds(n_samples: int, dof: int = NEES_DOF,

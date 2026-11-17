@@ -33,10 +33,10 @@ import argparse
 import csv
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
-import sys
 import time
 
 import yaml
@@ -50,7 +50,8 @@ VALID_KEYS = {
     'slam', 'mode', 'motion', 'mapper', 'noise_profile', 'loop_closure',
     'noise_profile_pressure', 'noise_profile_imu', 'noise_profile_compass',
     'noise_profile_dvl', 'noise_profile_sonar',
-    'map_rebuild', 'rviz', 'revisit', 'scenario', 'scenario_out_dx', 'scenario_out_dy',
+    'map_rebuild', 'odom_coherent_noise',
+    'rviz', 'revisit', 'scenario', 'scenario_out_dx', 'scenario_out_dy',
     'mission_waypoints', 'mission_loop',
     # The motion gate is fail-closed (safety_gate.py start_enabled=False) and
     # zeroes every command until armed — sim batches must opt in explicitly.
@@ -67,6 +68,38 @@ VALID_KEYS = {
     'ratio_trigger', 'ratio_resume',
     'wall_orientation_offset_deg', 'wall_orientation_lookahead_m',
     'tsdf_frontier_standoff_m',
+    # Map resolution and wall thresholds, and the A* inflation radii: a batch
+    # that cannot set these cannot reproduce a tuned interactive config.
+    'voxel_size', 'voxel_min_weight', 'voxel_min_solid_confidence',
+    'trunc_distance', 'space_carving', 'directional_tsdf',
+    'hard_inflation_m', 'inflation_m', 'plan_inflation_m',
+    # The rest of the wall-oriented executor's geometry.
+    'wall_standoff', 'wall_switch_goal_distance', 'wall_switch_scan_angle',
+    'wall_switch_scan_yaw', 'wall_path_influence', 'wall_path_look_offset_deg',
+    'wall_normal_offset_deg', 'wall_path_heading_weight',
+    # Survey working area: bounds frontier exploration to the structure.
+    'survey_radius_m', 'survey_center_x', 'survey_center_y',
+    'min_goal_separation_m', 'revisit_scan_slowdown',
+    # Goal blacklists: the planner's only visited-memory, so a batch that
+    # cannot set them cannot reproduce a launcher config.
+    'arrival_blacklist_duration_s', 'blacklist_duration_s',
+    'wall_max_surface_dist',
+    # Planner and executor share this one; a batch stuck on the package
+    # default cannot reproduce a launcher that retuned it.
+    'goal_radius_m',
+    # Stated rather than inherited: both currently equal the launch default,
+    # so a change to that default would silently redefine the batch.
+    'wall_yaw_only', 'rpe_delta',
+    'revisit_min_closures', 'arrival_dwell_s', 'stall_exit_s',
+    'dopt_median_window', 'cooldown_s',
+    'revisit_schedule_every_m',
+    'cache_max_scans',
+    # Pose-graph construction and its noise model: a batch that cannot set
+    # these cannot reproduce a config tuned in the launcher.
+    'keyframe_dist_m', 'keyframe_angle_rad', 'keyframe_max_per_cell',
+    'loop_closure_radius_m', 'loop_closure_min_gap', 'min_inlier_ratio',
+    'scan_sigma_trans', 'scan_sigma_rot', 'odom_sigma_trans', 'odom_sigma_rot',
+    'projected_map_band_m',
 }
 
 
@@ -189,6 +222,7 @@ def load_matrix(config_path: str) -> dict:
     cfg.setdefault('seeds', [-1])
     cfg.setdefault('common_args', {})
     cfg.setdefault('runs', [])
+    cfg.setdefault('record_bag', False)
     _validate_matrix(cfg)
     return cfg
 
@@ -221,6 +255,80 @@ def build_command(args: dict, output_dir: str, seed: int) -> list:
     return cmd
 
 
+# Topics kept when record_bag is on, chosen so a run can be replayed in RViz
+# to see what the vehicle decided and why. Deliberately excluded: the sonar
+# cloud and its range images, the segmentation and depth cameras, the GT TSDF
+# volumes, the free-voxel and surface clouds, and the planning dashboard --
+# together they are ~30x this set, and none of them is needed to follow a
+# decision. /tsdf/occupied_voxels is the one heavy topic worth its size: it is
+# the map the planner actually saw.
+REPLAY_TOPICS = [
+    '/tf', '/tf_static',
+    # Pose: truth, estimate, and the two trajectories drawn from them.
+    '/StoneFish/Odometry', '/slam/odometry', '/slam/pose',
+    '/slam/path_slam', '/slam/path_dr', '/frontier_slam/path',
+    # Graph structure and its uncertainty.
+    '/slam/graph_edges', '/slam/covariance',
+    '/slam/dopt', '/slam/sigma_xy', '/slam/sigma_yaw',
+    '/slam/keyframe_count', '/slam/loop_closure_count', '/slam/rebuild_count',
+    '/slam/rebuild/begin', '/slam/rebuild/path_old', '/slam/rebuild/path_new',
+    '/slam/chi2_normalized', '/slam/nees', '/slam/nis',
+    # What the planner wanted, and the revisit state machine's reasoning.
+    '/frontier_slam/goal', '/frontier_slam/frontiers', '/frontier_slam/activity',
+    '/frontier_slam/revisit_state', '/frontier_slam/revisit_cause',
+    '/frontier_slam/revisit_count', '/frontier_slam/uncertainty_ratio',
+    '/frontier_slam/suspend',
+    # What the executor did about it.
+    '/motion/body_command_safe', '/motion/status', '/motion/safety_status',
+    '/motion/robot_marker', '/motion/robot_marker_gt',
+    # Live scores, so a replay can be scrubbed to the moment a metric moved.
+    '/eval/ate', '/eval/anees', '/eval/map_coverage', '/eval/map_accuracy',
+    # The occupancy map the planner saw.
+    '/tsdf/occupied_voxels',
+]
+
+# The nodes publishing REPLAY_TOPICS are all up well before this; starting the
+# recorder earlier just makes it miss topics that do not exist yet.
+RECORDER_START_DELAY_S = 20
+
+
+def _start_recorder(output_dir: str):
+    """Start `ros2 bag record` for this run, or return None if it cannot.
+
+    Never allowed to fail the run: a missing bag costs a replay, a raised
+    exception here would cost the run itself.
+    """
+    bag_dir = os.path.join(output_dir, 'bag')
+    cmd = ['ros2', 'bag', 'record', '-o', bag_dir,
+           '--compression-mode', 'file', '--compression-format', 'zstd',
+           *REPLAY_TOPICS]
+    shell = f'sleep {RECORDER_START_DELAY_S}; exec ' + ' '.join(cmd)
+    try:
+        log = open(os.path.join(output_dir, 'bag_record.log'), 'w')
+        return subprocess.Popen(['sh', '-c', shell], stdout=log,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    except OSError as exc:
+        print(f'  [warn] bag recording unavailable: {exc}')
+        return None
+
+
+def _stop_recorder(proc) -> None:
+    """SIGINT so rosbag2 closes the mcap and runs its zstd pass; the file-mode
+    compression only happens on a clean shutdown."""
+    if proc is None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        proc.wait(timeout=180)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    except ProcessLookupError:
+        pass
+
+
 def _terminate(proc: subprocess.Popen) -> None:
     """SIGINT -> SIGTERM -> SIGKILL escalation on the whole process group
     (Stonefish's GL context can be slow to tear down cleanly)."""
@@ -236,7 +344,7 @@ def _terminate(proc: subprocess.Popen) -> None:
 
 
 def _launch_and_wait(cmd: list, log_path: str, duration_s: float,
-                     output_dir: str = None):
+                     output_dir: str = None, record: bool = False):
     """Run one launch, aborting early if the vehicle never starts moving.
 
     The motion check is the whole point of the early abort: a frozen run still
@@ -245,9 +353,12 @@ def _launch_and_wait(cmd: list, log_path: str, duration_s: float,
     MOTION_CHECK_AT_S turns an 8-minute waste into a 90-second one."""
     start = time.strftime('%Y-%m-%dT%H:%M:%S')
     motionless = None
+    recorder = None
     with open(log_path, 'w') as log_file:
         proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT,
                                  start_new_session=True)
+        if record and output_dir:
+            recorder = _start_recorder(output_dir)
         try:
             if output_dir and duration_s > MOTION_CHECK_AT_S * 1.5:
                 proc.wait(timeout=MOTION_CHECK_AT_S)
@@ -270,8 +381,56 @@ def _launch_and_wait(cmd: list, log_path: str, duration_s: float,
                         _terminate(proc)
             else:
                 _terminate(proc)
+        except KeyboardInterrupt:
+            # run_matrix's parent (including the launcher TUI) stops the batch
+            # with SIGINT.  The ros2 launch is in its own session, so it would
+            # otherwise survive its interrupted parent and keep publishing
+            # into the next run.
+            print('  [stop] interrupted — stopping the active ROS launch')
+            _terminate(proc)
+            raise
+        finally:
+            # In a finally so every exit path -- normal end, motionless abort,
+            # exception -- still gives rosbag2 the SIGINT it needs to finalise
+            # the mcap and run its compression pass.
+            _stop_recorder(recorder)
     end = time.strftime('%Y-%m-%dT%H:%M:%S')
     return start, end, proc.returncode, motionless
+
+
+def _write_progress(batch_dir: str, **fields) -> None:
+    """Atomically publish batch state for lightweight monitors such as the TUI."""
+    path = os.path.join(batch_dir, 'progress.json')
+    previous = {}
+    try:
+        with open(path) as f:
+            previous = json.load(f)
+    except (OSError, ValueError):
+        pass
+    previous.update(fields)
+    previous['updated_at'] = time.time()
+    tmp = f'{path}.{os.getpid()}.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(previous, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _dvl_scale_error_pct(log_path: str):
+    """The scale error dvl_sim actually drew this run.
+
+    noise_profile_dvl states a standard deviation, not a value -- `degraded`
+    (1%) drew -1.249%, -0.418% and -0.245% for seeds 101-103 on 2026-07-27, so
+    two thirds of that batch were near-nominal. Recording the draw is what makes
+    the manipulation auditable instead of assumed.
+    """
+    if not os.path.exists(log_path):
+        return None
+    with open(log_path, errors='replace') as f:
+        for line in f:
+            m = re.search(r'Scale err:\s*(-?\d+\.?\d*)%', line)
+            if m:
+                return float(m.group(1))
+    return None
 
 
 def _count_data_rows(csv_path: str) -> int:
@@ -385,10 +544,10 @@ def _check_validity(output_dir: str, log_path: str, exit_code=None) -> dict:
 
 
 def run_one(args: dict, output_dir: str, seed: int, duration_s: float,
-            dry_run: bool = False) -> dict:
+            dry_run: bool = False, record: bool = False) -> dict:
     cmd = build_command(args, output_dir, seed)
     manifest = {'args': args, 'seed': seed, 'git_sha': git_sha(),
-                'command': cmd, 'duration_s': duration_s}
+                'command': cmd, 'duration_s': duration_s, 'recorded': record}
 
     if dry_run:
         print(' '.join(cmd))
@@ -397,8 +556,9 @@ def run_one(args: dict, output_dir: str, seed: int, duration_s: float,
     os.makedirs(output_dir, exist_ok=True)
     log_path = os.path.join(output_dir, 'launch.log')
     manifest['start'], manifest['end'], manifest['exit_code'], motionless = \
-        _launch_and_wait(cmd, log_path, duration_s, output_dir)
+        _launch_and_wait(cmd, log_path, duration_s, output_dir, record)
     manifest.update(_check_validity(output_dir, log_path, manifest['exit_code']))
+    manifest['dvl_scale_error_pct'] = _dvl_scale_error_pct(log_path)
     manifest['status_scope'] = 'structural_validity_only'
     manifest['aborted_motionless'] = motionless is not None
     manifest['retried'] = False
@@ -410,7 +570,7 @@ def run_one(args: dict, output_dir: str, seed: int, duration_s: float,
         print(f'  [retry] {output_dir}: 0 metrics rows, retrying once')
         manifest['retried'] = True
         manifest['start'], manifest['end'], manifest['exit_code'], _ = \
-            _launch_and_wait(cmd, log_path, duration_s, output_dir)
+            _launch_and_wait(cmd, log_path, duration_s, output_dir, record)
         manifest.update(_check_validity(output_dir, log_path, manifest['exit_code']))
 
     with open(os.path.join(output_dir, 'manifest.json'), 'w') as f:
@@ -444,43 +604,87 @@ def run_matrix(cfg: dict, batch_root: str, dry_run: bool = False) -> str:
 
     total = len(cfg['runs']) * len(cfg['seeds'])
     est_hours = total * (cfg['duration_s'] + 50 + cfg['settle_s']) / 3600
+    record = bool(cfg.get('record_bag', False))
     print(f"Batch '{cfg['batch_name']}' -> {batch_dir}")
     print(f"{len(cfg['runs'])} configs x {len(cfg['seeds'])} seeds = {total} runs, "
           f"duration_s={cfg['duration_s']}, est. wall time ~{est_hours:.1f}h")
+    if record:
+        print(f'Recording {len(REPLAY_TOPICS)} topics per run '
+              f'(~{0.11 * cfg["duration_s"] / 1000:.1f} GB/run compressed, '
+              f'~{0.11 * cfg["duration_s"] * total / 1000:.1f} GB for the batch)')
 
     manifests = []
     i = 0
-    for run in cfg['runs']:
-        args = resolve_args(cfg, run)
-        for seed in cfg['seeds']:
-            i += 1
-            run_dir = os.path.join(batch_dir, f"{run['name']}_s{seed}")
-            print(f"[{i}/{total}] {run['name']} seed={seed} -> {run_dir}")
-            manifest = run_one(args, run_dir, seed, cfg['duration_s'], dry_run=dry_run)
-            manifest['name'] = run['name']
-            manifest['run_dir'] = run_dir
-            manifests.append(manifest)
-            # Stop the whole batch on the first frozen run: the cause is always
-            # environmental (orphans, a closed motion gate, a stalled sim) and
-            # applies to every run that would follow.
-            if not dry_run and manifest.get('status') == 'motionless':
-                print(f"  [stop] {run_dir} never moved "
-                      f"(path {manifest.get('gt_path_m')}m, "
-                      f"yaw {manifest.get('gt_yaw_deg')}deg). "
-                      f"Aborting the batch after {i}/{total} runs.")
-                leftover = find_orphan_nodes()
-                if leftover:
-                    print('  Leftover nodes are the likely cause:\n  '
-                          + '\n  '.join(leftover))
-                break
-            if not dry_run and i < total:
-                time.sleep(cfg['settle_s'])
-        else:
-            continue
-        break
-
+    interrupted = False
+    raised_error = False
     if not dry_run:
-        aggregate(batch_dir, manifests)
+        _write_progress(
+            batch_dir, state='running', phase='preparing', total=total,
+            completed=0, failed=0, batch_name=cfg['batch_name'],
+            duration_s=cfg['duration_s'], started_at=time.time())
+    try:
+        for run in cfg['runs']:
+            args = resolve_args(cfg, run)
+            for seed in cfg['seeds']:
+                i += 1
+                run_dir = os.path.join(batch_dir, f"{run['name']}_s{seed}")
+                print(f"[{i}/{total}] {run['name']} seed={seed} -> {run_dir}")
+                if not dry_run:
+                    _write_progress(
+                        batch_dir, state='running', phase='running',
+                        current=i, name=run['name'], seed=seed,
+                        run_dir=run_dir, run_started_at=time.time())
+                manifest = run_one(args, run_dir, seed, cfg['duration_s'],
+                                   dry_run=dry_run, record=record)
+                manifest['name'] = run['name']
+                manifest['run_dir'] = run_dir
+                manifests.append(manifest)
+                if not dry_run:
+                    failed_runs = sum(
+                        m.get('status') != 'ok' for m in manifests)
+                    _write_progress(
+                        batch_dir, completed=len(manifests),
+                        failed=failed_runs,
+                        last_status=manifest.get('status', 'unknown'))
+                # Stop the whole batch on the first frozen run: the cause is always
+                # environmental (orphans, a closed motion gate, a stalled sim) and
+                # applies to every run that would follow.
+                if not dry_run and manifest.get('status') == 'motionless':
+                    print(f"  [stop] {run_dir} never moved "
+                          f"(path {manifest.get('gt_path_m')}m, "
+                          f"yaw {manifest.get('gt_yaw_deg')}deg). "
+                          f"Aborting the batch after {i}/{total} runs.")
+                    leftover = find_orphan_nodes()
+                    if leftover:
+                        print('  Leftover nodes are the likely cause:\n  '
+                              + '\n  '.join(leftover))
+                    break
+                if not dry_run and i < total:
+                    _write_progress(
+                        batch_dir, phase='settling',
+                        settle_started_at=time.time())
+                    time.sleep(cfg['settle_s'])
+            else:
+                continue
+            break
+    except KeyboardInterrupt:
+        interrupted = True
+        print(f'[stop] Evaluation stopped after {len(manifests)}/{total} '
+              'completed runs; preserving partial data.')
+    except Exception:
+        raised_error = True
+        raise
+    finally:
+        if not dry_run:
+            _write_progress(batch_dir, phase='aggregating')
+            aggregate(batch_dir, manifests)
+            failed_runs = sum(m.get('status') != 'ok' for m in manifests)
+            final_state = ('failed' if raised_error else
+                           'stopped' if interrupted else 'complete')
+            _write_progress(
+                batch_dir, state=final_state, phase=final_state,
+                completed=len(manifests), failed=failed_runs,
+                finished_at=time.time())
     return batch_dir
 
 
@@ -523,6 +727,7 @@ def aggregate(batch_dir: str, manifests: list = None) -> None:
     fieldnames = ['name', 'seed', 'status', 'gt_path_m', 'gt_yaw_deg',
                   'final_ate', 'mean_rpe_trans',
                   'final_abs_error', 'final_coverage', 'final_iou', 'final_chamfer',
+                  'final_explored', 'final_n_belief',
                   'lc_count', 'rebuild_count', 'revisit_count', 'tracebacks',
                   'process_deaths']
     rows = []
@@ -539,6 +744,9 @@ def aggregate(batch_dir: str, manifests: list = None) -> None:
             'final_coverage': _last(map_csv, 'coverage'),
             'final_iou': _last(map_csv, 'iou_occ'),
             'final_chamfer': _last(map_csv, 'chamfer'),
+            # Observed volume, for the coverage-vs-map-size tradeoff.
+            'final_explored': _last(map_csv, 'explored'),
+            'final_n_belief': _last(map_csv, 'n_belief'),
             'lc_count': _last(metrics_csv, 'lc_count'),
             'rebuild_count': _last(metrics_csv, 'rebuild_count'),
             'revisit_count': _last(metrics_csv, 'revisit_count'),
@@ -596,6 +804,17 @@ def main():
     parser.add_argument('--aggregate-only', metavar='BATCH_DIR',
                          help='Re-aggregate an existing batch directory (reads manifest.json '
                               'files, no new runs)')
+    parser.add_argument('--seeds', type=int, nargs='+', metavar='SEED',
+                         help="Override the config's seed list. Extends an existing "
+                              'sweep with more samples without editing the YAML: the '
+                              'new runs land in their own batch directory, and the '
+                              'plotting script pools batch directories by arm.')
+    parser.add_argument('--record', dest='record', action='store_true',
+                         default=None,
+                         help='Record a per-run rosbag for RViz replay, overriding '
+                              "the config's record_bag. ~0.19 GB per 28-min run.")
+    parser.add_argument('--no-record', dest='record', action='store_false',
+                         help='Disable bag recording even if the config enables it')
     args = parser.parse_args()
 
     if args.aggregate_only:
@@ -606,6 +825,10 @@ def main():
         parser.error('config is required unless --aggregate-only is given')
 
     cfg = load_matrix(args.config)
+    if args.record is not None:
+        cfg['record_bag'] = args.record
+    if args.seeds:
+        cfg['seeds'] = args.seeds
     run_matrix(cfg, args.batch_root, dry_run=args.dry_run)
 
 

@@ -9,6 +9,7 @@ imu:
   sigma_pitch_rad: 0.001
   sigma_yaw_rad: 0.005
   gyro_bias_drift_rad_s: 0.0
+  sigma_gyro_rad_s: 0.0     # noiseless reference
   publish_rate_hz: 50.0
 compass:
   sigma_yaw_rad: 0.005

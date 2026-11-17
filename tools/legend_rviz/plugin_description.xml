@@ -1,0 +1,11 @@
+<library path="legend_rviz">
+  <class
+    name="legend_rviz/LegendPanel"
+    type="legend_rviz::LegendPanel"
+    base_class_type="rviz_common::Panel">
+    <description>
+      Static colour legend for the ActiveSlam demo: trajectories, goal and frontier
+      markers, sensing clouds, the safety-gate vehicle arrow and the TSDF voxel ramps.
+    </description>
+  </class>
+</library>

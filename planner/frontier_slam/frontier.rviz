@@ -272,8 +272,8 @@ Visualization Manager:
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
-      Line Style: Lines
-      Line Width: 1
+      Line Style: Billboards
+      Line Width: 0.07000000029802322
       Name: Path
       Offset:
         X: 0
@@ -291,6 +291,18 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /frontier_slam/path
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: PathFlow
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /frontier_slam/path_flow
       Value: true
     - Class: octomap_rviz_plugins/OccupancyGrid
       Enabled: true

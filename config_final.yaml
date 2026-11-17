@@ -1,0 +1,177 @@
+# ActiveSlam launcher configuration.
+# Grouped as the control screen is: the three parts of active SLAM,
+# the scene they run in, and the tools around them.
+# Edit while the launcher is stopped — it rewrites the whole file.
+config_version: 2
+
+# Sections folded away in the control screen.
+hidden_sections:
+  - localisation
+  - localisation.executor
+  - localisation.graph
+  - localisation.motion
+  - localisation.noise
+  - localisation.revisit
+  - localisation.sensors
+  - mapping.grid
+  - mapping.outputs
+  - mapping.surface
+
+# 0. Platform & preset
+preset:
+  platform: "stonefish"
+  preset: "no_loop_closure"
+
+# 1. Localisation
+localisation:
+  slam: "slam"
+  sensors:
+    noise_profile_dvl: "realistic"
+    noise_profile_imu: "realistic"
+    noise_profile_compass: "realistic"
+    noise_profile_pressure: "realistic"
+  graph:
+    loop_closure: false
+    keyframe_dist_m: 1.0
+    keyframe_angle_rad: 0.25
+    keyframe_max_per_cell: 3
+    loop_closure_radius_m: 5.0
+    loop_closure_min_gap: 20
+    min_inlier_ratio: 0.3
+  noise:
+    noise_profile: "realistic"
+    scan_sigma_trans: 0.12
+    scan_sigma_rot: 0.08
+    odom_sigma_trans: 0.002
+    odom_sigma_rot: 0.02
+    odom_coherent_noise: true
+  revisit:
+    revisit: false
+    revisit_scoring: "keyframe_density"
+    revisit_trigger: "live_dopt"
+    sigma_allow_xy_m: 0.15
+    sigma_allow_yaw_rad: 0.08
+    ratio_trigger: 1.0
+    ratio_resume: 0.3
+    revisit_min_closures: 0
+    arrival_dwell_s: 16.0
+    stall_exit_s: 5.0
+    revisit_scan_slowdown: 1.0
+  motion:
+    speed_factor: 2.0
+    turn_factor: 0.8
+    robot_depth_target: 6.5
+    motion: "walloriented"
+    scan_style: "sweep"
+    scan_sweep_deg: 180.0
+    safety_start_enabled: true
+    thrust_boost: false
+  executor:
+    wall_orientation_offset_deg: 45.0
+    wall_orientation_lookahead_m: 2.5
+    wall_yaw_only: true
+    wall_standoff: 3.0
+    wall_max_surface_dist: 0.0
+    wall_switch_goal_distance: 6.0
+    wall_switch_scan_angle: 3.14159
+    wall_switch_scan_yaw: 0.08
+    wall_path_influence: 0.1
+    wall_path_look_offset_deg: 0.0
+    wall_normal_offset_deg: 0.0
+    wall_path_heading_weight: 0.1
+
+# 2. Mapping
+mapping:
+  mapper: "tsdf_directional"
+  sensors:
+    noise_profile_sonar: "realistic_no_reverb"
+    noise_attenuation: "none"
+    near_cutoff_m: 1.6
+    near_fade_p: 0.8
+  grid:
+    voxel_size: 0.25
+    trunc_distance: 0.0
+    space_carving: true
+    carve_no_return: true
+  surface:
+    voxel_min_solid_confidence: 0.7
+    voxel_min_weight: 6.0
+  outputs:
+    tsdf_octomap: true
+    map_rebuild: true
+    cache_max_scans: 6000
+
+# 3. Path planning
+planning:
+  mode: "frontier"
+  goals:
+    frontier_space: "2d"
+    exploration: "frontier"
+    goal_order: "greedy"
+    tsdf_frontier_standoff_m: 5.5
+    survey_radius_m: 0.0
+    goal_radius_m: 3.0
+    min_goal_separation_m: 0.0
+    arrival_blacklist_duration_s: 60.0
+    blacklist_duration_s: 60.0
+  map:
+    projected_map_band_m: 0.75
+    hard_inflation_m: 1.0
+    inflation_m: 2.0
+    plan_inflation_m: 6.0
+
+# 4. Real vehicle
+hardware:
+  real_sonar: true
+  ardusub_backend: "manual_control"
+  manual_authority: 0.15
+  enable_vertical: false
+  require_odom: true
+  link:
+    mavlink_command_url: "udpin:0.0.0.0:14560"
+    mavlink_odom_url: "udpin:0.0.0.0:14561"
+    require_position: true
+  sonar:
+    sonar_ip: "192.168.2.199"
+    sonar_mount_x: 0.0
+    sonar_mount_y: 0.0
+    sonar_mount_z: 0.0
+    sonar_mount_roll: 0.0
+    sonar_mount_pitch: 0.0
+    sonar_mount_yaw: 0.0
+
+# 4. Scene
+scene:
+  scene: "target"
+  object:
+    obj_mesh: "shipwreck.obj"
+    obj_x: 4.55
+    obj_y: -20.62
+    obj_z: 18.38
+    obj_scale: 0.85
+    obj_roll: 0.0
+    obj_pitch: -180.0
+    obj_yaw: 15.0
+  robot:
+    robot_pose_live: false
+    robot_x: -6.9977
+    robot_y: 0.9539
+    robot_z: 6.9393
+    robot_roll: -0.1439
+    robot_pitch: 0.0955
+    robot_yaw: 150.1176
+
+# 5. Tools
+tools:
+  rviz: true
+  rqt: true
+  rqt_depthmap: false
+  keyboard: "qwerty"
+  eval:
+    scenario: "none"
+    scenario_out_dx: 15.0
+    scenario_out_dy: 0.0
+    rosbag: false
+    noise_seed: -1
+    rpe_delta: 1.0
+    output_dir: ""

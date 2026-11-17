@@ -227,6 +227,38 @@ def test_no_reverb_profile_emits_no_near_field_returns():
     assert np.nanmin(r) > p.reverb_max_m
 
 
+def test_degraded_no_reverb_differs_from_degraded_only_in_reverb():
+    """Same construction as the realistic pair: reverb off at its source, with
+    no min_range_m/near_fade_p gate that would also erase real close geometry."""
+    p = load_noise_profile(CONFIG_DIR / 'noise_degraded_no_reverb.yaml').sonar
+    ref = load_noise_profile(CONFIG_DIR / 'noise_degraded.yaml').sonar
+    assert p.reverb_p == 0.0
+    assert p.min_range_m == 0.0 and p.near_fade_p == 0.0
+    differs = {f for f in vars(p) if getattr(p, f) != getattr(ref, f)}
+    assert differs == {'reverb_p'}
+
+
+def test_degraded_no_reverb_shares_degraded_nav_sensors():
+    """Only the sonar section changes; the pose graph sees degraded nav noise."""
+    p = load_noise_profile(CONFIG_DIR / 'noise_degraded_no_reverb.yaml')
+    ref = load_noise_profile(CONFIG_DIR / 'noise_degraded.yaml')
+    for section in ('pressure', 'imu', 'compass', 'dvl'):
+        assert getattr(p, section) == getattr(ref, section)
+
+
+def test_degraded_no_reverb_emits_no_near_field_returns():
+    p = load_noise_profile(CONFIG_DIR / 'noise_degraded_no_reverb.yaml').sonar
+    grid = plane_grid(0.0, distance=6.0)
+    rng = np.random.default_rng(3)
+    f_reverb, _ = correlated_field(rng, grid.shape[:2], p.corr_length_px)
+    _, mask = reverberation_range(
+        np.linalg.norm(grid, axis=-1), incidence_cosine(grid),
+        np.ones(grid.shape[:2], bool), f_reverb, rng, p)
+    assert not mask.any()
+    r = np.linalg.norm(noisy(grid, p, seed=3), axis=1)
+    assert np.nanmin(r) > p.reverb_max_m
+
+
 # --- item 3: strongest-return ranging ---------------------------------------
 
 def wall_with_bar(bar_range=2.0, wall_range=3.0, bar_cols=slice(64, 65)):

@@ -67,3 +67,60 @@ def test_reset_clears_the_ramp_state():
 def test_a_non_positive_rate_is_rejected():
     with pytest.raises(ValueError):
         SlewLimiter(0.0)
+
+
+def _ramped(slew, target, ticks, t0=0.0):
+    """Drive the limiter to a steady command, one 0.1 s tick at a time."""
+    t = t0
+    for _ in range(ticks):
+        t += 0.1
+        slew.update(target, t)
+    return t
+
+
+def test_release_is_symmetric_with_the_apply_rate_by_default():
+    slew = SlewLimiter(0.30)
+    slew.update(0.30, 0.0)
+    t = _ramped(slew, 0.30, 12)
+    assert slew.value == pytest.approx(0.30)
+
+    # No release rate given: falling is rate-limited exactly like rising.
+    assert slew.update(0.0, t + 0.1) == pytest.approx(0.27)
+
+
+def test_torque_may_be_released_faster_than_it_is_applied():
+    slew = SlewLimiter(0.25, release_rate_per_s=1.0)
+    slew.update(0.30, 0.0)
+    t = _ramped(slew, 0.30, 14)
+    assert slew.value == pytest.approx(0.30)
+
+    # Falling toward zero runs at 1.0/s, not the 0.25/s used on the way up.
+    assert slew.update(0.0, t + 0.1) == pytest.approx(0.20)
+
+
+def test_a_reversal_releases_fast_then_re_applies_gently():
+    slew = SlewLimiter(0.25, release_rate_per_s=1.0)
+    slew.update(0.20, 0.0)
+    t = _ramped(slew, 0.20, 10)
+    assert slew.value == pytest.approx(0.20)
+
+    # The held torque clears in two 0.1 s ticks at 1.0/s...
+    assert slew.update(-0.30, t + 0.1) == pytest.approx(0.10)
+    assert slew.update(-0.30, t + 0.2) == pytest.approx(0.0, abs=1e-9)
+    # ...and only then does the opposite command build, at the gentle 0.25/s.
+    assert slew.update(-0.30, t + 0.3) == pytest.approx(-0.025)
+
+
+def test_a_tick_that_crosses_zero_splits_its_budget():
+    slew = SlewLimiter(0.25, release_rate_per_s=1.0)
+    slew.update(0.05, 0.0)
+    t = _ramped(slew, 0.05, 4)
+    assert slew.value == pytest.approx(0.05)
+
+    # 0.05 of release costs 0.05 s at 1.0/s, leaving 0.05 s of apply at 0.25/s.
+    assert slew.update(-1.0, t + 0.1) == pytest.approx(-0.0125)
+
+
+def test_a_non_positive_release_rate_is_rejected():
+    with pytest.raises(ValueError):
+        SlewLimiter(0.25, release_rate_per_s=0.0)

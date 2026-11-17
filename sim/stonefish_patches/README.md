@@ -41,6 +41,14 @@ project (~250 MB checkout) that isn't part of this repo.
    a third-person chase camera that turns with the robot. Zoom (orbit radius,
    mouse scroll) and manual orbiting still work. **Required** —
    `stonefish_ros2` calls the two-argument overload.
+6. `0006-fix-apply-mesh-scale-to-OBJ-files-that-carry-no-norm.patch` — makes
+   `<mesh scale="...">` take effect on OBJ files that ship no `vn` records.
+   `LoadOBJ` writes scaled positions up front, then its no-normals branch
+   `memcpy`'d the raw positions back over them, discarding the scale; such a
+   mesh always loaded at its native size. Another consequence of upstream's
+   move to `rapidobj`. **Required** for `obj_mesh:=shipwreck.obj` — that is the
+   one mesh in `sim/world/data/obj` exporting UVs but no normals, so it was the
+   only one whose `obj_scale` was ignored.
 
 ## Building
 
@@ -51,3 +59,18 @@ git checkout b21eb8e194c570ff2f61e91aeffb38d73dc25f42
 git am /path/to/ActiveSlam/sim/stonefish_patches/*.patch
 # then follow Stonefish's own build instructions (CMake + its 3rdparty deps)
 ```
+
+`bootstrap.sh` does this for you against `external/stonefish`, which is the
+checkout it builds — patch that one, not another clone of the fork.
+
+Building is not enough: `stonefish_simulator` resolves `libStonefish.so` to the
+install prefix, so a patch only takes effect after `sudo cmake --install`
+(`sudo ldconfig` too, when installing over an older copy). Nothing needs
+recompiling in the ROS 2 workspace — the bridge links the library by path — but
+the simulator has to be restarted.
+
+`bootstrap.sh` fingerprints the sources it built into
+`$prefix/share/Stonefish/.source-id` and rebuilds when that stops matching. It
+also probes the installed headers for the patched API, but on its own that test
+cannot see a patch which changes no header — 0003, 0004 and 0006 are all
+implementation-only.

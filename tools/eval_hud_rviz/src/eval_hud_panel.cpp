@@ -20,6 +20,7 @@ namespace
 constexpr char kMarkersTopic[] = "/eval/markers";
 constexpr char kHudNamespace[] = "eval_hud";
 constexpr char kRobotMarkerTopic[] = "/motion/robot_marker";
+constexpr char kVizCapTopic[] = "/tsdf/viz_cap";
 constexpr char kMotionStateNamespace[] = "motion_state_text";
 constexpr char kPlaceholderText[] = "no eval data yet (requires slam:=slam)";
 constexpr char kStatePlaceholderText[] = "WAITING FOR MOTION SAFETY GATE";
@@ -45,7 +46,8 @@ QColor markerColor(const visualization_msgs::msg::Marker & marker)
 EvalHudPanel::EvalHudPanel(QWidget * parent)
 : rviz_common::Panel(parent),
   state_label_(new QLabel(kStatePlaceholderText, this)),
-  metrics_label_(new QLabel(kPlaceholderText, this))
+  metrics_label_(new QLabel(kPlaceholderText, this)),
+  viz_cap_label_(new QLabel(this))
 {
   QFont label_font("monospace");
   label_font.setStyleHint(QFont::TypeWriter);
@@ -67,10 +69,21 @@ EvalHudPanel::EvalHudPanel(QWidget * parent)
   metrics_label_->setStyleSheet(
     "QLabel { background: #222; color: #e0e0e0; padding: 6px 8px; }");
 
+  // Amber, and hidden until there is something to warn about — an always-on
+  // row would read as a permanent fault.
+  viz_cap_label_->setFont(label_font);
+  viz_cap_label_->setAlignment(Qt::AlignCenter);
+  viz_cap_label_->setObjectName("eval_hud_viz_cap_label");
+  viz_cap_label_->setToolTip("TSDF voxel display cap: /tsdf/viz_cap");
+  viz_cap_label_->setStyleSheet(
+    "QLabel { background: #2a2410; color: #ffbf1a; padding: 4px 8px; }");
+  viz_cap_label_->hide();
+
   // No spacing between the rows: one block, state on top.
   auto * layout = new QVBoxLayout;
   layout->addWidget(state_label_);
   layout->addWidget(metrics_label_);
+  layout->addWidget(viz_cap_label_);
   layout->setContentsMargins(4, 2, 4, 2);
   layout->setSpacing(0);
   setLayout(layout);
@@ -82,6 +95,10 @@ EvalHudPanel::EvalHudPanel(QWidget * parent)
   connect(
     this, &EvalHudPanel::motionStateReceived,
     this, &EvalHudPanel::updateMotionState,
+    Qt::QueuedConnection);
+  connect(
+    this, &EvalHudPanel::vizCapReceived,
+    this, &EvalHudPanel::updateVizCap,
     Qt::QueuedConnection);
 }
 
@@ -121,6 +138,14 @@ void EvalHudPanel::onInitialize()
       Q_EMIT motionStateReceived(
         QString::fromStdString(message->text), markerColor(*message));
     });
+
+  // Transient-local to match tsdf_mapper: the row is state, published only on
+  // change, so a panel that comes up late still gets the current one.
+  viz_cap_subscription_ = node_->create_subscription<std_msgs::msg::String>(
+    kVizCapTopic, rclcpp::QoS(1).transient_local(),
+    [this](const std_msgs::msg::String::SharedPtr message) {
+      Q_EMIT vizCapReceived(QString::fromStdString(message->data));
+    });
 }
 
 void EvalHudPanel::updateMetrics(const QString & text)
@@ -132,6 +157,12 @@ void EvalHudPanel::updateMotionState(const QString & text, const QColor & color)
 {
   state_label_->setText(text);
   state_label_->setStyleSheet(stateStyleSheet(color.name()));
+}
+
+void EvalHudPanel::updateVizCap(const QString & text)
+{
+  viz_cap_label_->setText(text);
+  viz_cap_label_->setVisible(!text.isEmpty());
 }
 
 }  // namespace eval_hud_rviz

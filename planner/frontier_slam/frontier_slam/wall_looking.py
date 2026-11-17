@@ -14,15 +14,21 @@ Subscribed topics:
 
 Published topics:
   /motion/body_command  (geometry_msgs/Twist; normalized safety-gate input)
+  /motion/selected_wall  (visualization_msgs/MarkerArray) the one voxel the
+      current heading is taken from, and a link to it from the vehicle — every
+      other display says where the vehicle went, this says why it is pointing
+      there (see wall_markers; wall_oriented_controller fills the same topic)
 
 Behaviour:
   SEARCH — no usable wall (empty/stale TSDF, or nothing wall-like within
-           `max_surface_dist_m` of the robot's depth band): slow rotation +
+           `max_surface_dist_m` at any depth): slow rotation +
            depth hold, letting the mapper build surface before reporting
            BLOCKED after `no_wall_timeout_s`.
   TRACK — blend planner travel with the wall tangent, blend viewing orientation
           from the wall normal toward that travel heading, and regulate
-          perpendicular distance to `standoff_m`.
+          perpendicular distance to `standoff_m`.  Under `yaw_only` the wall
+          drives the look heading alone: translation is the planner path and
+          neither the standoff nor the wall tangent moves the vehicle.
   SWITCH — after no path progress to a nearby planner goal, turn to observe
            the target side, exclude the trapping wall briefly, and select an
            alternative goal-aligned wall.
@@ -50,10 +56,13 @@ from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import Image, PointCloud2, PointField
 from std_msgs.msg import String
+from visualization_msgs.msg import MarkerArray
 
 from frontier_slam.control_utils import (
     depth_hold_effort, LowPassRate, wrap_angle, yaw_from_quat)
+from frontier_slam.mission_params import GOAL_RADIUS_M
 from frontier_slam.session_log import open_session_log
+from frontier_slam.wall_markers import selected_wall_markers, TOPIC as WALL_MARKER_TOPIC
 
 
 _LOG_DIR = os.path.join(
@@ -87,7 +96,6 @@ class WallLooking(Node):
     MAX_SURGE           = 0.20   # approach/retreat clamp
     MAX_SWAY            = 0.25   # tangential clamp
     SCAN_YAW            = 0.08   # rotation while no wall is in range
-    Z_BAND_M            = 1.5    # only surface points within ±this of robot depth
     NORMAL_Z_MAX        = 0.7    # |n_z| above this = floor/ceiling, not a wall
     NORMAL_EMA_ALPHA    = 0.3    # smoothing on the tracked normal (nearest-point
                                  # jumps between samples cause yaw jitter otherwise)
@@ -95,7 +103,6 @@ class WallLooking(Node):
     PROGRESS_TIMEOUT_S  = 15.0   # no path-waypoint progress → BLOCKED
     PROGRESS_MIN_M      = 0.5
     WAYPOINT_ADVANCE_DIST = 1.5
-    GOAL_RADIUS         = 2.0
     EMERGENCY_STOP_DIST = 0.4    # m — front camera floor; below: forced back-off
     BACK_SURGE_SPEED    = 0.12   # m/s backward during emergency back-off
     CTRL_HZ             = 10.0
@@ -104,9 +111,13 @@ class WallLooking(Node):
     def __init__(self) -> None:
         super().__init__('wall_looking')
 
+        self.declare_parameter('goal_radius_m', GOAL_RADIUS_M)
         self.declare_parameter('standoff_m',    1.5)
         self.declare_parameter('tangent_speed', 0.15)
         self.declare_parameter('max_surface_dist_m', 8.0)
+        # The mapper's own planning band: the wall is picked from the slice the
+        # planner routes on, so the two cannot disagree.
+        self.declare_parameter('projected_map_band_m', 1.0)
         self.declare_parameter('no_wall_timeout_s', 10.0)
         self.declare_parameter('switch_goal_distance_m', 6.0)
         self.declare_parameter('switch_scan_s', 25.0)
@@ -117,6 +128,8 @@ class WallLooking(Node):
         self.declare_parameter('path_look_offset_deg', 30.0)
         self.declare_parameter('wall_normal_offset_deg', 0.0)
         self.declare_parameter('path_heading_weight', 0.35)
+        # Wall guides orientation only; standoff_m and path_influence are inert.
+        self.declare_parameter('yaw_only', True)
         self.declare_parameter('progress_timeout_s', 30.0)
         # +1 = strafe to the robot's right while facing the wall, -1 = left.
         self.declare_parameter('direction',     1)
@@ -129,7 +142,13 @@ class WallLooking(Node):
         self.declare_parameter('command_topic', '/motion/body_command')
         self.declare_parameter('speed_factor', 1.0)
         self.declare_parameter('turn_factor', 1.0)
+        # Only sizes the selected-wall highlight; must match the mapper's grid
+        # or the marker straddles two cubes.
+        self.declare_parameter('voxel_size', 0.2)
 
+        self._voxel_size = float(self.get_parameter('voxel_size').value)
+        self._goal_radius = max(0.1, float(
+            self.get_parameter('goal_radius_m').value))
         self._standoff   = float(self.get_parameter('standoff_m').value)
         self._tan_speed  = float(self.get_parameter('tangent_speed').value)
         self._direction  = 1 if int(self.get_parameter('direction').value) >= 0 else -1
@@ -182,10 +201,15 @@ class WallLooking(Node):
         # doing, for the launcher's status panel.
         self._activity_pub = self.create_publisher(
             String, '/frontier_slam/activity', 1)
+        self._selected_wall_pub = self.create_publisher(
+            MarkerArray, WALL_MARKER_TOPIC, 1)
 
         self.create_timer(1.0 / self.CTRL_HZ, self._loop)
+        guidance = ('yaw-only (planner owns translation)'
+                    if bool(self.get_parameter('yaw_only').value)
+                    else f'standoff={self._standoff:.1f}m')
         self.get_logger().info(
-            f'wall_looking ready — standoff={self._standoff:.1f}m '
+            f'wall_looking ready — {guidance} '
             f'tangent_speed={self._tan_speed:.2f} direction={self._direction:+d} '
             f'goal_topic={goal_topic} path_topic={path_topic} '
             f'— logging to {self._log.path}'
@@ -289,6 +313,18 @@ class WallLooking(Node):
 
     # ------------------------------------------------------------------
     # Wall selection
+    def _z_band(self) -> 'tuple[float, float]':
+        """The planner's depth slice, as (z_lo, z_hi).
+
+        depth_setpoint is the cruise depth the mapper centres /projected_map
+        on, so this is the slice frontier detection and A* work on. Re-read
+        live: the launcher pushes the band to this node and the mapper together.
+        """
+        band = abs(float(self.get_parameter('projected_map_band_m').value))
+        centre = (self._depth_setpoint if self._depth_setpoint is not None
+                  else float(self._pose[2]))
+        return centre - band, centre + band
+
     def _nearest_wall(self, target_xy: np.ndarray | None = None) -> 'tuple[np.ndarray, np.ndarray, int] | None':
         """Select a usable wall, optionally preferring one aligned to a target.
 
@@ -302,10 +338,10 @@ class WallLooking(Node):
             return None
 
         pts, nrm = self._wall_pts, self._wall_nrm
-        # Wall-like only: near the robot's depth band, mostly-horizontal normal
-        # (rules out seafloor / hull-top hits whose normals point up/down).
-        mask = ((np.abs(pts[:, 2] - self._pose[2]) <= self.Z_BAND_M) &
-                (np.abs(nrm[:, 2]) <= self.NORMAL_Z_MAX))
+        # Wall-like only: a mostly-horizontal normal (rules out seafloor /
+        # hull-top hits whose normals point up/down). Hard, unlike the depth
+        # band below — a floor is not a wall at any depth.
+        mask = np.abs(nrm[:, 2]) <= self.NORMAL_Z_MAX
         if not np.any(mask):
             return None
 
@@ -319,6 +355,14 @@ class WallLooking(Node):
                               pts[:, 1] - self._switch_exclude_xy[1]) > exclusion
         if not np.any(valid):
             return None
+
+        # Prefer the planner's own depth slice — the only geometry that can
+        # block a route or reach the hull — but a bare slice is a gap in the
+        # scan, not an absence of wall, so fall back to the whole of it.
+        z_lo, z_hi = self._z_band()
+        in_band = valid & (pts[:, 2] >= z_lo) & (pts[:, 2] <= z_hi)
+        if np.any(in_band):
+            valid = in_band
 
         candidates = np.flatnonzero(valid)
         if target_xy is None or self._switch_exclude_xy is None:
@@ -353,6 +397,23 @@ class WallLooking(Node):
             n_xy = -n_xy
 
         return pts[i], n_xy, len(candidates)
+
+    def _select_wall(self, target_xy: np.ndarray | None = None):
+        """_nearest_wall, plus the RViz marker for whatever it chose.
+
+        Wrapped rather than published inside the selection so that stays a pure
+        function of the cloud, and so every branch of the loop that asks for a
+        wall redraws the marker — including the ones that get None back.
+        """
+        wall = self._nearest_wall(target_xy)
+        self._publish_selected_wall(wall)
+        return wall
+
+    def _publish_selected_wall(self, wall) -> None:
+        """Mark the surface sample the heading is being taken from."""
+        self._selected_wall_pub.publish(selected_wall_markers(
+            self._pose, None if wall is None else wall[0], self._voxel_size,
+            self.get_clock().now().to_msg()))
 
     def _search_yaw(self, target_xy: np.ndarray | None) -> float:
         """Turn toward the requested route while scanning for another wall."""
@@ -430,7 +491,7 @@ class WallLooking(Node):
             self._search_turned_rad = 0.0
 
         if target_xy is None:
-            wall = self._nearest_wall()
+            wall = self._select_wall()
             yaw = 0.0 if wall is not None else self.SCAN_YAW
             self._send_thrust(0.0, yaw, heave, 0.0)
             if write_csv:
@@ -440,13 +501,13 @@ class WallLooking(Node):
 
         goal_dist = float(np.hypot(self._goal[0] - self._pose[0],
                                    self._goal[1] - self._pose[1]))
-        if goal_dist < self.GOAL_RADIUS:
+        if goal_dist < self._goal_radius:
             self._send_thrust(0.0, 0.0, heave, 0.0)
             if write_csv:
                 self._write_csv(0.0, 0.0, 0.0, heave, 'GOAL_REACHED')
             return
 
-        wall = self._nearest_wall(target_xy)
+        wall = self._select_wall(target_xy)
 
         if wall is None:
             # Rotate to acquire structure. The planner only receives BLOCKED
@@ -503,21 +564,13 @@ class WallLooking(Node):
         # Perpendicular distance to the wall plane through the nearest sample.
         d = float(np.dot(self._pose[:2] - wp[:2], n))
         standoff = float(self.get_parameter('standoff_m').value)
+        yaw_only = bool(self.get_parameter('yaw_only').value)
 
-        # Start from wall-tangent travel, then blend in the planner direction.
-        # This lets the vehicle round low-resolution tips instead of treating
-        # every smoothed normal as a perfectly flat, infinite wall.
-        tangent = np.array([n[1], -n[0]])
         target_delta = target_xy - self._pose[:2]
-        tangent_dot = float(np.dot(tangent, target_delta))
-        tangent_sign = (1.0 if tangent_dot > 1e-6 else
-                        -1.0 if tangent_dot < -1e-6 else float(self._direction))
-        wall_travel = tangent_sign * tangent
         path_travel = _unit_xy(target_delta)
-        path_influence = float(np.clip(self.get_parameter('path_influence').value, 0.0, 1.0))
-        travel = _unit_xy((1.0 - path_influence) * wall_travel + path_influence * path_travel)
-        if not np.any(travel):
-            travel = wall_travel
+        travel = _travel_direction(
+            n, target_delta, self._direction, yaw_only,
+            float(np.clip(self.get_parameter('path_influence').value, 0.0, 1.0)))
 
         # Orientation has two independently tunable candidates:
         #   path-look: start on the raw planner bearing, turn toward the wall;
@@ -538,10 +591,11 @@ class WallLooking(Node):
         hdg_err = wrap_angle(yaw_des - self._yaw)
         yaw_cmd = float(np.clip(self.KP_YAW * hdg_err, -1.0, 1.0))
 
-        # Standoff correction is perpendicular to the selected wall; route
-        # travel remains planner-influenced instead of a constant wall orbit.
-        v_des = (self.KP_STANDOFF * (d - standoff) * -n
-                 + self._tan_speed * travel)
+        # Standoff correction is perpendicular to the selected wall; under
+        # yaw_only there is none, and the planner bearing is the whole demand.
+        v_des = self._tan_speed * travel
+        if not yaw_only:
+            v_des = v_des + self.KP_STANDOFF * (d - standoff) * -n
 
         fwd  = np.array([math.cos(self._yaw), math.sin(self._yaw)])
         stbd = np.array([-math.sin(self._yaw), math.cos(self._yaw)])
@@ -558,9 +612,10 @@ class WallLooking(Node):
 
         self._send_thrust(surge, yaw_cmd, heave, sway)
 
+        d_label = 'yaw-only' if yaw_only else f'target {standoff:.1f}'
         self.get_logger().info(
             f'pos=({self._pose[0]:.1f},{self._pose[1]:.1f},{self._pose[2]:.1f}) '
-            f'wall=({wp[0]:.1f},{wp[1]:.1f})  d={d:.2f}m (target {standoff:.1f}) '
+            f'wall=({wp[0]:.1f},{wp[1]:.1f})  d={d:.2f}m ({d_label}) '
             f'path_wp=({target_xy[0]:.1f},{target_xy[1]:.1f}) {self._wp_idx}/{len(self._path)} '
             f'hdg_err={math.degrees(hdg_err):+.0f}° path_w={path_heading_weight:.2f}  '
             f'surge={surge:+.2f}  sway={sway:+.2f}  yaw={yaw_cmd:+.3f}  '
@@ -630,6 +685,30 @@ class WallLooking(Node):
 def _unit_xy(v: np.ndarray) -> np.ndarray:
     norm = float(np.hypot(v[0], v[1]))
     return v / norm if norm > 1e-9 else np.zeros(2)
+
+
+def _travel_direction(n: np.ndarray, target_delta: np.ndarray, direction: int,
+                      yaw_only: bool, path_influence: float) -> np.ndarray:
+    """Unit travel direction for one tick, given the wall normal and route.
+
+    Under `yaw_only` the wall contributes nothing to translation and this is
+    the planner bearing. Otherwise it starts from wall-tangent travel and
+    blends the planner direction in, so the vehicle rounds low-resolution tips
+    instead of treating every smoothed normal as a perfectly flat, infinite
+    wall — at the cost of a tangent sign that chatters when the route runs
+    perpendicular to the wall, which stalls the vehicle in place.
+    """
+    path_travel = _unit_xy(target_delta)
+    if yaw_only:
+        return path_travel
+    tangent = np.array([n[1], -n[0]])
+    tangent_dot = float(np.dot(tangent, target_delta))
+    tangent_sign = (1.0 if tangent_dot > 1e-6 else
+                    -1.0 if tangent_dot < -1e-6 else float(direction))
+    wall_travel = tangent_sign * tangent
+    travel = _unit_xy((1.0 - path_influence) * wall_travel
+                      + path_influence * path_travel)
+    return travel if np.any(travel) else wall_travel
 
 
 def _blended_heading(wall_heading: float, path_heading: float,

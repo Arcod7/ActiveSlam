@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evaluation viewer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="group">
+    <label for="run-select">Run</label>
+    <select id="run-select"></select>
+    <span id="run-badge" class="badge hidden">running</span>
+  </div>
+
+  <div class="group">
+    <label for="seed-select">Seed</label>
+    <button id="seed-prev" class="btn" title="Previous seed (Left arrow)">&larr;</button>
+    <select id="seed-select"></select>
+    <button id="seed-next" class="btn" title="Next seed (Right arrow)">&rarr;</button>
+    <span id="seed-status" class="chip"></span>
+    <span id="cache-state" class="cache-state"></span>
+  </div>
+
+  <div class="group">
+    <label class="check"><input type="checkbox" id="compare-toggle"> Compare</label>
+    <button id="pin-btn" class="btn hidden" title="Copy the current seed into the pinned pane">Pin left</button>
+    <label class="check hidden" id="overlay-wrap"><input type="checkbox" id="overlay-toggle"> Overlay pinned</label>
+  </div>
+
+  <div class="group replay">
+    <label for="replay-rate">Replay</label>
+    <select id="replay-rate">
+      <option value="1">1&times;</option>
+      <option value="2">2&times;</option>
+      <option value="5" selected>5&times;</option>
+      <option value="10">10&times;</option>
+    </select>
+    <label class="check"><input type="checkbox" id="replay-loop"> Loop</label>
+    <button id="replay-start" class="btn primary">Replay in RViz</button>
+    <button id="replay-stop" class="btn" disabled>Stop</button>
+    <span id="replay-state" class="chip"></span>
+  </div>
+
+  <div class="group right">
+    <button id="theme-btn" class="btn" title="Toggle light and dark">Dark</button>
+  </div>
+</header>
+
+<main id="panes" class="panes">
+  <section class="pane hidden" id="pane-A">
+    <h2 class="pane-title"><span class="pin-mark">pinned</span> <span class="pane-label"></span></h2>
+    <div class="tiles"></div>
+    <div class="charts"></div>
+    <div class="args"></div>
+  </section>
+  <section class="pane" id="pane-B">
+    <h2 class="pane-title"><span class="pane-label"></span></h2>
+    <div class="tiles"></div>
+    <div class="charts"></div>
+    <div class="args"></div>
+  </section>
+</main>
+
+<p id="status-line" class="status-line"></p>
+
+<script src="/plotly.min.js" onerror="
+  var s=document.createElement('script');
+  s.src='https://cdn.plot.ly/plotly-2.35.2.min.js';
+  document.head.appendChild(s);"></script>
+<script src="/static/app.js" defer></script>
+</body>
+</html>

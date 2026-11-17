@@ -33,6 +33,7 @@ setup(
             'motion_safety_gate = frontier_slam.safety_gate:main',
             'heavy_sim_mixer    = frontier_slam.heavy_sim_mixer:main',
             'ardusub_adapter    = frontier_slam.ardusub_adapter:main',
+            'mavlink_odometry   = frontier_slam.mavlink_odometry:main',
             'revisit_planner     = frontier_slam.revisit_planner:main',
             'drift_return_scenario = frontier_slam.drift_return_scenario:main',
             'trajectory_mission = frontier_slam.trajectory_mission:main',

@@ -451,10 +451,19 @@ stonefish_prefix() {
     return 1
 }
 
+# Fingerprint of the sources an install was built from. Paths are relative so
+# two checkouts of the same commit agree.
+stonefish_source_id() {
+    ( cd "$1/Library" 2>/dev/null || exit 0
+      find . -type f \( -name '*.h' -o -name '*.cpp' \) -print0 \
+        | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1 )
+}
+
 # Methods stonefish_ros2 calls that exist only in the patched fork. An older
 # Stonefish satisfies find_package(Stonefish) just as well, so testing only
 # that something is installed lets a stale one through — and it surfaces as a
 # compile error deep in the bridge rather than here.
+# This only sees API changes; stonefish_source_id catches the rest.
 stonefish_missing_api() {
     for pair in "sensors/vision/Camera.h:getLastCaptureTime" \
                 "sensors/vision/DepthCamera.h:getVerticalFOV" \
@@ -466,19 +475,32 @@ stonefish_missing_api() {
 
 STONEFISH_PREFIX="$(stonefish_prefix || true)"
 STONEFISH_MISSING_API=""
+STONEFISH_STALE_SOURCE=false
+STONEFISH_WANT_ID="$(stonefish_source_id "$STONEFISH_DIR")"
 if [ -n "$STONEFISH_PREFIX" ]; then
     STONEFISH_MISSING_API="$(stonefish_missing_api "$STONEFISH_PREFIX" \
         | paste -sd' ' -)"
+    # No id on an install this script did not make: leave that to the API probe.
+    STONEFISH_HAVE_ID="$(cat "$STONEFISH_PREFIX/share/Stonefish/.source-id" \
+        2>/dev/null || true)"
+    [ -z "$STONEFISH_WANT_ID" ] || [ -z "$STONEFISH_HAVE_ID" ] \
+        || [ "$STONEFISH_WANT_ID" = "$STONEFISH_HAVE_ID" ] \
+        || STONEFISH_STALE_SOURCE=true
 fi
 if [ "$SKIP_STONEFISH" = true ]; then
     echo "Skipped (--skip-stonefish)."
-elif [ -n "$STONEFISH_PREFIX" ] && [ -z "$STONEFISH_MISSING_API" ]; then
+elif [ -n "$STONEFISH_PREFIX" ] && [ -z "$STONEFISH_MISSING_API" ] \
+     && [ "$STONEFISH_STALE_SOURCE" = false ]; then
     echo "Already installed at $STONEFISH_PREFIX, skipping the build."
 else
-    if [ -n "$STONEFISH_PREFIX" ]; then
+    if [ -n "$STONEFISH_MISSING_API" ]; then
         echo "The Stonefish installed at $STONEFISH_PREFIX predates the" \
              "patched fork — it has no $STONEFISH_MISSING_API, which" \
              "stonefish_ros2 calls. Rebuilding and installing over it."
+    elif [ "$STONEFISH_STALE_SOURCE" = true ]; then
+        echo "The Stonefish installed at $STONEFISH_PREFIX was built from" \
+             "different sources than $STONEFISH_DIR — an implementation-only" \
+             "patch adds no API for the check above to see. Rebuilding."
     fi
     if [ ! -d "$STONEFISH_DIR/Library" ]; then
         echo "$STONEFISH_DIR looks empty. Run" \
@@ -497,6 +519,11 @@ else
     sudo cmake --install "$STONEFISH_DIR/build"
     # Reinstalling over an older copy leaves the linker cache pointing at it.
     sudo ldconfig
+    # Record the sources, so the next run detects a patch that changes no API.
+    STONEFISH_PREFIX="$(stonefish_prefix || echo /usr/local)"
+    sudo mkdir -p "$STONEFISH_PREFIX/share/Stonefish"
+    stonefish_source_id "$STONEFISH_DIR" \
+        | sudo tee "$STONEFISH_PREFIX/share/Stonefish/.source-id" >/dev/null
     echo "Stonefish built and installed from $STONEFISH_DIR/build."
 fi
 

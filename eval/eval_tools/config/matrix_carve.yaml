@@ -5,9 +5,9 @@
 #   python3 eval/eval_tools/scripts/run_matrix.py eval/eval_tools/config/matrix_carve.yaml
 #
 # What to read: coverage and chamfer against the ground-truth map, plus the
-# occupied-voxel count beyond the 15 m sensor maximum — carving synthesizes a
-# pseudo-point at carve_range_m (16 m) whose endpoint writes a surface, and
-# that artefact must stay outside the mapped envelope.
+# occupied-voxel count beyond the 15 m sensor maximum — carve-only rays must
+# leave nothing occupied out there (Phase 61; the Phase 29 numbers measured the
+# pseudo-point mechanism this replaced and do not transfer).
 batch_name: carve
 duration_s: 300
 settle_s: 15

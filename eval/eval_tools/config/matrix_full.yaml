@@ -40,11 +40,14 @@ runs:
 
   # Noise-profile sweep: ideal (near-perfect sensors) and degraded (turbid
   # water / magnetic interference / bad bottom-lock) bracket the baseline's
-  # realistic profile.
+  # realistic profile. The degraded arm runs degraded_no_reverb: every turbid
+  # -water error term at full strength, minus the volume reverberation that
+  # sprays ~2100 phantom returns per ping inside 2.6 m and would show up as map
+  # error the SLAM front end never caused.
   - name: noise_ideal
     args: {noise_profile: ideal}
   - name: noise_degraded
-    args: {noise_profile: degraded}
+    args: {noise_profile: degraded_no_reverb}
 
   # Uncertainty-triggered revisit planner (the Week 3 active-SLAM
   # contribution) vs. passive frontier-only exploration.

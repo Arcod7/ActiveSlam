@@ -1,0 +1,38 @@
+batch_name: coherent_noise_ab_default
+duration_s: 300
+settle_s: 15
+seeds:
+- 401
+- 402
+- 403
+record_bag: false
+common_args:
+  # Motion gate is fail-closed; headless runs never arm it otherwise.
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  rviz: 'false'
+  noise_profile_dvl: degraded
+  noise_profile_imu: realistic
+  noise_profile_compass: realistic
+  noise_profile_pressure: realistic
+  noise_profile: realistic
+  mapper: octomap
+  # Scene, object (mesh/position/scale/orientation), robot position and
+  # motion are all deliberately left unset -- current demo.launch.py
+  # defaults (waterlinked/pipe, obj_scale as last tuned), not the
+  # shipwreck/walloriented setup from coherent_noise_ab_20260730_1126.
+  #
+  # Isolate the calibration question: plain loop-closure SLAM, no revisit
+  # trigger or map-rebuild dynamics competing with what odom_coherent_noise
+  # changes (see odom_noise.py / Progress.md sigma_xy calibration entry).
+  loop_closure: 'true'
+  revisit: 'false'
+  map_rebuild: 'false'
+runs:
+- name: default
+  args:
+    odom_coherent_noise: 'false'
+- name: coherent
+  args:
+    odom_coherent_noise: 'true'

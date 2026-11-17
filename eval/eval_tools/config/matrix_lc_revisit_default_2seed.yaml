@@ -1,0 +1,37 @@
+batch_name: lc_revisit_default_2seed
+duration_s: 300
+settle_s: 15
+seeds:
+- 501
+- 502
+record_bag: false
+common_args:
+  # Motion gate is fail-closed; headless runs never arm it otherwise.
+  safety_start_enabled: 'true'
+  slam: slam
+  mode: frontier
+  rviz: 'false'
+  noise_profile_dvl: degraded
+  noise_profile_imu: realistic
+  noise_profile_compass: realistic
+  noise_profile_pressure: realistic
+  noise_profile: realistic
+  mapper: octomap
+  # Scene, object, robot position and motion left unset -- current
+  # demo.launch.py defaults (waterlinked/pipe), same as
+  # coherent_noise_ab_default_20260730_1838.
+  # odom_coherent_noise left unset (default off): sigma_allow_xy_m et al.
+  # are tuned for the old accounting, not yet retuned for the coherent one.
+runs:
+- name: no_lc
+  args:
+    loop_closure: 'false'
+    revisit: 'false'
+- name: lc
+  args:
+    loop_closure: 'true'
+    revisit: 'false'
+- name: lc_revisit
+  args:
+    loop_closure: 'true'
+    revisit: 'true'

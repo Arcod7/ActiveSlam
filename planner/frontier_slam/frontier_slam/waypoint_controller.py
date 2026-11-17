@@ -39,6 +39,7 @@ from std_msgs.msg import String
 
 from frontier_slam.control_utils import (
     depth_hold_effort, LowPassRate, SlewLimiter, wrap_angle, yaw_from_quat)
+from frontier_slam.mission_params import GOAL_RADIUS_M
 from frontier_slam.scan_sweep import SweepScan, scan_yaw_command
 from frontier_slam.session_log import open_session_log
 
@@ -72,7 +73,6 @@ class WaypointController(Node):
     ODOM_STALE_S          = 1.0    # s — past this the pose is too old to steer on
 
     MAX_SURGE             = 0.25
-    GOAL_RADIUS           = 2.0    # m
     GOAL_REACHED_TIMEOUT  = 10.0   # s — clear stale goal after this long at goal
     SCAN_YAW              = 0.026  # rad/s cmd — slow, for sonar frame overlap at 5 Hz
     INIT_SCAN_DURATION    = 10.0    # s — initial spin before navigating (~1 rotation)
@@ -96,6 +96,10 @@ class WaypointController(Node):
     def __init__(self):
         super().__init__('waypoint_controller')
 
+        self.declare_parameter('goal_radius_m', GOAL_RADIUS_M)
+        self._goal_radius = max(0.1, float(
+            self.get_parameter('goal_radius_m').value))
+
         self.declare_parameter('depth_setpoint', -1.0)
         v = float(self.get_parameter('depth_setpoint').value)
         self._depth_setpoint: float | None = None if v < 0 else v
@@ -117,8 +121,19 @@ class WaypointController(Node):
         self.declare_parameter('scan_style', 'sweep')
         self.declare_parameter('scan_sweep_deg', 180.0)
         self._scan_style = str(self.get_parameter('scan_style').value)
-        scan_sweep_deg = float(self.get_parameter('scan_sweep_deg').value)
-        self._sweep = SweepScan(scan_sweep_deg, self.SCAN_YAW_RATE_RAD_S)
+        self._scan_sweep_deg = float(self.get_parameter('scan_sweep_deg').value)
+        # Scanning is slowed while revisiting: the point of a revisit is to
+        # re-observe known structure well enough to close a loop, and a slower
+        # sweep puts more sonar frames on the same geometry. Defaults to 1.0
+        # (off) -- untested in a full run as of 2026-07-27, so it has to be
+        # asked for rather than inherited.
+        self.declare_parameter('revisit_scan_slowdown', 1.0)
+        self._revisit_scan_slowdown = max(
+            1.0, float(self.get_parameter('revisit_scan_slowdown').value))
+        self._scan_slowdown = 1.0
+        self._sweep = SweepScan(self._scan_sweep_deg, self.SCAN_YAW_RATE_RAD_S)
+        self.create_subscription(String, '/frontier_slam/revisit_state',
+                                 self._revisit_state_cb, 10)
 
         self._goal: np.ndarray | None = None
         self._pose: np.ndarray | None = None
@@ -157,6 +172,28 @@ class WaypointController(Node):
             f'— logging to {self._log.path}')
 
     # ------------------------------------------------------------------
+    def _scan_yaw(self) -> float:
+        """Commanded scan yaw rate, slowed while a revisit is in progress."""
+        return self.SCAN_YAW / self._scan_slowdown
+
+    def _revisit_state_cb(self, msg: String) -> None:
+        """Rebuild the sweep when the scan speed changes.
+
+        SweepScan sizes its own timeout from the achieved yaw rate, so slowing
+        the command without telling it would trip the timeout part-way through
+        every revisit sweep. The sweep is reset rather than scaled in place --
+        the transition only happens at the start and end of a revisit, where a
+        part-finished sweep is being abandoned anyway."""
+        slowdown = (self._revisit_scan_slowdown if msg.data == 'revisiting'
+                    else 1.0)
+        if slowdown == self._scan_slowdown:
+            return
+        self._scan_slowdown = slowdown
+        self._sweep = SweepScan(self._scan_sweep_deg,
+                                self.SCAN_YAW_RATE_RAD_S / slowdown)
+        self.get_logger().info(
+            f'Scan speed {"slowed x%.1f for revisit" % slowdown if slowdown > 1.0 else "back to normal"}')
+
     # ROS callbacks
     def _depth_cb(self, msg: Image) -> None:
         data = np.frombuffer(bytes(msg.data), dtype=np.float32).reshape(msg.height, msg.width)
@@ -274,13 +311,13 @@ class WaypointController(Node):
         if self._init_scan_end is not None:
             if self._scan_style == 'spin':
                 if now < self._init_scan_end:
-                    self._send_thrust(0.0, self.SCAN_YAW, heave)
+                    self._send_thrust(0.0, self._scan_yaw(), heave)
                     if write_csv:
-                        self._write_csv(0.0, self.SCAN_YAW, heave, 'INIT_SCAN')
+                        self._write_csv(0.0, self._scan_yaw(), heave, 'INIT_SCAN')
                     return
             elif self._sweep.active:
                 yaw_cmd = scan_yaw_command(self._sweep, self._scan_style, self._yaw, now,
-                                           self.SCAN_YAW, repeat=False)
+                                           self._scan_yaw(), repeat=False)
                 self._send_thrust(0.0, yaw_cmd, heave)
                 if write_csv:
                     self._write_csv(0.0, yaw_cmd, heave, 'INIT_SCAN')
@@ -288,7 +325,7 @@ class WaypointController(Node):
 
         if self._goal is None:
             yaw_cmd = scan_yaw_command(self._sweep, self._scan_style, self._yaw, now,
-                                       self.SCAN_YAW, repeat=True)
+                                       self._scan_yaw(), repeat=True)
             self._send_thrust(0.0, yaw_cmd, heave)
             if write_csv:
                 self._write_csv(0.0, yaw_cmd, heave, 'SCAN')
@@ -297,7 +334,7 @@ class WaypointController(Node):
         dist_xy = float(np.hypot(self._goal[0] - self._pose[0],
                                  self._goal[1] - self._pose[1]))
 
-        if dist_xy < self.GOAL_RADIUS:
+        if dist_xy < self._goal_radius:
             if self._goal_reached_at is None:
                 self._goal_reached_at = now
             elif now - self._goal_reached_at > self.GOAL_REACHED_TIMEOUT:
@@ -308,7 +345,7 @@ class WaypointController(Node):
                 self._goal = None
                 self._goal_reached_at = None
             yaw_cmd = scan_yaw_command(self._sweep, self._scan_style, self._yaw, now,
-                                       self.SCAN_YAW, repeat=True)
+                                       self._scan_yaw(), repeat=True)
             self._send_thrust(0.0, yaw_cmd, heave)
             self.get_logger().info('Goal reached — scanning', throttle_duration_sec=2.0)
             if write_csv:

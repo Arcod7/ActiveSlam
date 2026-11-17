@@ -1,4 +1,6 @@
 from dataclasses import dataclass, field
+import os
+
 import yaml
 
 @dataclass
@@ -13,6 +15,10 @@ class IMUNoise:
     sigma_pitch_rad: float = 0.01
     sigma_yaw_rad: float = 0.05
     gyro_bias_drift_rad_s: float = 0.0
+    # White noise on the rate channel. Separate from gyro_bias_drift_rad_s,
+    # which is a random walk on the integrated angle: a gyro measures rate
+    # directly, so its rate output is not the derivative of its noisy angle.
+    sigma_gyro_rad_s: float = 0.0
     publish_rate_hz: float = 50.0
 
 
@@ -92,6 +98,29 @@ def load_noise_profile(yaml_path: str) -> NoiseProfile:
     if 'sonar' in data:
         profile.sonar = SonarNoise(**data['sonar'])
     return profile
+
+def load_composite_profile(default_path: str,
+                           per_sensor_paths: "dict[str, str]") -> NoiseProfile:
+    """Profile whose sections may come from different files.
+
+    The sensor sims each accept a per-sensor profile override; consumers of the
+    same numbers (dead_reckoning, pose_graph) must see the identical mix, or
+    their noise models describe a different simulation than the one running.
+    `per_sensor_paths` maps a section name ('dvl', ...) to a YAML path; empty
+    paths and paths equal to the default are no-ops.
+    """
+    if default_path and os.path.exists(default_path):
+        profile = load_noise_profile(default_path)
+    else:
+        profile = NoiseProfile()
+    for section, path in per_sensor_paths.items():
+        if not path or path == default_path or not os.path.exists(path):
+            continue
+        override = load_noise_profile(path)
+        setattr(profile, section, getattr(override, section))
+        profile.name = f'{profile.name}+{section}:{override.name}'
+    return profile
+
 
 def resolve_seed(profile_seed: int, override: int, offset: int) -> int:
     """Combine the profile's baked-in seed with a per-run override, then add

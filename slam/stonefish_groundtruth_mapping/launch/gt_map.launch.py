@@ -67,6 +67,19 @@ def generate_launch_description():
         'voxel_min_solid_confidence', default_value='0.80',
         description='TSDF solid-confidence floor for a wall; mirrors the belief map',
     )
+    trunc_distance_arg = DeclareLaunchArgument(
+        'trunc_distance', default_value='0.0',
+        description='TSDF truncation band in metres (0 = 3x voxel_size); mirrors '
+        'the belief map, or the map metrics stop comparing like with like',
+    )
+    space_carving_arg = DeclareLaunchArgument(
+        'space_carving', default_value='true',
+        description='TSDF ray carving; mirrors the belief map',
+    )
+    directional_tsdf_arg = DeclareLaunchArgument(
+        'directional_tsdf', default_value='false',
+        description='TSDF direction binning (WIP); mirrors the belief map',
+    )
 
     odom_to_tf_gt = Node(
         package='stonefish_groundtruth_mapping',
@@ -132,8 +145,11 @@ def generate_launch_description():
             'voxel_size': ParameterValue(
                 LaunchConfiguration('voxel_size'), value_type=float),
             'trunc_distance': ParameterValue(
-                PythonExpression(['3.0 * ', LaunchConfiguration('voxel_size')]),
-                value_type=float),
+                LaunchConfiguration('trunc_distance'), value_type=float),
+            'space_carving': ParameterValue(
+                LaunchConfiguration('space_carving'), value_type=bool),
+            'directional_tsdf': ParameterValue(
+                LaunchConfiguration('directional_tsdf'), value_type=bool),
             'voxel_min_weight': ParameterValue(
                 LaunchConfiguration('voxel_min_weight'), value_type=float),
             'voxel_min_solid_confidence': ParameterValue(
@@ -153,6 +169,7 @@ def generate_launch_description():
     return LaunchDescription([
         mapper_arg, gt_cloud_source_arg, voxel_size_arg,
         voxel_min_weight_arg, voxel_min_solid_confidence_arg,
+        trunc_distance_arg, space_carving_arg, directional_tsdf_arg,
         odom_to_tf_gt, static_camera_tf_gt, cloud_relabel_gt,
         octomap_gt, tsdf_gt,
     ])

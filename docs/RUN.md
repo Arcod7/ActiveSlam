@@ -17,9 +17,17 @@ source <workspace>/install/setup.zsh
 python3 launcher.py
 ```
 
-Opens a workspace menu (**Launch · Update · Rebuild · Infos · Exit**), where
-*Infos* summarises the technologies the project is built on. *Launch* opens a
-control screen that:
+Opens a workspace menu
+(**Launch · Evaluation · Update · Rebuild · Infos · Exit**), where
+*Infos* summarises the technologies the project is built on. *Evaluation*
+lists the matrices in `eval/eval_tools/config`, previews their run count and
+estimated duration, and runs the selected matrix with live batch/run progress,
+CSV row counts, ATE, absolute error, map coverage, validity counts, and recent
+runner output. An evaluation continues when returning to the main menu; reopen
+the panel to monitor or stop it. Launch, Update, and Rebuild are held while it
+is active so a second ROS stack cannot contaminate its data.
+
+*Launch* opens a control screen that:
 
 - **changes options while the stack runs.** The stack is split into
   independently restartable layers, so switching the mapper, the mode or the

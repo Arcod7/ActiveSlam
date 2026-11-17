@@ -1,0 +1,11 @@
+<library path="view_follow_rviz">
+  <class
+    name="view_follow_rviz/ViewFollowPanel"
+    type="view_follow_rviz::ViewFollowPanel"
+    base_class_type="rviz_common::Panel">
+    <description>
+      Toggles the camera between the fixed frame and the ground-truth vehicle
+      frame (bluerov2/base_link_gt), so the view can follow the robot.
+    </description>
+  </class>
+</library>
